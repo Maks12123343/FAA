@@ -22,6 +22,7 @@ def _get_channel_videos(channel_url: str, max_videos: int = 15) -> list:
     cmd = [
         "yt-dlp", "--no-warnings", "--quiet",
         "--remote-components", "ejs:github",
+        "--js-runtimes", "node",
         "--flat-playlist", "--playlist-end", str(max_videos),
         "--extractor-args", "youtubetab:approximate_date",
         "--print", "%(id)s\t%(title)s\t%(view_count)s\t%(upload_date)s\t%(duration)s",

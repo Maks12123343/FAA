@@ -195,6 +195,7 @@ def download_and_cut(video_url: str, pool_dir: str) -> list:
     dl_cmd = [
         "yt-dlp",
         "--remote-components", "ejs:github",
+        "--js-runtimes", "node",
         "-f", "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
         "--no-audio", "--no-playlist",
         "-o", src_path,

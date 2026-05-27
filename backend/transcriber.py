@@ -28,6 +28,7 @@ def _get_subtitles(url: str, tmp_dir: str) -> str | None:
     cmd = [
         "yt-dlp", "--no-warnings", "--quiet",
         "--remote-components", "ejs:github",
+        "--js-runtimes", "node",
         "--write-auto-subs", "--write-subs",
         "--sub-langs", "en,en-US,en-GB",
         "--sub-format", "json3",
@@ -66,6 +67,7 @@ def _whisper_transcribe(url: str, tmp_dir: str) -> str:
     dl_cmd = [
         "yt-dlp", "--no-warnings", "--quiet",
         "--remote-components", "ejs:github",
+        "--js-runtimes", "node",
         "-f", "bestaudio[ext=m4a]/bestaudio",
         "--extract-audio", "--audio-format", "mp3",
         "-o", audio_path,
