@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Generate Video</h1>
+
+<!-- Phase 1 -->
+<div class="card" id="phase1Card">
+  <h2>Step 1 — Prepare</h2>
+  <div class="field">
+    <label>Niche</label>
+    <select id="niche">
+      {% for n in niches %}
+      <option value="{{ n.id }}">{{ n.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button class="btn btn-primary" id="prepareBtn" onclick="startPrepare()">Find Top Video & Transcribe</button>
+</div>
+
+<!-- Progress log -->
+<div class="card" id="progressCard" style="display:none">
+  <div class="progress-log" id="progressLog"></div>
+</div>
+
+<!-- Phase 2 (shown after prepare) -->
+<div id="phase2Card" style="display:none">
+
+  <div class="card">
+    <h2>Source Video</h2>
+    <div id="sourceInfo" style="margin-bottom:12px"></div>
+    <h3 style="margin:16px 0 8px;font-size:14px;color:#aaa">Transcript preview</h3>
+    <div id="transcriptPreview" style="background:#111;border-radius:6px;padding:12px;font-size:13px;color:#ccc;max-height:160px;overflow-y:auto;white-space:pre-wrap"></div>
+  </div>
+
+  <div class="card">
+    <h2>Step 2 — Add Source Videos for Clips</h2>
+    <p style="color:#aaa;font-size:13px;margin-bottom:12px">
+      Paste YouTube URLs (one per line). System will cut clips from these videos.
+      Mix: these clips + Envato stocks (auto).
+    </p>
+    <textarea id="ytUrls" rows="10" placeholder="https://www.youtube.com/watch?v=...&#10;https://www.youtube.com/watch?v=...&#10;..." style="width:100%;background:#111;border:1px solid #333;border-radius:6px;padding:10px;color:#fff;font-size:13px;resize:vertical"></textarea>
+  </div>
+
+  <div class="card">
+    <h2>Step 3 — Select Languages</h2>
+    <div style="display:flex;flex-wrap:wrap;gap:12px" id="langCheckboxes">
+      {% for l in languages %}
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:8px 14px;border:1px solid #333;border-radius:6px;font-size:14px">
+        <input type="checkbox" value="{{ l.code }}" style="width:16px;height:16px">
+        {{ l.name }} ({{ l.code }})
+      </label>
+      {% endfor %}
+      {% if not languages %}
+      <p style="color:#f87171">No voice profiles configured. Add voice IDs in Settings.</p>
+      {% endif %}
+    </div>
+    <button class="btn btn-success" id="produceBtn" onclick="startProduce()" style="margin-top:16px">
+      Start Production
+    </button>
+  </div>
+
+</div>
+
+<!-- Results -->
+<div id="resultsWrap"></div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+const socket = io();
+let currentPrepareId = null;
+
+function log(msg, cls='') {
+  const card = document.getElementById('progressCard');
+  card.style.display = 'block';
+  const el = document.getElementById('progressLog');
+  const line = document.createElement('div');
+  line.className = 'log-line ' + cls;
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function startPrepare() {
+  const niche = document.getElementById('niche').value;
+  if (!niche) { alert('Select a niche'); return; }
+
+  document.getElementById('prepareBtn').disabled = true;
+  document.getElementById('phase2Card').style.display = 'none';
+  document.getElementById('progressLog').innerHTML = '';
+  document.getElementById('progressCard').style.display = 'block';
+  log('Scanning channels...');
+
+  fetch('/api/prepare', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({niche})
+  }).then(r => r.json()).then(d => {
+    if (d.error) {
+      log('ERROR: ' + d.error, 'error');
+      document.getElementById('prepareBtn').disabled = false;
+    }
+  }).catch(e => {
+    log('ERROR: ' + e, 'error');
+    document.getElementById('prepareBtn').disabled = false;
+  });
+}
+
+function startProduce() {
+  const urls = document.getElementById('ytUrls').value
+    .split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
+
+  const langs = [...document.querySelectorAll('#langCheckboxes input:checked')]
+    .map(el => el.value);
+
+  if (!langs.length) { alert('Select at least one language'); return; }
+  if (!urls.length)  { alert('Add at least one YouTube URL'); return; }
+
+  document.getElementById('produceBtn').disabled = true;
+  document.getElementById('progressLog').innerHTML = '';
+  document.getElementById('progressCard').style.display = 'block';
+  log(`Starting production for ${langs.length} language(s)...`);
+
+  if (!currentPrepareId) {
+    log('ERROR: No prepare session found. Please click "Find Top Video & Transcribe" first.', 'error');
+    document.getElementById('produceBtn').disabled = false;
+    return;
+  }
+
+  fetch('/api/produce', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      prepare_id:   currentPrepareId,
+      youtube_urls: urls,
+      languages:    langs,
+    })
+  }).then(r => r.json()).then(d => {
+    if (d.error) {
+      log('ERROR: ' + d.error, 'error');
+      document.getElementById('produceBtn').disabled = false;
+    }
+  }).catch(e => {
+    log('ERROR: ' + e, 'error');
+    document.getElementById('produceBtn').disabled = false;
+  });
+}
+
+socket.on('progress', data => log(`[${data.step}] ${data.message}`));
+
+function escHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function safeUrl(u) { return /^https?:\/\//.test(u) ? u : '#'; }
+
+socket.on('prepare_done', data => {
+  currentPrepareId = data.prepare_id;
+  document.getElementById('prepareBtn').disabled = false;
+
+  const info = document.getElementById('sourceInfo');
+  info.innerHTML = '';
+  const a = document.createElement('a');
+  a.href = safeUrl(data.source_url);
+  a.target = '_blank';
+  a.style.cssText = 'color:#4f8ef7;font-weight:600;font-size:15px';
+  a.textContent = data.source_title || '';
+  const views = document.createElement('span');
+  views.style.cssText = 'color:#aaa;font-size:13px;margin-left:12px';
+  views.textContent = `${(data.source_views||0).toLocaleString()} views`;
+  info.appendChild(a);
+  info.appendChild(views);
+
+  document.getElementById('transcriptPreview').textContent = data.transcript || '';
+  document.getElementById('phase2Card').style.display = 'block';
+  log('Prepare done. Add YouTube URLs and select languages.', 'done');
+});
+
+socket.on('produce_done', data => {
+  const wrap = document.getElementById('resultsWrap');
+  const card = document.createElement('div');
+  card.className = 'card';
+  const safeId = escHtml(data.project_id || '');
+  const titlesHtml = (data.all_titles||[]).length > 1
+    ? `<div style="margin-bottom:12px">
+        <div style="color:#aaa;font-size:12px;margin-bottom:6px">All title options:</div>
+        ${data.all_titles.map((t,i) => `<div style="font-size:13px;margin:3px 0"><b>${i+1}.</b> ${escHtml(t)}</div>`).join('')}
+      </div>` : '';
+  card.innerHTML = `
+    <h2 style="color:#22c55e">&#10003; Video Ready</h2>
+    <div style="font-size:16px;font-weight:700;margin-bottom:8px">${escHtml(data.title)}</div>
+    <div style="color:#aaa;font-size:13px;margin-bottom:8px">${escHtml(data.description)}</div>
+    ${titlesHtml}
+    <a class="btn btn-success" href="/api/download/${safeId}">Download Video</a>
+  `;
+  wrap.appendChild(card);
+  log(`Done: ${escHtml(data.title)}`, 'done');
+});
+
+socket.on('all_done', () => {
+  document.getElementById('produceBtn').disabled = false;
+  log('All languages finished!', 'done');
+});
+
+socket.on('error', data => {
+  log('ERROR: ' + data.message, 'error');
+  document.getElementById('prepareBtn').disabled = false;
+  document.getElementById('produceBtn').disabled = false;
+});
+</script>
+{% endblock %}

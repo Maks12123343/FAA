@@ -1,0 +1,12 @@
+[Unit]
+Description=FAA - Delete old project folders
+After=network.target
+
+[Service]
+Type=oneshot
+User=faa
+Group=faa
+WorkingDirectory=/opt/faa
+ExecStart=/usr/bin/curl -s -X POST http://127.0.0.1:5050/api/cleanup \
+    -H "Content-Type: application/json" \
+    -d '{"days": 3}'

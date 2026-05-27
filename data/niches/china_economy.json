@@ -1,0 +1,26 @@
+{
+  "name": "China Economy",
+  "description": "Chinese economy, finance, trade, infrastructure",
+  "title_keywords": ["china", "chinese", "china's", "beijing", "shanghai"],
+  "channels": [
+    "https://www.youtube.com/@thedarkspan",
+    "https://www.youtube.com/@CivilMentors",
+    "https://www.youtube.com/@coreinsights2",
+    "https://www.youtube.com/@eagle_eye_military",
+    "https://www.youtube.com/@visualeconomiken",
+    "https://www.youtube.com/@massivetech2"
+  ],
+  "search_keywords": [
+    "China economy 2024",
+    "Chinese market",
+    "China GDP",
+    "China trade",
+    "China infrastructure"
+  ],
+  "stock_tags": [
+    "China", "Shanghai", "Beijing", "Chinese factory",
+    "cargo ship", "container port", "freight train",
+    "China finance", "yuan", "Chinese business"
+  ],
+  "clip_score_threshold": 0.85
+}

@@ -1,0 +1,25 @@
+[Unit]
+Description=FAA - Google Drive mount (rclone)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=faa
+Group=faa
+ExecStartPre=/bin/mkdir -p /mnt/gdrive
+ExecStart=/usr/bin/rclone mount gdrive: /mnt/gdrive \
+    --config /opt/faa/.config/rclone/rclone.conf \
+    --vfs-cache-mode full \
+    --vfs-cache-max-size 10G \
+    --vfs-read-ahead 128M \
+    --allow-other \
+    --dir-cache-time 1h \
+    --poll-interval 15s \
+    --log-level INFO
+ExecStop=/bin/fusermount -uz /mnt/gdrive
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

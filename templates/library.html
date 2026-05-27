@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Clip Library</h1>
+
+<div class="card">
+  <h2>Add Video to Library</h2>
+  <div class="grid-2">
+    <div class="field"><label>Niche</label>
+      <select id="libNiche">
+        {% for n in niches %}
+        <option value="{{ n.id }}">{{ n.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field"><label>YouTube URL</label>
+      <input type="text" id="libUrl" placeholder="https://youtube.com/watch?v=..."></div>
+  </div>
+  <button class="btn btn-primary" onclick="addToLibrary()">Download & Validate</button>
+</div>
+
+<div class="card">
+  <h2>Stock Footage Library</h2>
+  <p style="color:#aaa;font-size:13px;margin-bottom:16px">
+    Drop Envato video files into <code>stocks/{category}/</code> folders, then click Analyze to let Gemini describe each clip.
+    Categories: construction, ships_ports, energy, cities, technology, infrastructure, general.
+  </p>
+  <button class="btn btn-success" onclick="analyzeStocks()">Analyze New Stock Clips</button>
+  <div id="stockStatsWrap" style="margin-top:16px"></div>
+</div>
+
+<div class="card" id="libProgressCard" style="display:none">
+  <div class="progress-log" id="libLog"></div>
+</div>
+
+<div class="card">
+  <h2>Library Stats</h2>
+  <table style="width:100%;border-collapse:collapse">
+    <thead>
+      <tr style="border-bottom:1px solid #333">
+        <th style="text-align:left;padding:10px 0;color:#aaa">Niche</th>
+        <th style="text-align:center;padding:10px 0;color:#aaa">Raw</th>
+        <th style="text-align:center;padding:10px 0;color:#aaa">Validated</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for n in niches %}
+      {% set s = stats.get(n.id, {}) %}
+      <tr style="border-bottom:1px solid #1e1e1e" id="row_{{ n.id }}">
+        <td style="padding:12px 0">{{ n.name }}</td>
+        <td style="text-align:center">{{ s.get('raw', 0) }}</td>
+        <td style="text-align:center">
+          <span class="badge badge-green">{{ s.get('validated', 0) }}</span>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const socket = io();
+
+function log(msg, cls='') {
+  const card = document.getElementById('libProgressCard');
+  card.style.display = 'block';
+  const el = document.getElementById('libLog');
+  const line = document.createElement('div');
+  line.className = 'log-line ' + cls;
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function addToLibrary() {
+  const niche = document.getElementById('libNiche').value;
+  const url   = document.getElementById('libUrl').value.trim();
+  if (!url) { alert('Enter YouTube URL'); return; }
+
+  document.getElementById('libLog').innerHTML = '';
+  log('Starting download & validation...');
+
+  fetch('/api/library/add', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({niche, url})
+  });
+}
+
+function analyzeStocks() {
+  document.getElementById('libLog').innerHTML = '';
+  log('Scanning stocks/ folder and analyzing new clips...');
+  fetch('/api/stocks/analyze', {method: 'POST'});
+  loadStockStats();
+}
+
+function loadStockStats() {
+  fetch('/api/stocks/stats').then(r => r.json()).then(data => {
+    const wrap = document.getElementById('stockStatsWrap');
+    if (!wrap) return;
+    const cats = Object.keys(data).filter(k => k !== '_total');
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead>'
+      + '<tr style="border-bottom:1px solid #333">'
+      + '<th style="text-align:left;padding:6px 0;color:#aaa">Category</th>'
+      + '<th style="text-align:center;color:#aaa">Total</th>'
+      + '<th style="text-align:center;color:#aaa">Analyzed</th>'
+      + '</tr></thead><tbody>';
+    for (const cat of cats) {
+      const s = data[cat];
+      html += `<tr style="border-bottom:1px solid #1e1e1e">
+        <td style="padding:8px 0">${cat}</td>
+        <td style="text-align:center">${s.total}</td>
+        <td style="text-align:center"><span class="badge badge-green">${s.analyzed}</span></td>
+      </tr>`;
+    }
+    html += `</tbody></table><p style="color:#aaa;font-size:12px;margin-top:8px">Total: ${data._total || 0} videos</p>`;
+    wrap.innerHTML = html;
+  });
+}
+
+socket.on('library_progress', data => log(data.message));
+socket.on('library_done', data => {
+  const msg = data.message || `Done! Passed: ${data.passed || 0}`;
+  log(msg, 'done');
+  loadStockStats();
+  // also refresh niche stats if available
+  const nicheEl = document.getElementById('libNiche');
+  if (nicheEl) {
+    const niche = nicheEl.value;
+    fetch('/api/library/stats?niche=' + niche).then(r => r.json()).then(s => {
+      const row = document.getElementById('row_' + niche);
+      if (row) {
+        row.cells[1].textContent = s.raw;
+        row.cells[2].innerHTML   = `<span class="badge badge-green">${s.validated}</span>`;
+      }
+    });
+  }
+});
+
+// Load stock stats on page load
+loadStockStats();
+</script>
+{% endblock %}

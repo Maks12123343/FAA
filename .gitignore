@@ -1,0 +1,36 @@
+# Settings (містить API ключі)
+data/settings.json
+
+# Проєкти (великі відео файли)
+projects/
+
+# Кеш Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Відео файли
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Аудіо файли
+*.mp3
+*.wav
+
+# Тимчасові файли аналізу
+*.analysis.json
+*.stockval_*.json
+*.val_*.json
+
+# Cookies
+cookies.txt
+
+# Логи
+*.log
+flask_debug.log
+
+# Google credentials (на всяк випадок)
+*.json.tmp
+application_default_credentials.json

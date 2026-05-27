@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Settings</h1>
+
+<div class="card">
+  <h2>API Keys</h2>
+  <div class="field"><label>Claude API Key</label>
+    <input type="password" id="claude_api_key" value="{{ settings.claude_api_key }}"></div>
+  <div class="field"><label>TTS API Key</label>
+    <input type="password" id="tts_api_key" value="{{ settings.tts_api_key }}"></div>
+  <div class="field"><label>YouTube Data API v3 Key #1</label>
+    <input type="password" id="youtube_api_key" value="{{ settings.youtube_api_key }}"></div>
+  <div class="field"><label>YouTube Data API v3 Key #2 (backup)</label>
+    <input type="password" id="youtube_api_key_2" value="{{ settings.youtube_api_key_2 }}"></div>
+  <div class="field"><label>YouTube Data API v3 Key #3 (backup)</label>
+    <input type="password" id="youtube_api_key_3" value="{{ settings.youtube_api_key_3 }}"></div>
+</div>
+
+<div class="card">
+  <h2>Voice Profiles</h2>
+  <p style="color:#aaa;font-size:13px;margin-bottom:20px">
+    Set voice_id for each language. Leave empty to disable that language.
+  </p>
+  {% set langs = [
+    ('en','English'),('pl','Polish'),('de','German'),('fr','French'),
+    ('es','Spanish'),('it','Italian'),('pt','Portuguese'),
+    ('uk','Ukrainian'),('ru','Russian'),('tr','Turkish')
+  ] %}
+  {% for code, label in langs %}
+  {% set profile = settings.voice_profiles.get(code, {}) %}
+  <div style="border:1px solid #2a2a2a;border-radius:8px;padding:16px;margin-bottom:12px">
+    <div style="font-weight:600;margin-bottom:12px">{{ label }} ({{ code }})</div>
+    <div class="grid-2">
+      <div class="field"><label>Voice Name</label>
+        <input type="text" id="vname_{{ code }}" value="{{ profile.get('name','') }}"></div>
+      <div class="field"><label>Voice ID</label>
+        <input type="text" id="vid_{{ code }}" value="{{ profile.get('voice_id','') }}"></div>
+    </div>
+    <div class="grid-2">
+      <div class="field"><label>Stability ({{ profile.get('stability',0.85) }})</label>
+        <input type="text" id="vstab_{{ code }}" value="{{ profile.get('stability',0.85) }}"></div>
+      <div class="field"><label>Speed ({{ profile.get('speed',1.0) }})</label>
+        <input type="text" id="vspeed_{{ code }}" value="{{ profile.get('speed',1.0) }}"></div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="card">
+  <h2>Paths</h2>
+  <div class="field"><label>Stocks Folder Path</label>
+    <input type="text" id="stocks_dir" value="{{ settings.stocks_dir or '' }}" style="width:100%"></div>
+  <p style="color:#aaa;font-size:12px;margin-top:4px">Full path to your stock footage folder (e.g. G:\My Drive\FAA\stocks or /mnt/stocks)</p>
+</div>
+
+<div class="card">
+  <h2>Vertex AI (Gemini)</h2>
+  <div class="grid-2">
+    <div class="field"><label>Project ID</label>
+      <input type="text" id="vertex_project_id" value="{{ settings.vertex_project_id }}"></div>
+    <div class="field"><label>Location</label>
+      <input type="text" id="vertex_location" value="{{ settings.vertex_location }}"></div>
+  </div>
+  <div class="field"><label>Gemini Model</label>
+    <input type="text" id="gemini_model" value="{{ settings.gemini_model }}"></div>
+</div>
+
+<div class="card">
+  <h2>TTS</h2>
+  <div class="field"><label>TTS API URL</label>
+    <input type="text" id="tts_api_url" value="{{ settings.tts_api_url }}"></div>
+</div>
+
+<div class="card">
+  <h2>Claude Model</h2>
+  <div class="field"><label>Model ID</label>
+    <input type="text" id="claude_model" value="{{ settings.claude_model }}"></div>
+</div>
+
+<div class="card">
+  <h2>Montage</h2>
+  <div class="grid-2">
+    <div class="field"><label>Clip Min Duration (sec)</label>
+      <input type="text" id="clip_min_duration" value="{{ settings.clip_min_duration }}"></div>
+    <div class="field"><label>Clip Max Duration (sec)</label>
+      <input type="text" id="clip_max_duration" value="{{ settings.clip_max_duration }}"></div>
+  </div>
+  <div class="grid-2">
+    <div class="field"><label>Stock Max Duration (sec)</label>
+      <input type="text" id="stock_max_duration" value="{{ settings.stock_max_duration }}"></div>
+    <div class="field"><label>Competitor Clip Ratio (0–1)</label>
+      <input type="text" id="competitor_ratio" value="{{ settings.competitor_ratio }}"></div>
+  </div>
+  <div class="grid-2">
+    <div class="field"><label>Output Width (px)</label>
+      <input type="text" id="output_width" value="{{ settings.output_width }}"></div>
+    <div class="field"><label>Output Height (px)</label>
+      <input type="text" id="output_height" value="{{ settings.output_height }}"></div>
+  </div>
+  <div class="field"><label>FPS</label>
+    <input type="text" id="fps" value="{{ settings.fps }}"></div>
+</div>
+
+<div class="card">
+  <h2>Validation</h2>
+  <div class="field"><label>Clip Score Threshold (0-1)</label>
+    <input type="text" id="clip_score_threshold" value="{{ settings.clip_score_threshold }}"></div>
+</div>
+
+<button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+<span id="saveMsg" style="margin-left:16px;color:#22c55e;display:none">Saved!</span>
+
+{% endblock %}
+{% block scripts %}
+<script>
+const LANGS = ['en','pl','de','fr','es','it','pt','uk','ru','tr'];
+
+function saveSettings() {
+  const voice_profiles = {};
+  LANGS.forEach(code => {
+    voice_profiles[code] = {
+      name: document.getElementById('vname_' + code).value,
+      voice_id: document.getElementById('vid_' + code).value,
+      stability: parseFloat(document.getElementById('vstab_' + code).value) || 0.85,
+      similarity_boost: 0.75,
+      speed: parseFloat(document.getElementById('vspeed_' + code).value) || 1.0,
+    };
+  });
+
+  const data = {
+    claude_api_key:    document.getElementById('claude_api_key').value,
+    claude_model:      document.getElementById('claude_model').value,
+    tts_api_key:       document.getElementById('tts_api_key').value,
+    tts_api_url:       document.getElementById('tts_api_url').value,
+    youtube_api_key:   document.getElementById('youtube_api_key').value,
+    youtube_api_key_2: document.getElementById('youtube_api_key_2').value,
+    youtube_api_key_3: document.getElementById('youtube_api_key_3').value,
+    stocks_dir:        document.getElementById('stocks_dir').value,
+    vertex_project_id: document.getElementById('vertex_project_id').value,
+    vertex_location:   document.getElementById('vertex_location').value,
+    gemini_model:      document.getElementById('gemini_model').value,
+    clip_min_duration: parseFloat(document.getElementById('clip_min_duration').value) || 2,
+    clip_max_duration: parseFloat(document.getElementById('clip_max_duration').value) || 5,
+    stock_max_duration: parseFloat(document.getElementById('stock_max_duration').value) || 6,
+    competitor_ratio:  parseFloat(document.getElementById('competitor_ratio').value) || 0.65,
+    output_width:      parseInt(document.getElementById('output_width').value) || 1920,
+    output_height:     parseInt(document.getElementById('output_height').value) || 1080,
+    fps:               parseInt(document.getElementById('fps').value) || 30,
+    clip_score_threshold: parseFloat(document.getElementById('clip_score_threshold').value) || 0.85,
+    voice_profiles,
+  };
+
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data)
+  }).then(() => {
+    const msg = document.getElementById('saveMsg');
+    msg.style.display = 'inline';
+    setTimeout(() => msg.style.display = 'none', 2000);
+  });
+}
+</script>
+{% endblock %}

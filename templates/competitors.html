@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Find Competitors</h1>
+
+<div class="card">
+  <h2>Seed Channel</h2>
+  <p style="color:#aaa;font-size:13px;margin-bottom:16px">
+    Enter a competitor channel URL. The system will analyze its content and find similar channels via YouTube API + Gemini.
+  </p>
+  <div class="field">
+    <label>Channel URL</label>
+    <input type="text" id="seedUrl" placeholder="https://www.youtube.com/@ChannelName" style="width:100%">
+  </div>
+  <div style="display:flex;gap:12px;align-items:center;margin-top:4px">
+    <button class="btn btn-primary" onclick="startSearch()" id="searchBtn">Find Similar Channels</button>
+    <span id="statusMsg" style="color:#aaa;font-size:13px"></span>
+  </div>
+</div>
+
+<div class="card" id="progressCard" style="display:none">
+  <div class="progress-log" id="progressLog"></div>
+</div>
+
+<div id="resultsCard" style="display:none">
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h2 style="margin:0">Results</h2>
+      <div class="field" style="margin:0;min-width:200px">
+        <label>Add to niche</label>
+        <select id="targetNiche">
+          {% for n in niches %}
+          <option value="{{ n.id }}">{{ n.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <table style="width:100%;border-collapse:collapse" id="resultsTable">
+      <thead>
+        <tr style="border-bottom:1px solid #333">
+          <th style="text-align:left;padding:10px 0;color:#aaa">Channel</th>
+          <th style="text-align:center;color:#aaa">Subs</th>
+          <th style="text-align:center;color:#aaa">Score</th>
+          <th style="text-align:left;color:#aaa;padding-left:12px">Why relevant</th>
+          <th style="text-align:center;color:#aaa">Add</th>
+          <th style="text-align:center;color:#aaa">Hide</th>
+        </tr>
+      </thead>
+      <tbody id="resultsBody"></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const socket = io();
+let searchResults = [];
+
+function log(msg) {
+  const card = document.getElementById('progressCard');
+  card.style.display = 'block';
+  const el = document.getElementById('progressLog');
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function fmtNum(n) {
+  if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
+  if (n >= 1000)    return (n/1000).toFixed(0) + 'K';
+  return n;
+}
+function escHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function safeUrl(u) { return /^https?:\/\//.test(u) ? u : '#'; }
+
+function startSearch() {
+  const url = document.getElementById('seedUrl').value.trim();
+  if (!url) { alert('Enter channel URL'); return; }
+
+  document.getElementById('progressLog').innerHTML = '';
+  document.getElementById('progressCard').style.display = 'block';
+  document.getElementById('resultsCard').style.display = 'none';
+  document.getElementById('searchBtn').disabled = true;
+  document.getElementById('statusMsg').textContent = 'Searching...';
+  log('Starting analysis...');
+
+  fetch('/api/find_competitors', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({url})
+  });
+}
+
+function renderResults(channels) {
+  searchResults = channels;
+  const tbody = document.getElementById('resultsBody');
+  tbody.innerHTML = '';
+
+  channels.forEach((ch, i) => {
+    const scoreColor = ch.score >= 0.8 ? '#22c55e' : ch.score >= 0.6 ? '#f59e0b' : '#aaa';
+    const activeTag  = ch.active ? '' : ' <span style="color:#f87171;font-size:11px">(low activity)</span>';
+    tbody.innerHTML += `
+      <tr style="border-bottom:1px solid #1e1e1e">
+        <td style="padding:12px 0">
+          <a href="${escHtml(safeUrl(ch.url))}" target="_blank" style="color:#fff;font-weight:600">${escHtml(ch.title)}</a>${activeTag}
+        </td>
+        <td style="text-align:center">${fmtNum(ch.subscribers)}</td>
+        <td style="text-align:center;color:${scoreColor};font-weight:600">${(ch.score*100).toFixed(0)}%</td>
+        <td style="padding-left:12px;color:#aaa;font-size:13px">${escHtml(ch.reason)}</td>
+        <td style="text-align:center">
+          <button class="btn btn-success" style="padding:4px 12px;font-size:12px" onclick="addChannel(${i})">+</button>
+        </td>
+        <td style="text-align:center">
+          <button class="btn" style="padding:4px 10px;font-size:12px;background:#3f1111;color:#f87171;border:1px solid #7f1d1d" onclick="hideChannel(${i}, this)">✕</button>
+        </td>
+      </tr>`;
+  });
+
+  document.getElementById('resultsCard').style.display = 'block';
+}
+
+function hideChannel(idx, btn) {
+  const ch = searchResults[idx];
+  fetch('/api/competitors/hide', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: ch.id}),
+  }).then(r => r.json()).then(d => {
+    if (d.ok) {
+      btn.closest('tr').remove();
+    }
+  });
+}
+
+function addChannel(idx) {
+  const ch    = searchResults[idx];
+  const niche = document.getElementById('targetNiche').value;
+  fetch('/api/niche/add_channel', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({niche, url: ch.url}),
+  }).then(r => r.json()).then(d => {
+    if (d.ok) {
+      const btn = document.querySelectorAll('#resultsBody tr')[idx].querySelector('button');
+      btn.textContent = '✓';
+      btn.disabled = true;
+      btn.style.background = '#166534';
+    }
+  });
+}
+
+socket.on('competitor_progress', data => log(data.message));
+socket.on('competitor_done', data => {
+  document.getElementById('searchBtn').disabled = false;
+  document.getElementById('statusMsg').textContent = `Found ${data.results.length} channels`;
+  log(`Done! Found ${data.results.length} relevant channels.`);
+  renderResults(data.results);
+});
+socket.on('competitor_error', data => {
+  document.getElementById('searchBtn').disabled = false;
+  document.getElementById('statusMsg').textContent = 'Error';
+  log('ERROR: ' + data.message);
+});
+</script>
+{% endblock %}

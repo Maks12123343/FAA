@@ -1,0 +1,19 @@
+[Unit]
+Description=FAA Video Generator
+After=network.target faa-gdrive.service
+Wants=faa-gdrive.service
+
+[Service]
+Type=simple
+User=faa
+Group=faa
+WorkingDirectory=/opt/faa
+EnvironmentFile=-/opt/faa/.env
+ExecStart=/opt/faa/start.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

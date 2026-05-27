@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FAA — Full Auto Agent</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', sans-serif; background: #0f0f0f; color: #e0e0e0; min-height: 100vh; }
+nav { background: #1a1a1a; border-bottom: 1px solid #333; padding: 0 32px; display: flex; align-items: center; gap: 32px; height: 56px; }
+nav .logo { font-size: 20px; font-weight: 700; color: #fff; letter-spacing: 1px; }
+nav a { color: #aaa; text-decoration: none; font-size: 14px; padding: 4px 0; border-bottom: 2px solid transparent; }
+nav a:hover, nav a.active { color: #fff; border-bottom-color: #4f8ef7; }
+.container { max-width: 960px; margin: 0 auto; padding: 40px 24px; }
+h1 { font-size: 28px; margin-bottom: 24px; }
+h2 { font-size: 20px; margin-bottom: 16px; color: #ccc; }
+.card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 28px; margin-bottom: 20px; }
+.btn { display: inline-block; padding: 10px 24px; border-radius: 8px; border: none; cursor: pointer; font-size: 14px; font-weight: 600; transition: opacity .15s; }
+.btn:hover { opacity: .85; }
+.btn-primary { background: #4f8ef7; color: #fff; }
+.btn-success { background: #22c55e; color: #fff; }
+.btn-danger  { background: #ef4444; color: #fff; }
+.btn-gray    { background: #333; color: #ddd; }
+select, input[type=text], input[type=password], textarea {
+  background: #111; border: 1px solid #333; border-radius: 8px;
+  color: #e0e0e0; padding: 10px 14px; font-size: 14px; width: 100%; outline: none;
+}
+select:focus, input:focus, textarea:focus { border-color: #4f8ef7; }
+label { display: block; font-size: 13px; color: #aaa; margin-bottom: 6px; }
+.field { margin-bottom: 18px; }
+.progress-log { background: #111; border-radius: 8px; padding: 16px; font-family: monospace; font-size: 13px; min-height: 120px; max-height: 300px; overflow-y: auto; }
+.log-line { padding: 2px 0; }
+.log-line.done { color: #22c55e; }
+.log-line.error { color: #ef4444; }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 99px; font-size: 12px; font-weight: 600; }
+.badge-blue  { background: #1d3a6e; color: #4f8ef7; }
+.badge-green { background: #14532d; color: #22c55e; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+</style>
+</head>
+<body>
+<nav>
+  <span class="logo">FAA</span>
+  <a href="/" {% if request.path == '/' %}class="active"{% endif %}>Generate</a>
+  <a href="/library" {% if request.path == '/library' %}class="active"{% endif %}>Library</a>
+  <a href="/competitors" {% if request.path == '/competitors' %}class="active"{% endif %}>Competitors</a>
+  <a href="/settings" {% if request.path == '/settings' %}class="active"{% endif %}>Settings</a>
+</nav>
+<div class="container">
+  {% block content %}{% endblock %}
+</div>
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
