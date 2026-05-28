@@ -63,9 +63,10 @@ WORDS_PER_SECTION = 35
 
 # -- Phase 1: Prepare ---------------------------------------------------------
 
-def prepare(niche_name: str, emit=None) -> dict:
+def prepare(niche_name: str, source_url: str = None, emit=None) -> dict:
     """
     Phase 1: Find top video -> fetch metadata -> transcribe.
+    If source_url is provided, skip channel scanning and use that video directly.
     Saves result to disk. Returns prepare_id + info for UI.
     """
     def log(step, msg):
@@ -81,10 +82,14 @@ def prepare(niche_name: str, emit=None) -> dict:
     prepare_dir = os.path.join(config.PROJECTS_DIR, f"_prepare_{prepare_id}")
     os.makedirs(prepare_dir, exist_ok=True)
 
-    # Step 1: Find top video
-    log("scan", "Scanning channels for top video...")
-    top_video = channel_scanner.find_top_video(niche_path)
-    log("scan", f"Found: {top_video['title']}")
+    # Step 1: Find top video (or use provided URL)
+    if source_url:
+        log("scan", f"Using custom video URL: {source_url}")
+        top_video = {"url": source_url, "title": "", "views": 0}
+    else:
+        log("scan", "Scanning channels for top video...")
+        top_video = channel_scanner.find_top_video(niche_path)
+        log("scan", f"Found: {top_video['title']}")
 
     # Step 2: Fetch source metadata (description + tags)
     log("scan", "Fetching source metadata...")

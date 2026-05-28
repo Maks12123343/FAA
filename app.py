@@ -130,6 +130,8 @@ def api_prepare():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
+    source_url = data.get("source_url") or None
+
     with _job_lock:
         if _job_active:
             return jsonify({"error": "A job is already running. Wait for it to finish."}), 429
@@ -140,6 +142,7 @@ def api_prepare():
         try:
             result = pipeline.prepare(
                 niche,
+                source_url=source_url,
                 emit=lambda step, msg: socketio.emit("progress", {"step": step, "message": msg}),
             )
             socketio.emit("prepare_done", result)

@@ -13,6 +13,10 @@
       {% endfor %}
     </select>
   </div>
+  <div class="field" style="margin-top:12px">
+    <label style="color:#aaa;font-size:13px">Custom Video URL <span style="color:#555">(optional — leave empty to auto-find top video)</span></label>
+    <input type="text" id="sourceUrl" placeholder="https://www.youtube.com/watch?v=..." style="width:100%;background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px;color:#fff;font-size:13px;margin-top:4px">
+  </div>
   <button class="btn btn-primary" id="prepareBtn" onclick="startPrepare()">Find Top Video & Transcribe</button>
 </div>
 
@@ -90,10 +94,11 @@ function startPrepare() {
   document.getElementById('progressCard').style.display = 'block';
   log('Scanning channels...');
 
+  const sourceUrl = document.getElementById('sourceUrl').value.trim();
   fetch('/api/prepare', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({niche})
+    body: JSON.stringify({niche, source_url: sourceUrl || null})
   }).then(r => r.json()).then(d => {
     if (d.error) {
       log('ERROR: ' + d.error, 'error');
