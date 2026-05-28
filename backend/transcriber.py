@@ -75,7 +75,9 @@ def _whisper_transcribe(url: str, tmp_dir: str) -> str:
     if os.path.exists(COOKIES_FILE):
         dl_cmd += ["--cookies", COOKIES_FILE]
     dl_cmd.append(url)
-    subprocess.run(dl_cmd, check=True, timeout=300)
+    subprocess.run(dl_cmd, timeout=300)  # don't use check=True — cookie save errors cause false failures
+    if not os.path.exists(audio_path):
+        raise RuntimeError(f"Audio download failed for {url}")
 
     model = _get_whisper_model()
     result = model.transcribe(audio_path)
