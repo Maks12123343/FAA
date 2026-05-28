@@ -392,6 +392,28 @@ def analyze_all_clips(clips_index: list, emit=None) -> list:
 
     print(f"[clip_matcher] Done: {len(results_new)} analyzed, {len(cached)} from cache", flush=True)
     return cached + list(results_new.values())
+
+
+def match_clips_multi(section_texts: list, clips_index: list, top_n: int = 10, emit=None) -> list:
+    """
+    For each section text, find top-N best matching clips by tag/description overlap.
+    Returns list of lists: one inner list per section.
+    """
+    results = []
+    for i, section_text in enumerate(section_texts):
+        scored = []
+        for clip in clips_index:
+            score = _score_clip(clip, section_text)
+            if score > 0:
+                scored.append((score, clip))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = [c for _, c in scored[:top_n]]
+        results.append(top)
+        if emit:
+            emit("match", f"Matched section {i+1}/{len(section_texts)}")
+    return results
+
+
 def _score_clip(clip_analysis: dict, section_text: str) -> float:
     """Score a clip against section text using tag/description overlap (no AI)."""
     section_lower = section_text.lower()
