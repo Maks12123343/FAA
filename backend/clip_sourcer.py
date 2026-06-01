@@ -27,7 +27,7 @@ def _get_duration(path: str) -> float:
 def _cut_clip(src: str, out: str, start: float, duration: float):
     subprocess.run(
         [FFMPEG, "-y", "-ss", f"{start:.3f}", "-i", src,
-         "-t", f"{duration:.3f}", "-c:v", "libx264", "-preset", "ultrafast", "-an", out],
+         "-t", f"{duration:.3f}", *config.get_video_encoder_args("ultrafast"), "-an", out],
         capture_output=True, timeout=120,
     )
 
@@ -178,7 +178,7 @@ def _download_segment(video_url: str, start: float, duration: float, out_path: s
          "-ss", f"{start:.3f}",
          "-i", direct_url,
          "-t", f"{duration:.3f}",
-         "-c:v", "libx264", "-preset", "ultrafast",
+         *config.get_video_encoder_args("ultrafast"),
          "-an", out_path],
         capture_output=True, timeout=120,
     )

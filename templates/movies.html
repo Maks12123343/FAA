@@ -1,0 +1,254 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Movie Library</h1>
+
+<!-- ── Indexed movies ──────────────────────────────────────────────────── -->
+<div class="card">
+  <h2>Indexed Movies</h2>
+  {% if movies %}
+  <table style="width:100%;border-collapse:collapse;font-size:14px;">
+    <thead>
+      <tr style="color:#aaa;text-align:left;border-bottom:1px solid #333;">
+        <th style="padding:8px 12px;">Movie</th>
+        <th style="padding:8px 12px;">Clips</th>
+        <th style="padding:8px 12px;">Duration</th>
+        <th style="padding:8px 12px;">Indexed</th>
+      </tr>
+    </thead>
+    <tbody id="movies-table-body">
+    {% for m in movies %}
+      <tr style="border-bottom:1px solid #222;">
+        <td style="padding:10px 12px;font-weight:600;">{{ m.name }}</td>
+        <td style="padding:10px 12px;"><span class="badge badge-blue">{{ m.clip_count }} clips</span></td>
+        <td style="padding:10px 12px;color:#aaa;">{{ "%.0f"|format(m.duration / 60) }} min</td>
+        <td style="padding:10px 12px;color:#666;font-size:12px;">{{ m.created_at[:10] if m.created_at else '—' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="color:#666;">No movies indexed yet.</p>
+  {% endif %}
+</div>
+
+<!-- ── Add new movie ───────────────────────────────────────────────────── -->
+<div class="card">
+  <h2>Index New Movie</h2>
+
+  <!-- Mode toggle -->
+  <div style="display:flex;gap:12px;margin-bottom:16px;">
+    <button class="btn btn-primary" id="btn-mode-folder" onclick="setMode('folder')" style="opacity:1;">📁 Index Folder (all mp4s)</button>
+    <button class="btn" id="btn-mode-file" onclick="setMode('file')" style="opacity:0.5;">🎬 Index Single File</button>
+  </div>
+
+  <!-- Folder mode -->
+  <div id="mode-folder">
+    <div class="field">
+      <label>Folder path with mp4 files (e.g. G:\My Drive\FAA\movies\Kung Fu Panda)</label>
+      <input type="text" id="folder-path" placeholder="G:\My Drive\FAA\movies\Kung Fu Panda">
+    </div>
+    <div class="field">
+      <label>Movie name (e.g. Kung Fu Panda)</label>
+      <input type="text" id="folder-movie-name" placeholder="Kung Fu Panda">
+    </div>
+    <button class="btn btn-primary" onclick="indexFolder()">Index All Files in Folder</button>
+    <p style="color:#888;font-size:12px;margin-top:8px;">
+      ✅ Processes all mp4 files in the folder as one movie. Saves progress after each file — safe to restart if interrupted.
+    </p>
+  </div>
+
+  <!-- Single file mode -->
+  <div id="mode-file" style="display:none;">
+    <div class="field">
+      <label>Movie file path (e.g. G:\My Drive\movies\shrek.mp4)</label>
+      <input type="text" id="movie-path" placeholder="G:\My Drive\movies\shrek.mp4">
+    </div>
+    <div class="field">
+      <label>Movie name (e.g. Shrek)</label>
+      <input type="text" id="movie-name" placeholder="Shrek">
+    </div>
+    <button class="btn btn-primary" onclick="indexMovie()">Index Movie</button>
+  </div>
+
+  <div id="index-log" class="progress-log" style="margin-top:16px;display:none;"></div>
+</div>
+
+<!-- ── Produce video ───────────────────────────────────────────────────── -->
+<div class="card">
+  <h2>Produce Video</h2>
+
+  <div class="field">
+    <label>Source YouTube URL (video to rewrite)</label>
+    <input type="text" id="source-url" placeholder="https://www.youtube.com/watch?v=...">
+  </div>
+  <div class="field">
+    <label>Movie to use</label>
+    <select id="movie-select">
+      <option value="">— select movie —</option>
+      {% for m in movies %}
+      <option value="{{ m.name }}">{{ m.name }} ({{ m.clip_count }} clips)</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label>Language</label>
+    <select id="lang-select">
+      {% for l in languages %}
+      <option value="{{ l.code }}">{{ l.name }} ({{ l.code }})</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div style="display:flex;gap:12px;align-items:center;">
+    <button class="btn btn-primary" id="btn-prepare" onclick="doPrepare()">Step 1: Transcribe</button>
+    <button class="btn btn-success" id="btn-produce" onclick="doProduce()" disabled>Step 2: Produce</button>
+  </div>
+
+  <div id="produce-log" class="progress-log" style="margin-top:16px;display:none;"></div>
+
+  <div id="result-block" style="display:none;margin-top:20px;">
+    <h2>Done!</h2>
+    <p id="result-title" style="color:#22c55e;margin-bottom:12px;font-size:16px;"></p>
+    <a id="result-download" class="btn btn-success" href="#" download>Download Video</a>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+const socket = io();
+let prepareId = null;
+
+// ── Logging helpers ────────────────────────────────────────────────────
+function logTo(containerId, msg, cls='') {
+  const el = document.getElementById(containerId);
+  el.style.display = '';
+  const line = document.createElement('div');
+  line.className = 'log-line ' + cls;
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── Mode toggle ────────────────────────────────────────────────────────
+function setMode(mode) {
+  document.getElementById('mode-folder').style.display = mode === 'folder' ? '' : 'none';
+  document.getElementById('mode-file').style.display   = mode === 'file'   ? '' : 'none';
+  document.getElementById('btn-mode-folder').style.opacity = mode === 'folder' ? '1' : '0.5';
+  document.getElementById('btn-mode-file').style.opacity   = mode === 'file'   ? '1' : '0.5';
+}
+
+// ── Index folder (all mp4s) ────────────────────────────────────────────
+async function indexFolder() {
+  const folder = document.getElementById('folder-path').value.trim();
+  const name   = document.getElementById('folder-movie-name').value.trim();
+  if (!folder || !name) { alert('Fill in folder path and movie name'); return; }
+
+  document.getElementById('index-log').innerHTML = '';
+  logTo('index-log', `Indexing folder "${folder}" as "${name}"...`);
+
+  const r = await fetch('/api/movies/process_folder', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({folder_path: folder, movie_name: name}),
+  });
+  const d = await r.json();
+  if (d.error) logTo('index-log', 'ERROR: ' + d.error, 'error');
+}
+
+// ── Index movie ────────────────────────────────────────────────────────
+async function indexMovie() {
+  const path = document.getElementById('movie-path').value.trim();
+  const name = document.getElementById('movie-name').value.trim();
+  if (!path || !name) { alert('Fill in path and name'); return; }
+
+  document.getElementById('index-log').innerHTML = '';
+  logTo('index-log', `Indexing "${name}"...`);
+
+  const r = await fetch('/api/movies/process', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({movie_path: path, movie_name: name}),
+  });
+  const d = await r.json();
+  if (d.error) logTo('index-log', 'ERROR: ' + d.error, 'error');
+}
+
+socket.on('progress', d => {
+  logTo('index-log', `[${d.step}] ${d.message}`);
+  logTo('produce-log', `[${d.step}] ${d.message}`);
+});
+socket.on('movie_indexed', d => {
+  logTo('index-log', `Done! ${d.clip_count} clips indexed for "${d.movie_name}"`, 'done');
+  location.reload();
+});
+
+// ── Prepare ────────────────────────────────────────────────────────────
+async function doPrepare() {
+  const url = document.getElementById('source-url').value.trim();
+  if (!url) { alert('Enter YouTube URL'); return; }
+
+  document.getElementById('produce-log').innerHTML = '';
+  document.getElementById('result-block').style.display = 'none';
+  document.getElementById('btn-prepare').disabled = true;
+  document.getElementById('btn-produce').disabled = true;
+
+  logTo('produce-log', 'Transcribing source video...');
+
+  const r = await fetch('/api/movies/prepare', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({source_url: url}),
+  });
+  const d = await r.json();
+  if (d.error) {
+    logTo('produce-log', 'ERROR: ' + d.error, 'error');
+    document.getElementById('btn-prepare').disabled = false;
+  }
+}
+
+socket.on('movie_prepare_done', d => {
+  prepareId = d.prepare_id;
+  logTo('produce-log', `Transcription done: ${d.transcript_len} chars — "${d.source_title}"`, 'done');
+  document.getElementById('btn-prepare').disabled = false;
+  document.getElementById('btn-produce').disabled = false;
+});
+
+// ── Produce ────────────────────────────────────────────────────────────
+async function doProduce() {
+  if (!prepareId) { alert('Run Step 1 first'); return; }
+  const movie = document.getElementById('movie-select').value;
+  const lang  = document.getElementById('lang-select').value;
+  if (!movie) { alert('Select a movie'); return; }
+
+  document.getElementById('btn-produce').disabled = true;
+  logTo('produce-log', `Producing video (${lang}) using "${movie}"...`);
+
+  const r = await fetch('/api/movies/produce', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({prepare_id: prepareId, movie_name: movie, languages: [lang]}),
+  });
+  const d = await r.json();
+  if (d.error) {
+    logTo('produce-log', 'ERROR: ' + d.error, 'error');
+    document.getElementById('btn-produce').disabled = false;
+  }
+}
+
+socket.on('produce_done', d => {
+  logTo('produce-log', `Done: ${d.project_id}`, 'done');
+  document.getElementById('result-block').style.display = '';
+  document.getElementById('result-title').textContent = d.title || d.project_id;
+  document.getElementById('result-download').href = `/api/movies/download/${d.project_id}`;
+  document.getElementById('btn-produce').disabled = false;
+});
+
+socket.on('error', d => {
+  logTo('produce-log', 'ERROR: ' + d.message, 'error');
+  logTo('index-log',   'ERROR: ' + d.message, 'error');
+  document.getElementById('btn-prepare').disabled = false;
+  document.getElementById('btn-produce').disabled = false;
+});
+</script>
+{% endblock %}

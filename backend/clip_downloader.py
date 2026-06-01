@@ -11,6 +11,17 @@ FFMPEG  = config.FFMPEG
 FFPROBE = config.FFPROBE
 COOKIES_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
 
+
+def _cookies_arg(tmp_dir: str) -> list:
+    """Return --cookies <tmpfile> args using a temp copy so yt-dlp can't overwrite the original."""
+    if not os.path.exists(COOKIES_FILE):
+        return []
+    import shutil
+    tmp = os.path.join(tmp_dir, "cookies_tmp.txt")
+    shutil.copy2(COOKIES_FILE, tmp)
+    return ["--cookies", tmp]
+
+
 SCENE_THRESHOLD = 0.35  # 0-1: lower = more sensitive, more scene cuts detected
 
 
@@ -34,11 +45,23 @@ def _cut_clip(src: str, out: str, start: float, duration: float):
     r = subprocess.run(
         [FFMPEG, "-y", "-ss", f"{start:.3f}", "-i", src,
          "-t", f"{duration:.3f}",
-         "-c:v", "libx264", "-preset", "ultrafast", "-an", out],
+         "-c:v", "copy", "-an", out],
         capture_output=True, timeout=60,
     )
-    if r.returncode != 0:
-        print(f"[downloader] ffmpeg cut error: {r.stderr[-200:].strip()}", flush=True)
+    ok = (r.returncode == 0
+          and os.path.exists(out)
+          and os.path.getsize(out) > 1000
+          and _get_duration(out) >= 0.1)
+    if not ok:
+        print(f"[downloader] stream copy failed (returncode={r.returncode}, dur={_get_duration(out):.2f}s), re-encoding...", flush=True)
+        if os.path.exists(out):
+            os.unlink(out)
+        subprocess.run(
+            [FFMPEG, "-y", "-ss", f"{start:.3f}", "-i", src,
+             "-t", f"{duration:.3f}",
+             *config.get_video_encoder_args("ultrafast"), "-an", out],
+            capture_output=True, timeout=60,
+        )
 
 
 def _get_transcript(video_url: str) -> str:
@@ -66,7 +89,7 @@ def _detect_scene_timestamps(video_path: str) -> list:
     Always includes 0.0. Returns empty list (only 0.0) if no changes detected.
     """
     r = subprocess.run(
-        [FFMPEG, "-i", video_path,
+        [FFMPEG, "-threads", "6", "-i", video_path,
          "-vf", f"select=gt(scene\\,{SCENE_THRESHOLD}),showinfo",
          "-vsync", "vfr", "-f", "null", "-"],
         capture_output=True, text=True, timeout=300,
@@ -90,19 +113,22 @@ def _detect_scene_timestamps(video_path: str) -> list:
 
 
 def _cut_by_scenes(src_path: str, pool_dir: str, vid_id: str,
-                   source_url: str, transcript: str, total_dur: float) -> list:
+                   source_url: str, transcript: str, total_dur: float, emit=None) -> list:
     clip_min, clip_max = _clip_limits()
     scene_times = _detect_scene_timestamps(src_path)
     scene_times.append(total_dur)
 
     if len(scene_times) <= 2:
         print(f"[downloader] {vid_id}: no scene changes detected, using fixed cuts", flush=True)
-        return _cut_fixed(src_path, pool_dir, vid_id, source_url, transcript, total_dur)
+        return _cut_fixed(src_path, pool_dir, vid_id, source_url, transcript, total_dur, emit=emit)
 
     clips = []
     idx   = 0
+    total_scenes = len(scene_times) - 1
+    if emit:
+        emit("clips", f"{vid_id}: cutting {total_scenes} scenes...")
 
-    for i in range(len(scene_times) - 1):
+    for i in range(total_scenes):
         scene_start = scene_times[i]
         scene_end   = scene_times[i + 1]
         scene_dur   = scene_end - scene_start
@@ -143,15 +169,21 @@ def _cut_by_scenes(src_path: str, pool_dir: str, vid_id: str,
                     idx += 1
                 t += chunk_dur
 
+        if emit and (i + 1) % 10 == 0:
+            emit("clips", f"{vid_id}: cut {i+1}/{total_scenes} scenes ({idx} clips so far)...")
+
     return clips
 
 
 def _cut_fixed(src_path: str, pool_dir: str, vid_id: str,
-               source_url: str, transcript: str, total_dur: float) -> list:
+               source_url: str, transcript: str, total_dur: float, emit=None) -> list:
     clip_min, clip_max = _clip_limits()
     clips = []
     t     = 0.0
     idx   = 0
+    total_chunks = int(total_dur / clip_max)
+    if emit:
+        emit("clips", f"{vid_id}: cutting ~{total_chunks} clips (fixed)...")
     while t + clip_max <= total_dur:
         out_path = os.path.join(pool_dir, f"{vid_id}_{idx:04d}.mp4")
         _cut_clip(src_path, out_path, t, clip_max)
@@ -165,19 +197,27 @@ def _cut_fixed(src_path: str, pool_dir: str, vid_id: str,
                 "source_url": source_url,
             })
             idx += 1
+        if emit and idx % 10 == 0 and idx > 0:
+            emit("clips", f"{vid_id}: {idx}/{total_chunks} clips cut...")
         t += clip_max
     return clips
 
 
-def download_and_cut(video_url: str, pool_dir: str) -> list:
+def download_and_cut(video_url: str, pool_dir: str, emit=None) -> list:
     """
     Download a YouTube video and cut into clips by scene boundaries.
     Each clip entry: {id, file, start, end, text, source_url}
     Skips re-download if index already exists.
     """
+    def _log(msg):
+        print(f"[downloader] {msg}", flush=True)
+        if emit:
+            emit("clips", msg)
+
     os.makedirs(pool_dir, exist_ok=True)
 
-    vid_id   = video_url.split("v=")[-1].split("&")[0].split("/")[-1][:16]
+    m = re.search(r'(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})', video_url)
+    vid_id = m.group(1) if m else re.sub(r'[^\w\-]', '_', video_url.split("/")[-1].split("?")[0])[:16]
     src_path = os.path.join(pool_dir, f"_src_{vid_id}.mp4")
     idx_path = os.path.join(pool_dir, f"{vid_id}_index.json")
 
@@ -185,30 +225,38 @@ def download_and_cut(video_url: str, pool_dir: str) -> list:
         with open(idx_path, encoding="utf-8") as f:
             clips = json.load(f)
         clips = [c for c in clips if os.path.exists(c["file"])]
-        print(f"[downloader] {vid_id}: already cut ({len(clips)} clips)", flush=True)
+        _log(f"{vid_id}: already cut ({len(clips)} clips)")
         return clips
 
-    print(f"[downloader] {vid_id}: fetching transcript...", flush=True)
+    _log(f"{vid_id}: fetching transcript...")
     transcript = _get_transcript(video_url)
 
-    print(f"[downloader] Downloading: {video_url}", flush=True)
-    dl_cmd = [
-        "yt-dlp",
-        "--remote-components", "ejs:github",
-        "--js-runtimes", "node",
-        "-f", "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
+    _log(f"{vid_id}: downloading video...")
+    import platform as _platform
+    dl_cmd = ["yt-dlp"]
+    if _platform.system() != "Windows":
+        dl_cmd += ["--remote-components", "ejs:github", "--js-runtimes", "node"]
+    dl_cmd += [
+        "-f", "bestvideo[height>=1080][ext=mp4]/bestvideo[height>=1080]/bestvideo[ext=mp4]/bestvideo",
         "--no-audio", "--no-playlist",
         "-o", src_path,
     ]
-    if os.path.exists(COOKIES_FILE):
-        dl_cmd += ["--cookies", COOKIES_FILE]
+    dl_cmd += _cookies_arg(pool_dir)
     dl_cmd.append(video_url)
     dl = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=600)
     if dl.returncode != 0:
         print(f"[downloader] yt-dlp error: {dl.stderr[-300:].strip()}", flush=True)
 
+    # Remove cookie temp copy left by _cookies_arg
+    _cookie_tmp = os.path.join(pool_dir, "cookies_tmp.txt")
+    if os.path.exists(_cookie_tmp):
+        try:
+            os.unlink(_cookie_tmp)
+        except Exception:
+            pass
+
     if not os.path.exists(src_path):
-        print(f"[downloader] Failed to download: {video_url}", flush=True)
+        _log(f"{vid_id}: download failed")
         return []
 
     total = _get_duration(src_path)
@@ -216,8 +264,8 @@ def download_and_cut(video_url: str, pool_dir: str) -> list:
         os.remove(src_path)
         return []
 
-    print(f"[downloader] {vid_id}: detecting scenes ({total:.0f}s)...", flush=True)
-    clips = _cut_by_scenes(src_path, pool_dir, vid_id, video_url, transcript, total)
+    _log(f"{vid_id}: detecting scenes ({total:.0f}s video)...")
+    clips = _cut_by_scenes(src_path, pool_dir, vid_id, video_url, transcript, total, emit=emit)
     os.remove(src_path)
 
     with open(idx_path, "w", encoding="utf-8") as f:
@@ -239,9 +287,7 @@ def build_pool(youtube_urls: list, pool_dir: str, emit=None) -> tuple:
 
     def _download_one(idx_url):
         idx, url = idx_url
-        if emit:
-            emit("clips", f"Downloading video {idx+1}/{len(urls)}...")
-        clips = download_and_cut(url, pool_dir)
+        clips = download_and_cut(url, pool_dir, emit=emit)
         return idx, clips
 
     with ThreadPoolExecutor(max_workers=2) as executor:

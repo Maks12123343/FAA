@@ -22,6 +22,16 @@ def _get_whisper_model():
 COOKIES_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
 
 
+def _cookies_arg(tmp_dir: str) -> list:
+    """Return --cookies <tmpfile> args using a temp copy so yt-dlp can't overwrite the original."""
+    if not os.path.exists(COOKIES_FILE):
+        return []
+    import shutil
+    tmp = os.path.join(tmp_dir, "cookies_tmp.txt")
+    shutil.copy2(COOKIES_FILE, tmp)
+    return ["--cookies", tmp]
+
+
 def _get_subtitles(url: str, tmp_dir: str) -> str | None:
     """Try to download auto-generated or manual subtitles via yt-dlp."""
     out_tpl = os.path.join(tmp_dir, "subs")
@@ -35,8 +45,7 @@ def _get_subtitles(url: str, tmp_dir: str) -> str | None:
         "--skip-download",
         "-o", out_tpl,
     ]
-    if os.path.exists(COOKIES_FILE):
-        cmd += ["--cookies", COOKIES_FILE]
+    cmd += _cookies_arg(tmp_dir)
     cmd.append(url)
     subprocess.run(cmd, capture_output=True, timeout=60)
 
@@ -72,10 +81,9 @@ def _whisper_transcribe(url: str, tmp_dir: str) -> str:
         "--extract-audio", "--audio-format", "mp3",
         "-o", audio_path,
     ]
-    if os.path.exists(COOKIES_FILE):
-        dl_cmd += ["--cookies", COOKIES_FILE]
+    dl_cmd += _cookies_arg(tmp_dir)
     dl_cmd.append(url)
-    subprocess.run(dl_cmd, timeout=300)  # don't use check=True — cookie save errors cause false failures
+    subprocess.run(dl_cmd, timeout=300)
     if not os.path.exists(audio_path):
         raise RuntimeError(f"Audio download failed for {url}")
 

@@ -105,7 +105,7 @@ def apply_text_overlays(input_path: str, overlays: list, output_path: str):
     subprocess.run(
         [FFMPEG, "-y", "-i", input_path,
          "-vf", vf,
-         "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+         *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p",
          "-c:a", "copy",
          "-movflags", "+faststart",
          output_path],

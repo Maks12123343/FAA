@@ -63,13 +63,15 @@ def _prepare_clip(clip_path: str, out_path: str, width: int = 1920, height: int 
             f"fps={fps}"
         )
 
-    subprocess.run(
+    r = subprocess.run(
         [FFMPEG, "-y", "-i", clip_path,
          "-vf", vf,
-         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-an",
+         *config.get_video_encoder_args("medium", crf=18), "-pix_fmt", "yuv420p", "-an",
          "-t", str(max_duration), out_path],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+        capture_output=True, timeout=60,
     )
+    if r.returncode != 0:
+        print(f"[montage] _prepare_clip failed: {r.stderr.decode(errors='replace')[-500:]}", flush=True)
 
 
 def _get_clip_action(clip_path: str) -> tuple:
@@ -121,7 +123,7 @@ def _concat_clip_list(clip_paths: list, output: str):
     try:
         r = subprocess.run(
             [FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", list_file,
-             "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p", "-an", output],
+             *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p", "-an", output],
             capture_output=True, timeout=3600,
         )
         if r.returncode != 0:
@@ -187,7 +189,7 @@ def _xfade_join(segment_files: list, output: str, fade_dur: float = 0.35):
         [FFMPEG, "-y"] + inputs +
         ["-filter_complex", filter_complex,
          "-map", "[vout]",
-         "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p", "-an", output],
+         *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p", "-an", output],
         capture_output=True, timeout=3600,
     )
     if r.returncode != 0:
@@ -266,7 +268,7 @@ def _fetch_bg_music(duration: float, project_dir: str) -> str | None:
                 "media_type": "music",
                 "q": "cinematic ambient documentary",
                 "per_page": 10,
-                "min_duration": int(duration) - 30,
+                "min_duration": max(0, int(duration) - 30),
                 "order": "popular",
             },
             timeout=15,
@@ -379,7 +381,7 @@ def _uniqualize_clip(input_path: str, output_path: str, params: dict):
     r = subprocess.run(
         [FFMPEG, "-y", "-i", input_path,
          "-vf", vf,
-         "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p", "-an",
+         *config.get_video_encoder_args("medium", crf=18), "-pix_fmt", "yuv420p", "-an",
          output_path],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
     )

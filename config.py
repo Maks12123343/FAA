@@ -28,6 +28,7 @@ if platform.system() == "Windows":
     FFPROBE = r"C:\ffmpeg-master-latest-win64-gpl\bin\ffprobe.exe"
     VERTEX_CREDENTIALS = r"C:\Users\Ukraine\AppData\Roaming\gcloud\application_default_credentials.json"
     _DEFAULT_STOCKS_DIR = r"G:\My Drive\FAA\stocks"
+    _DEFAULT_MOVIES_DIR = r"G:\My Drive\FAA\movies"
 else:
     FFMPEG  = shutil.which("ffmpeg")  or "ffmpeg"
     FFPROBE = shutil.which("ffprobe") or "ffprobe"
@@ -37,12 +38,14 @@ else:
     VERTEX_CREDENTIALS = _cred_app if os.path.exists(_cred_app) else _cred_home
     # On Linux stocks are served from Google Drive mounted via rclone at /mnt/gdrive
     _DEFAULT_STOCKS_DIR = "/mnt/gdrive/FAA/stocks"
+    _DEFAULT_MOVIES_DIR = "/mnt/gdrive/FAA/movies"
 
 STOCKS_DIR = _DEFAULT_STOCKS_DIR
 
 DEFAULT_SETTINGS = {
     # Paths
-    "stocks_dir": _DEFAULT_STOCKS_DIR,
+    "stocks_dir":  _DEFAULT_STOCKS_DIR,
+    "movies_dir":  _DEFAULT_MOVIES_DIR,
 
     # Vertex AI
     "vertex_project_id": "",
@@ -165,3 +168,48 @@ def get_setting(key: str):
 
 def get_stocks_dir() -> str:
     return load_settings().get("stocks_dir", STOCKS_DIR)
+
+
+def get_movies_dir() -> str:
+    return load_settings().get("movies_dir", _DEFAULT_MOVIES_DIR)
+
+
+def _qsv_available() -> bool:
+    import functools
+    if not hasattr(_qsv_available, "_cached"):
+        try:
+            r = __import__("subprocess").run(
+                [FFMPEG, "-hide_banner", "-encoders"],
+                capture_output=True, text=True, timeout=10,
+            )
+            _qsv_available._cached = "h264_qsv" in r.stdout
+        except Exception:
+            _qsv_available._cached = False
+        print(f"[config] h264_qsv available: {_qsv_available._cached}", flush=True)
+    return _qsv_available._cached
+
+
+def get_video_encoder_args(preset: str = "ultrafast", crf: int = None) -> list:
+    """Return ffmpeg video encoder args optimized for current platform.
+    On Windows tries Intel Quick Sync (h264_qsv), falls back to libx264 if unavailable.
+    On Linux uses libx264 (RunPod/server).
+    crf: quality level for libx264 (18=high quality, 23=default, 28=lower). Ignored for QSV.
+    """
+    if platform.system() == "Windows" and _qsv_available():
+        qsv_preset_map = {
+            "ultrafast": "veryfast",
+            "superfast": "veryfast",
+            "veryfast":  "veryfast",
+            "faster":    "faster",
+            "fast":      "fast",
+            "medium":    "medium",
+            "slow":      "slow",
+        }
+        args = ["-c:v", "h264_qsv", "-preset", qsv_preset_map.get(preset, "veryfast")]
+        if crf is not None:
+            args += ["-global_quality", str(crf)]
+        return args
+    args = ["-c:v", "libx264", "-preset", preset]
+    if crf is not None:
+        args += ["-crf", str(crf)]
+    return args

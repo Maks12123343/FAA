@@ -104,7 +104,7 @@ def _trim_inplace(video_path: str) -> None:
     subprocess.run(
         [FFMPEG, "-y", "-i", video_path,
          "-t", str(max_dur),
-         "-c:v", "libx264", "-preset", "ultrafast", "-an",
+         *config.get_video_encoder_args("ultrafast"), "-an",
          tmp_path],
         capture_output=True, timeout=120,
     )
@@ -132,7 +132,7 @@ def _local_copy_for_analysis(video_path: str) -> str:
     print(f"[stocks] Converting {os.path.basename(video_path)} → local mp4...", flush=True)
     r = subprocess.run(
         [FFMPEG, "-y", "-i", video_path,
-         "-c:v", "libx264", "-preset", "ultrafast", "-an",
+         *config.get_video_encoder_args("ultrafast"), "-an",
          "-t", "30",  # cap at 30s just in case
          local_path],
         capture_output=True, timeout=120,
@@ -485,6 +485,14 @@ def _pexels_fallback(section_text: str, n: int) -> list:
 STOCK_SCORE_THRESHOLD = 0.85
 
 
+def _is_gemini_auth_error(err) -> bool:
+    text = str(err).lower()
+    return any(x in text for x in (
+        "401", "403", "permission", "credentials",
+        "unauthenticated", "unauthorized", "invalid_argument",
+    ))
+
+
 def validate_stock_for_section(clip_path: str, section_text: str) -> float:
     """
     Validate a stock clip against a script section using Gemini.
@@ -535,6 +543,7 @@ def validate_stock_for_section(clip_path: str, section_text: str) -> float:
     parts.append(prompt)
 
     score = 0.0
+    got_response = False
     for attempt in range(3):
         try:
             r = client.models.generate_content(model=model, contents=parts)
@@ -543,8 +552,11 @@ def validate_stock_for_section(clip_path: str, section_text: str) -> float:
             m = re.search(r"\{.*\}", text, re.DOTALL)
             data = json.loads(m.group() if m else text)
             score = float(data.get("score", 0.0))
+            got_response = True
             break
         except Exception as e:
+            if _is_gemini_auth_error(e):
+                raise RuntimeError(f"[stocks] Gemini auth/config error: {e}") from e
             if "429" in str(e) or "quota" in str(e).lower() or "resource" in str(e).lower():
                 wait = 5 * (attempt + 1)
                 print(f"[stocks] Rate limit, waiting {wait}s (attempt {attempt+1}/3)...", flush=True)
@@ -552,11 +564,12 @@ def validate_stock_for_section(clip_path: str, section_text: str) -> float:
             else:
                 break
 
-    try:
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump({"score": score}, f)
-    except Exception:
-        pass
+    if got_response:
+        try:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump({"score": score}, f)
+        except Exception:
+            pass
 
     return score
 
@@ -722,6 +735,7 @@ def prewarm_stock_validation(whisper_segments: list, settings: dict, emit=None) 
 
     done = [0]
     lock = threading.Lock()
+    worker_errors = []
 
     def _process_batch(batch):
         for attempt in range(3):
@@ -737,6 +751,8 @@ def prewarm_stock_validation(whisper_segments: list, settings: dict, emit=None) 
             except Exception as e:
                 err = str(e)
                 is_rate = "429" in err or "quota" in err.lower() or "resource_exhausted" in err.lower()
+                if _is_gemini_auth_error(e):
+                    raise RuntimeError(f"[stocks] Gemini auth/config error: {e}") from e
                 if is_rate and attempt < 2:
                     wait = 15 * (attempt + 1)
                     print(f"[stocks] Rate limit, retry in {wait}s...", flush=True)
@@ -752,6 +768,10 @@ def prewarm_stock_validation(whisper_segments: list, settings: dict, emit=None) 
                 f.result()
             except Exception as e:
                 print(f"[stocks] Worker error: {e}", flush=True)
+                worker_errors.append(e)
+
+    if worker_errors:
+        raise RuntimeError(f"[stocks] Stock validation failed: {worker_errors[0]}")
 
     print(f"[stocks] Stock validation pre-warm done.", flush=True)
     if emit:

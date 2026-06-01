@@ -12,6 +12,14 @@ FFMPEG  = config.FFMPEG
 FFPROBE = config.FFPROBE
 
 
+def _is_gemini_auth_error(err) -> bool:
+    text = str(err).lower()
+    return any(x in text for x in (
+        "401", "403", "permission", "credentials",
+        "unauthenticated", "unauthorized", "invalid_argument",
+    ))
+
+
 def _gemini():
     from google import genai
     os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", config.VERTEX_CREDENTIALS)
@@ -363,6 +371,8 @@ def analyze_all_clips(clips_index: list, emit=None) -> list:
             except Exception as e:
                 err = str(e)
                 is_rate = "429" in err or "quota" in err.lower() or "resource_exhausted" in err.lower()
+                if _is_gemini_auth_error(e):
+                    raise RuntimeError(f"[clip_matcher] Gemini auth/config error: {e}") from e
                 if is_rate and attempt < 2:
                     wait = 15 * (attempt + 1)
                     print(f"[clip_matcher] Rate limit, retry in {wait}s...", flush=True)
@@ -397,7 +407,8 @@ def analyze_all_clips(clips_index: list, emit=None) -> list:
 def match_clips_multi(section_texts: list, clips_index: list, top_n: int = 10, emit=None) -> list:
     """
     For each section text, find top-N best matching clips by tag/description overlap.
-    Returns list of lists: one inner list per section.
+    clips_index: list of clip dicts with at least a "file" key (enriched by analyze_all_clips).
+    Returns list of lists of FILE PATHS (strings), one inner list per section.
     """
     results = []
     for i, section_text in enumerate(section_texts):
@@ -407,7 +418,12 @@ def match_clips_multi(section_texts: list, clips_index: list, top_n: int = 10, e
             if score > 0:
                 scored.append((score, clip))
         scored.sort(key=lambda x: x[0], reverse=True)
-        top = [c for _, c in scored[:top_n]]
+        # Always return file paths (strings), never raw dicts
+        top = []
+        for _, c in scored[:top_n]:
+            path = c.get("file", "") if isinstance(c, dict) else c
+            if path:
+                top.append(path)
         results.append(top)
         if emit:
             emit("match", f"Matched section {i+1}/{len(section_texts)}")
@@ -489,7 +505,10 @@ def validate_clip_for_section(clip_path: str, section_text: str) -> float:
         m = re.search(r"\{.*\}", text, re.DOTALL)
         data = json.loads(m.group() if m else text)
         score = float(data.get("score", 0.0))
-    except Exception:
+    except Exception as e:
+        err = str(e).lower()
+        if _is_gemini_auth_error(e):
+            raise RuntimeError(f"[clip_matcher] Gemini auth/config error: {e}") from e
         score = 0.0
 
     try:
@@ -498,4 +517,167 @@ def validate_clip_for_section(clip_path: str, section_text: str) -> float:
     except Exception:
         pass
 
-   
+    return score
+
+
+# ── Batch validation (8 pairs per Gemini call, 3 parallel workers) ────────────
+
+_VALIDATION_BATCH_SIZE = 8
+
+
+def _validate_batch_chunk(items: list, client, model: str) -> list:
+    """
+    items: [{"clip_path": str, "section_text": str, "frames": list[bytes]}, ...]
+    Returns list of scores (float 0.0-1.0) in same order.
+    """
+    from google.genai import types
+    import re as _re
+
+    contents = [f"Score how well each of {len(items)} video clips matches its script section.\n"]
+    for idx, item in enumerate(items):
+        contents.append(f'CLIP {idx + 1} — Script: "{item["section_text"][:200]}":')
+        for fb in item["frames"]:
+            contents.append(types.Part.from_bytes(data=fb, mime_type="image/jpeg"))
+    contents.append(
+        f"\nFor each clip, rate how well it visually matches its script section.\n"
+        f"Reply ONLY with a JSON array of exactly {len(items)} objects:\n"
+        f'[{{"score": 0.0}}, {{"score": 0.8}}, ...] where 0.0=no match, 1.0=perfect match.'
+    )
+
+    response = client.models.generate_content(model=model, contents=contents)
+    text = _re.sub(r"^```(?:json)?\s*", "", response.text.strip())
+    text = _re.sub(r"\s*```$",          "", text)
+    m    = _re.search(r"\[.*\]", text, _re.DOTALL)
+    try:
+        raw = json.loads(m.group() if m else text)
+        return [float(item.get("score", 0.0)) if isinstance(item, dict) else 0.0 for item in raw]
+    except Exception:
+        return [0.0] * len(items)
+
+
+def _build_validation_result(
+    section_candidates: list,
+    section_texts: list,
+    scores: dict,
+) -> list:
+    result = []
+    for sec_idx, (clips, section_text) in enumerate(zip(section_candidates, section_texts)):
+        scored = [
+            (clip_path, scores.get((sec_idx, clip_path), 0.0))
+            for clip_path in clips
+            if os.path.exists(clip_path)
+        ]
+        scored.sort(key=lambda x: -x[1])
+        result.append(scored)
+    return result
+
+
+def batch_validate_candidates(
+    section_candidates: list,
+    section_texts: list,
+    settings: dict,
+    emit=None,
+) -> list:
+    """
+    Batch validate competitor clip candidates per section with Gemini.
+    section_candidates: list[list[str]] — clip paths per section (from match_clips_multi)
+    section_texts: list[str] — original transcript section texts
+    Returns: list[list[(clip_path, score)]] sorted by score desc per section.
+    Disk-cached per (clip, section_text) — first language pays, others are free.
+    """
+    import threading
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    cached_scores: dict = {}
+    to_validate:   list = []
+
+    for sec_idx, (clips, section_text) in enumerate(zip(section_candidates, section_texts)):
+        for clip_path in clips:
+            if not os.path.exists(clip_path):
+                continue
+            cache_path = _validation_cache_path(clip_path, section_text)
+            if os.path.exists(cache_path):
+                try:
+                    with open(cache_path, encoding="utf-8") as f:
+                        cached_scores[(sec_idx, clip_path)] = float(json.load(f).get("score", 0.0))
+                    continue
+                except Exception:
+                    pass
+            to_validate.append((sec_idx, clip_path, section_text))
+
+    print(f"[clip_matcher] Validation: {len(cached_scores)} cached, {len(to_validate)} to validate", flush=True)
+    if emit:
+        emit("media", f"Validating {len(to_validate)} pairs ({len(cached_scores)} cached)...")
+
+    if not to_validate:
+        return _build_validation_result(section_candidates, section_texts, cached_scores)
+
+    def _extract(args):
+        sec_idx, clip_path, section_text = args
+        frames = [_frame_bytes(clip_path, r) for r in [0.0, 0.5, 1.0]]
+        return {
+            "sec_idx":      sec_idx,
+            "clip_path":    clip_path,
+            "section_text": section_text,
+            "frames":       [f for f in frames if f],
+        }
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        items = list(pool.map(_extract, to_validate))
+    items = [it for it in items if it["frames"]]
+
+    batches       = [items[i:i + _VALIDATION_BATCH_SIZE] for i in range(0, len(items), _VALIDATION_BATCH_SIZE)]
+    client, model = _gemini()
+    lock          = threading.Lock()
+    new_scores:   dict = {}
+    done          = [0]
+    worker_errors = []
+
+    def _process_batch(batch):
+        for attempt in range(3):
+            try:
+                scores = _validate_batch_chunk(batch, client, model)
+                for item, score in zip(batch, scores):
+                    cache_path = _validation_cache_path(item["clip_path"], item["section_text"])
+                    try:
+                        with open(cache_path, "w", encoding="utf-8") as f:
+                            json.dump({"score": score}, f)
+                    except Exception:
+                        pass
+                    with lock:
+                        new_scores[(item["sec_idx"], item["clip_path"])] = score
+                        done[0] += 1
+                        if emit and done[0] % 16 == 0:
+                            emit("media", f"Validated {done[0]}/{len(items)}...")
+                return
+            except Exception as e:
+                err = str(e)
+                is_rate = "429" in err or "quota" in err.lower() or "resource_exhausted" in err.lower()
+                if _is_gemini_auth_error(e):
+                    raise RuntimeError(f"[clip_matcher] Gemini auth/config error: {e}") from e
+                if is_rate and attempt < 2:
+                    _time.sleep(15 * (attempt + 1))
+                else:
+                    for item in batch:
+                        s = validate_clip_for_section(item["clip_path"], item["section_text"])
+                        with lock:
+                            new_scores[(item["sec_idx"], item["clip_path"])] = s or 0.0
+                            done[0] += 1
+                    return
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(_process_batch, b) for b in batches]
+        for f in as_completed(futures):
+            try:
+                f.result()
+            except Exception as e:
+                print(f"[clip_matcher] Validation worker error: {e}", flush=True)
+                worker_errors.append(e)
+
+    if worker_errors:
+        raise RuntimeError(f"[clip_matcher] Validation failed: {worker_errors[0]}")
+
+    all_scores = {**cached_scores, **new_scores}
+    print(f"[clip_matcher] Validation complete: {len(all_scores)} pairs scored", flush=True)
+    return _build_validation_result(section_candidates, section_texts, all_scores)

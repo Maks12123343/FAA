@@ -14,6 +14,7 @@ from flask_socketio import SocketIO, emit
 import config
 from backend import pipeline, media_library, clip_sourcer
 from backend import stocks_library, competitor_finder
+from backend import movie_library, movie_pipeline
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FAA_SECRET_KEY", "faa-local-dev-only-change-for-network-use")
@@ -139,14 +140,21 @@ def api_prepare():
 
     def run():
         global _job_active
+
+        def _emit(step, msg):
+            socketio.emit("progress", {"step": step, "message": msg})
+            eventlet.sleep(0)
+
         try:
             result = pipeline.prepare(
                 niche,
                 source_url=source_url,
-                emit=lambda step, msg: socketio.emit("progress", {"step": step, "message": msg}),
+                emit=_emit,
             )
             socketio.emit("prepare_done", result)
         except Exception as e:
+            import traceback
+            print(f"[app] ERROR in prepare: {e}\n{traceback.format_exc()}", flush=True)
             socketio.emit("error", {"message": str(e)})
         finally:
             with _job_lock:
@@ -174,18 +182,26 @@ def api_produce():
 
     def run():
         global _job_active
+
+        def _emit(step, msg):
+            socketio.emit("progress", {"step": step, "message": msg})
+            eventlet.sleep(0)
+
         try:
             for lang in languages:
                 try:
                     socketio.emit("progress", {"step": "produce", "message": f"Starting language: {lang}"})
+                    eventlet.sleep(0)
                     result = pipeline.produce(
                         prepare_id   = prepare_id,
                         youtube_urls = youtube_urls,
                         language     = lang,
-                        emit=lambda step, msg: socketio.emit("progress", {"step": step, "message": msg}),
+                        emit=_emit,
                     )
                     socketio.emit("produce_done", result)
                 except Exception as e:
+                    import traceback
+                    print(f"[app] ERROR in produce [{lang}]: {e}\n{traceback.format_exc()}", flush=True)
                     socketio.emit("error", {"message": f"[{lang}] {e}"})
             socketio.emit("all_done", {})
         finally:
@@ -440,6 +456,185 @@ def hide_competitor():
     hidden.add(channel_id)
     _save_hidden_competitors(hidden)
     return jsonify({"ok": True})
+
+
+# ── Movie Library routes ──────────────────────────────────────────────────────
+
+@app.route("/movies")
+def movies_page():
+    movies = movie_library.list_movies()
+    languages = _languages()
+    return render_template("movies.html", movies=movies, languages=languages)
+
+
+@app.route("/api/movies/list")
+def api_movies_list():
+    return jsonify(movie_library.list_movies())
+
+
+@app.route("/api/movies/process", methods=["POST"])
+def api_movies_process():
+    global _job_active
+    data       = request.json or {}
+    movie_path = data.get("movie_path", "").strip()
+    movie_name = data.get("movie_name", "").strip()
+
+    if not movie_path or not movie_name:
+        return jsonify({"error": "movie_path and movie_name required"}), 400
+    if not os.path.exists(movie_path):
+        return jsonify({"error": f"File not found: {movie_path}"}), 400
+
+    with _job_lock:
+        if _job_active:
+            return jsonify({"error": "A job is already running. Wait for it to finish."}), 429
+        _job_active = True
+
+    def run():
+        global _job_active
+        def _emit(step, msg):
+            socketio.emit("progress", {"step": step, "message": msg})
+            eventlet.sleep(0)
+        try:
+            result = movie_library.process_movie(movie_path, movie_name, emit=_emit)
+            socketio.emit("movie_indexed", {
+                "movie_name": movie_name,
+                "clip_count": len(result.get("clips", [])),
+            })
+        except Exception as e:
+            import traceback
+            print(f"[app] movie process error: {e}\n{traceback.format_exc()}", flush=True)
+            socketio.emit("error", {"message": str(e)})
+        finally:
+            with _job_lock:
+                _job_active = False
+
+    socketio.start_background_task(run)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/movies/process_folder", methods=["POST"])
+def api_movies_process_folder():
+    global _job_active
+    data        = request.json or {}
+    folder_path = data.get("folder_path", "").strip()
+    movie_name  = data.get("movie_name", "").strip()
+
+    if not folder_path or not movie_name:
+        return jsonify({"error": "folder_path and movie_name required"}), 400
+    if not os.path.isdir(folder_path):
+        return jsonify({"error": f"Folder not found: {folder_path}"}), 400
+
+    with _job_lock:
+        if _job_active:
+            return jsonify({"error": "A job is already running. Wait for it to finish."}), 429
+        _job_active = True
+
+    def run():
+        global _job_active
+        def _emit(step, msg):
+            socketio.emit("progress", {"step": step, "message": msg})
+            eventlet.sleep(0)
+        try:
+            result = movie_library.process_movie_folder(folder_path, movie_name, emit=_emit)
+            socketio.emit("movie_indexed", {
+                "movie_name": movie_name,
+                "clip_count": len(result.get("clips", [])),
+            })
+        except Exception as e:
+            import traceback
+            print(f"[app] movie folder process error: {e}\n{traceback.format_exc()}", flush=True)
+            socketio.emit("error", {"message": str(e)})
+        finally:
+            with _job_lock:
+                _job_active = False
+
+    socketio.start_background_task(run)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/movies/prepare", methods=["POST"])
+def api_movies_prepare():
+    global _job_active
+    data       = request.json or {}
+    source_url = data.get("source_url", "").strip()
+    if not source_url:
+        return jsonify({"error": "source_url required"}), 400
+
+    with _job_lock:
+        if _job_active:
+            return jsonify({"error": "A job is already running. Wait for it to finish."}), 429
+        _job_active = True
+
+    def run():
+        global _job_active
+        def _emit(step, msg):
+            socketio.emit("progress", {"step": step, "message": msg})
+            eventlet.sleep(0)
+        try:
+            result = movie_pipeline.prepare(source_url, emit=_emit)
+            socketio.emit("movie_prepare_done", result)
+        except Exception as e:
+            import traceback
+            print(f"[app] movie prepare error: {e}\n{traceback.format_exc()}", flush=True)
+            socketio.emit("error", {"message": str(e)})
+        finally:
+            with _job_lock:
+                _job_active = False
+
+    socketio.start_background_task(run)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/movies/produce", methods=["POST"])
+def api_movies_produce():
+    global _job_active
+    data       = request.json or {}
+    prepare_id = data.get("prepare_id", "").strip()
+    movie_name = data.get("movie_name", "").strip()
+    languages  = data.get("languages", [])
+
+    if not prepare_id or not movie_name or not languages:
+        return jsonify({"error": "prepare_id, movie_name and languages required"}), 400
+
+    with _job_lock:
+        if _job_active:
+            return jsonify({"error": "A job is already running. Wait for it to finish."}), 429
+        _job_active = True
+
+    def run():
+        global _job_active
+        def _emit(step, msg):
+            socketio.emit("progress", {"step": step, "message": msg})
+            eventlet.sleep(0)
+        try:
+            for lang in languages:
+                socketio.emit("progress", {"step": "produce", "message": f"Starting: {lang}"})
+                eventlet.sleep(0)
+                result = movie_pipeline.produce(prepare_id, movie_name, lang, emit=_emit)
+                socketio.emit("produce_done", result)
+            socketio.emit("all_done", {})
+        except Exception as e:
+            import traceback
+            print(f"[app] movie produce error: {e}\n{traceback.format_exc()}", flush=True)
+            socketio.emit("error", {"message": str(e)})
+        finally:
+            with _job_lock:
+                _job_active = False
+
+    socketio.start_background_task(run)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/movies/download/<project_id>")
+def download_movie_video(project_id):
+    safe_id = os.path.basename(project_id)
+    proj_dir = os.path.join(config.PROJECTS_DIR, safe_id)
+    output = os.path.join(proj_dir, f"{safe_id}.mp4")
+    if not os.path.realpath(output).startswith(os.path.realpath(config.PROJECTS_DIR)):
+        return jsonify({"error": "Invalid project id"}), 400
+    if not os.path.exists(output):
+        return jsonify({"error": "Not found"}), 404
+    return send_file(output, as_attachment=True, download_name=f"{safe_id}.mp4")
 
 
 @app.route("/api/cleanup", methods=["POST"])

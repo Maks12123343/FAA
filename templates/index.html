@@ -18,6 +18,14 @@
     <input type="text" id="sourceUrl" placeholder="https://www.youtube.com/watch?v=..." style="width:100%;background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px;color:#fff;font-size:13px;margin-top:4px">
   </div>
   <button class="btn btn-primary" id="prepareBtn" onclick="startPrepare()">Find Top Video & Transcribe</button>
+
+  <div style="margin-top:20px;padding-top:16px;border-top:1px solid #222">
+    <label style="color:#aaa;font-size:13px">Resume existing Prepare ID <span style="color:#555">(skip re-download — paste ID from a previous run)</span></label>
+    <div style="display:flex;gap:8px;margin-top:6px">
+      <input type="text" id="resumePrepareId" placeholder="china_economy_1780067124" style="flex:1;background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px;color:#fff;font-size:13px">
+      <button class="btn" onclick="resumePrepare()" style="background:#374151;color:#fff;border:1px solid #4b5563;white-space:nowrap">Resume</button>
+    </div>
+  </div>
 </div>
 
 <!-- Progress log -->
@@ -82,6 +90,16 @@ function log(msg, cls='') {
   line.textContent = msg;
   el.appendChild(line);
   el.scrollTop = el.scrollHeight;
+}
+
+function resumePrepare() {
+  const pid = document.getElementById('resumePrepareId').value.trim();
+  if (!pid) { alert('Paste a Prepare ID first'); return; }
+  currentPrepareId = pid;
+  document.getElementById('phase2Card').style.display = 'block';
+  document.getElementById('progressCard').style.display = 'block';
+  document.getElementById('progressLog').innerHTML = '';
+  log(`Resumed prepare: ${pid}. Add YouTube URLs and select languages, then click Start Production.`, 'done');
 }
 
 function startPrepare() {

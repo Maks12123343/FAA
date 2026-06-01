@@ -29,7 +29,7 @@ def _get_duration(path: str) -> float:
 def _cut_clip(src: str, out: str, start: float, duration: float):
     subprocess.run(
         [FFMPEG, "-y", "-ss", f"{start:.3f}", "-i", src,
-         "-t", f"{duration:.3f}", "-c:v", "libx264", "-preset", "ultrafast",
+         "-t", f"{duration:.3f}", *config.get_video_encoder_args("ultrafast"),
          "-an", out],
         capture_output=True, timeout=60,
     )
