@@ -3,19 +3,20 @@
 <h1>Clip Library</h1>
 
 <div class="card">
-  <h2>Add Video to Library</h2>
-  <div class="grid-2">
-    <div class="field"><label>Niche</label>
-      <select id="libNiche">
-        {% for n in niches %}
-        <option value="{{ n.id }}">{{ n.name }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div class="field"><label>YouTube URL</label>
-      <input type="text" id="libUrl" placeholder="https://youtube.com/watch?v=..."></div>
+  <h2>Add Videos to Library</h2>
+  <div class="field">
+    <label>Niche</label>
+    <select id="libNiche">
+      {% for n in niches %}
+      <option value="{{ n.id }}">{{ n.name }}</option>
+      {% endfor %}
+    </select>
   </div>
-  <button class="btn btn-primary" onclick="addToLibrary()">Download & Validate</button>
+  <div class="field" style="margin-top:12px">
+    <label>YouTube URLs <span style="color:#6b7280;font-size:12px">(one per line — paste as many as you want)</span></label>
+    <textarea id="libUrls" rows="6" placeholder="https://www.youtube.com/watch?v=...&#10;https://www.youtube.com/watch?v=...&#10;https://www.youtube.com/watch?v=..." style="width:100%;background:#111;border:1px solid #333;border-radius:6px;padding:10px;color:#fff;font-size:13px;resize:vertical;margin-top:4px"></textarea>
+  </div>
+  <button class="btn btn-primary" onclick="addToLibrary()">Download & Validate All</button>
 </div>
 
 <div class="card">
@@ -61,6 +62,9 @@
 {% block scripts %}
 <script>
 const socket = io();
+let _libBulkUrls = [];
+let _libBulkNiche = '';
+let _libBulkIdx = 0;
 
 function log(msg, cls='') {
   const card = document.getElementById('libProgressCard');
@@ -75,17 +79,38 @@ function log(msg, cls='') {
 
 function addToLibrary() {
   const niche = document.getElementById('libNiche').value;
-  const url   = document.getElementById('libUrl').value.trim();
-  if (!url) { alert('Enter YouTube URL'); return; }
+  const raw   = document.getElementById('libUrls').value;
+  const urls  = raw.split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
+
+  if (!urls.length) { alert('Paste at least one YouTube URL'); return; }
 
   document.getElementById('libLog').innerHTML = '';
-  log('Starting download & validation...');
+  document.getElementById('libProgressCard').style.display = 'block';
+
+  _libBulkUrls  = urls;
+  _libBulkNiche = niche;
+  _libBulkIdx   = 0;
+
+  log(`Starting bulk import: ${urls.length} URL(s) for niche "${niche}"`);
+  processNextLibUrl();
+}
+
+function processNextLibUrl() {
+  if (_libBulkIdx >= _libBulkUrls.length) {
+    log(`All ${_libBulkUrls.length} URL(s) processed.`, 'done');
+    refreshNicheStats(_libBulkNiche);
+    return;
+  }
+  const url = _libBulkUrls[_libBulkIdx];
+  log(`[${_libBulkIdx + 1}/${_libBulkUrls.length}] ${url}`);
 
   fetch('/api/library/add', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({niche, url})
-  });
+    body: JSON.stringify({niche: _libBulkNiche, url})
+  }).then(r => r.json()).then(d => {
+    if (d.error) log('ERROR: ' + d.error, 'error');
+  }).catch(e => log('ERROR: ' + e, 'error'));
 }
 
 function analyzeStocks() {
@@ -119,23 +144,25 @@ function loadStockStats() {
   });
 }
 
+function refreshNicheStats(niche) {
+  fetch('/api/library/stats?niche=' + niche).then(r => r.json()).then(s => {
+    const row = document.getElementById('row_' + niche);
+    if (row) {
+      row.cells[1].textContent = s.raw;
+      row.cells[2].innerHTML   = `<span class="badge badge-green">${s.validated}</span>`;
+    }
+  });
+}
+
 socket.on('library_progress', data => log(data.message));
 socket.on('library_done', data => {
   const msg = data.message || `Done! Passed: ${data.passed || 0}`;
   log(msg, 'done');
   loadStockStats();
-  // also refresh niche stats if available
-  const nicheEl = document.getElementById('libNiche');
-  if (nicheEl) {
-    const niche = nicheEl.value;
-    fetch('/api/library/stats?niche=' + niche).then(r => r.json()).then(s => {
-      const row = document.getElementById('row_' + niche);
-      if (row) {
-        row.cells[1].textContent = s.raw;
-        row.cells[2].innerHTML   = `<span class="badge badge-green">${s.validated}</span>`;
-      }
-    });
-  }
+  refreshNicheStats(_libBulkNiche);
+  // move to next URL in bulk queue
+  _libBulkIdx++;
+  processNextLibUrl();
 });
 
 // Load stock stats on page load
