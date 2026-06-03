@@ -1,18 +1,60 @@
+import base64
 import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
 
 CACHE_SUFFIX  = ".faa_score.json"
-CACHE_VERSION = 1
+CACHE_VERSION = 2  # bumped: pioneer backend added
 BATCH_SIZE    = 8
 
+
+# ---------------------------------------------------------------------------
+# Thread-safe Pioneer.ai key pool (round-robin)
+# ---------------------------------------------------------------------------
+
+class _PioneerKeyPool:
+    """Distributes API keys across threads in round-robin fashion."""
+
+    def __init__(self):
+        self._lock  = threading.Lock()
+        self._index = 0
+        self._keys  = []
+
+    def _reload(self):
+        settings = config.load_settings()
+        keys = settings.get("pioneer_api_keys", [])
+        if isinstance(keys, str):
+            keys = [k.strip() for k in keys.split(",") if k.strip()]
+        self._keys = [k for k in keys if k]
+
+    def next_key(self) -> str | None:
+        with self._lock:
+            self._reload()
+            if not self._keys:
+                return None
+            key = self._keys[self._index % len(self._keys)]
+            self._index += 1
+            return key
+
+    def available(self) -> bool:
+        self._reload()
+        return bool(self._keys)
+
+
+_key_pool = _PioneerKeyPool()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _setup_vertex():
     os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", config.VERTEX_CREDENTIALS)
@@ -58,7 +100,62 @@ def _parse_json(text: str) -> dict:
     return json.loads(m.group() if m else text)
 
 
-def _make_client():
+# ---------------------------------------------------------------------------
+# Pioneer.ai scoring (OpenAI-compatible vision API)
+# ---------------------------------------------------------------------------
+
+def _score_pioneer(frames: list, description: str, api_key: str) -> dict:
+    """Score clip frames using pioneer.ai (OpenAI-compatible Gemini proxy)."""
+    import urllib.request
+
+    settings  = config.load_settings()
+    api_url   = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
+    model     = settings.get("pioneer_model", "a87f8985-e7d8-4012-adac-6d5c66287213")
+
+    prompt = (
+        f'Frames from a short video clip. '
+        f'How visually relevant is this clip to: "{description}"?\n'
+        f'JSON only: {{"score": 0.0-1.0, "reason": "one sentence"}}'
+    )
+
+    # Build content array: images first, then text
+    content = []
+    for frame_path in frames:
+        with open(frame_path, "rb") as fh:
+            b64 = base64.b64encode(fh.read()).decode("ascii")
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+        })
+    content.append({"type": "text", "text": prompt})
+
+    payload = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "stream": False,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        api_url,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+
+    text = body["choices"][0]["message"]["content"]
+    return _parse_json(text)
+
+
+# ---------------------------------------------------------------------------
+# Vertex AI scoring (original backend)
+# ---------------------------------------------------------------------------
+
+def _make_vertex_client():
     from google import genai
     _setup_vertex()
     settings = config.load_settings()
@@ -69,10 +166,10 @@ def _make_client():
     )
 
 
-def _score_single(frames: list, description: str) -> dict:
+def _score_vertex(frames: list, description: str) -> dict:
     from google.genai import types
     settings = config.load_settings()
-    client   = _make_client()
+    client   = _make_vertex_client()
     model    = settings.get("gemini_model", "gemini-2.5-flash")
 
     prompt = (
@@ -89,6 +186,10 @@ def _score_single(frames: list, description: str) -> dict:
     r = client.models.generate_content(model=model, contents=contents)
     return _parse_json(r.text)
 
+
+# ---------------------------------------------------------------------------
+# Cache helpers
+# ---------------------------------------------------------------------------
 
 def _read_cache(cache_path: str, description: str) -> dict | None:
     try:
@@ -116,7 +217,17 @@ def _write_cache(cache_path: str, description: str, result: dict):
             pass
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def score_clip(video_path: str, description: str) -> dict:
+    """Score a video clip for relevance to description.
+
+    Backend priority:
+      1. Pioneer.ai (if keys configured) — free, no Vertex setup needed
+      2. Vertex AI (Gemini) — fallback if pioneer not configured or fails
+    """
     cache_path = video_path + CACHE_SUFFIX
     cached = _read_cache(cache_path, description)
     if cached:
@@ -127,7 +238,19 @@ def score_clip(video_path: str, description: str) -> dict:
             frames = _extract_frames(video_path, tmp)
             if not frames:
                 return {"score": 0.0, "reason": "no frames extracted"}
-            result = _score_single(frames, description)
+
+            # Try pioneer.ai first
+            api_key = _key_pool.next_key()
+            if api_key:
+                try:
+                    result = _score_pioneer(frames, description, api_key)
+                    print(f"[validator] pioneer scored {os.path.basename(video_path)}: {result.get('score')}", flush=True)
+                except Exception as e:
+                    print(f"[validator] pioneer failed ({e}), falling back to Vertex", flush=True)
+                    result = _score_vertex(frames, description)
+            else:
+                result = _score_vertex(frames, description)
+
     except Exception as e:
         return {"score": 0.0, "reason": f"error: {e}"}
 

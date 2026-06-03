@@ -79,6 +79,12 @@ DEFAULT_SETTINGS = {
         "tr": {"name": "Turkish Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
     },
 
+    # Pioneer.ai API (OpenAI-compatible Gemini proxy — free tier, no Vertex needed)
+    # Add up to N keys for parallel validation (1 key per thread)
+    "pioneer_api_keys": [],
+    "pioneer_model": "a87f8985-e7d8-4012-adac-6d5c66287213",
+    "pioneer_api_url": "https://api.pioneer.ai/v1/chat/completions",
+
     # Unofficial Gemini cookie API (optional — doubles throughput alongside Vertex AI)
     # Fill psid / psidts from browser cookies at gemini.google.com
     "gemini_cookies": {
