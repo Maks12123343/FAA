@@ -81,6 +81,7 @@
 <script>
 const socket = io();
 let currentPrepareId = null;
+let _producing = false;
 
 function log(msg, cls='') {
   const card = document.getElementById('progressCard');
@@ -138,16 +139,16 @@ function startProduce() {
 
   if (!langs.length) { alert('Select at least one language'); return; }
 
+  if (!currentPrepareId) {
+    log('ERROR: No prepare session found. Please click "Find Top Video & Transcribe" first.', 'error');
+    return;
+  }
+
+  _producing = true;
   document.getElementById('produceBtn').disabled = true;
   document.getElementById('progressLog').innerHTML = '';
   document.getElementById('progressCard').style.display = 'block';
   log(`Starting production for ${langs.length} language(s)...`);
-
-  if (!currentPrepareId) {
-    log('ERROR: No prepare session found. Please click "Find Top Video & Transcribe" first.', 'error');
-    document.getElementById('produceBtn').disabled = false;
-    return;
-  }
 
   fetch('/api/produce', {
     method: 'POST',
@@ -160,10 +161,12 @@ function startProduce() {
   }).then(r => r.json()).then(d => {
     if (d.error) {
       log('ERROR: ' + d.error, 'error');
+      _producing = false;
       document.getElementById('produceBtn').disabled = false;
     }
   }).catch(e => {
     log('ERROR: ' + e, 'error');
+    _producing = false;
     document.getElementById('produceBtn').disabled = false;
   });
 }
@@ -219,14 +222,20 @@ socket.on('produce_done', data => {
 });
 
 socket.on('all_done', () => {
+  _producing = false;
   document.getElementById('produceBtn').disabled = false;
   log('All languages finished!', 'done');
 });
 
 socket.on('error', data => {
   log('ERROR: ' + data.message, 'error');
+  // Always re-enable prepare button (prepare errors are always fatal)
   document.getElementById('prepareBtn').disabled = false;
-  document.getElementById('produceBtn').disabled = false;
+  // Only re-enable produce button if NOT currently in a produce run
+  // (during produce, per-language errors are non-fatal — job continues)
+  if (!_producing) {
+    document.getElementById('produceBtn').disabled = false;
+  }
 });
 </script>
 {% endblock %}
