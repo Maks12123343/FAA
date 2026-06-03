@@ -1,0 +1,27 @@
+{
+  "name": "Psychology Movies",
+  "description": "Psychology of movies, characters, dark themes, film analysis",
+  "montage_style": "cinematic",
+  "title_keywords": ["psychology", "psychological", "dark", "movie", "film", "character", "villain", "hero", "mind", "trauma"],
+  "channels": [
+    "https://www.youtube.com/@NerdSync",
+    "https://www.youtube.com/@TheTake",
+    "https://www.youtube.com/@ScreenPrism",
+    "https://www.youtube.com/@Wisecrack",
+    "https://www.youtube.com/@Like Stories of Old",
+    "https://www.youtube.com/@KaptainKristian"
+  ],
+  "search_keywords": [
+    "psychology of movies",
+    "dark psychology film analysis",
+    "movie character psychology",
+    "villain psychology explained",
+    "film theory psychology"
+  ],
+  "stock_tags": [
+    "cinema", "movie theater", "film reel", "dark psychology",
+    "human mind", "brain", "emotions", "storytelling",
+    "dramatic scene", "psychological thriller"
+  ],
+  "clip_score_threshold": 0.80
+}

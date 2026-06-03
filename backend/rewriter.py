@@ -21,21 +21,36 @@ def _load_prompt(path: str, language: str) -> str:
 
 
 def _call_claude(system: str, messages: list) -> tuple:
-    import anthropic
+    import requests as _req
     settings = config.load_settings()
-    client = anthropic.Anthropic(api_key=settings.get("claude_api_key", ""), timeout=600.0, max_retries=0)
-    model = settings.get("claude_model", "claude-sonnet-4-6")
+
+    api_keys = settings.get("pioneer_api_keys", [])
+    api_key  = api_keys[0] if api_keys else ""
+    model    = settings.get("pioneer_model", "ca143171-0ff9-4ca9-86e6-f5731d36bdea")
+    api_url  = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
+
+    payload = {
+        "model":    model,
+        "messages": [{"role": "system", "content": system}] + messages,
+        "stream":   False,
+    }
     try:
-        r = client.messages.create(
-            model=model,
-            max_tokens=8192,
-            system=system,
-            messages=messages,
+        resp = _req.post(
+            api_url,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+            json=payload,
+            timeout=600,
         )
+        resp.raise_for_status()
     except Exception as e:
-        print(f"[rewriter] Claude API error: {type(e).__name__}: {e}", flush=True)
+        print(f"[rewriter] Pioneer API error: {type(e).__name__}: {e}", flush=True)
         raise
-    return r.content[0].text.strip(), r.stop_reason
+    data        = resp.json()
+    text        = data["choices"][0]["message"]["content"].strip()
+    finish      = data["choices"][0]["finish_reason"]
+    # Map OpenAI "length" → "max_tokens" so callers stay unchanged
+    stop_reason = "max_tokens" if finish == "length" else finish
+    return text, stop_reason
 
 
 # ── Script rewrite ────────────────────────────────────────────────────────────
@@ -215,21 +230,29 @@ def _parse_metadata_output(text: str) -> dict:
     """
     Parse the structured output:
       ### Optimized Titles:
-      1. Title — Ukrainian
+      1. Title in language — Ukrainian translation
       ...
       ### Optimized Description:
       ...
       ### Optimized Tags:
       tag1, tag2, ...
     """
-    # Titles
-    titles = []
+    # Titles — each line: "Title in target language — Ukrainian translation"
+    titles = []        # full strings including UA translation (for display)
+    titles_main = []   # only the target-language part (for video title)
     titles_m = re.search(r"###\s*Optimized Titles:(.*?)###\s*Optimized Description:", text, re.DOTALL | re.IGNORECASE)
     if titles_m:
         for line in titles_m.group(1).strip().splitlines():
             m = re.match(r"\d+\.\s+(.+)", line.strip())
             if m:
-                titles.append(m.group(1).strip())
+                full = m.group(1).strip()
+                titles.append(full)
+                # Split off Ukrainian translation (separator: " — ")
+                if " — " in full:
+                    main_part = full.split(" — ")[0].strip()
+                else:
+                    main_part = full
+                titles_main.append(main_part)
 
     # Description
     description = ""
@@ -244,9 +267,16 @@ def _parse_metadata_output(text: str) -> dict:
         tags_raw = tags_m.group(1).strip()
     tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
 
+    tags_len = len(tags_raw)
+    print(
+        f"[rewriter] Parsed metadata — {len(titles)} titles, "
+        f"tags={tags_len} chars (target 490-500)",
+        flush=True,
+    )
     return {
-        "titles":      titles,                          # all 5 options
-        "title":       titles[0] if titles else "",     # first option as default
+        "titles":      titles,                                  # full "Title — Переклад" strings
+        "titles_main": titles_main,                             # only target-language part
+        "title":       titles_main[0] if titles_main else "",   # clean title for video
         "description": description,
         "tags":        tags,
         "tags_raw":    tags_raw,
@@ -324,12 +354,13 @@ def rewrite_all(
     )
 
     return {
-        "script":      script,
-        "title":       meta.get("title", source_title),
-        "titles":      meta.get("titles", []),
-        "description": meta.get("description", ""),
-        "tags":        meta.get("tags", []),
-        "tags_raw":    meta.get("tags_raw", ""),
+        "script":       script,
+        "title":        meta.get("title", source_title),
+        "titles":       meta.get("titles", []),       # full "Title — Переклад" strings
+        "titles_main":  meta.get("titles_main", []),  # only target-language part
+        "description":  meta.get("description", ""),
+        "tags":         meta.get("tags", []),
+        "tags_raw":     meta.get("tags_raw", ""),
     }
 
 

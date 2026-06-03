@@ -829,6 +829,140 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
     }
 
 
+def produce_from_script(
+    script: str,
+    title: str,
+    movie_name: str,
+    language: str,
+    metadata: dict = None,
+    emit=None,
+    global_used_ids: set = None,
+) -> dict:
+    """
+    Produce a video from a pre-written script (Writer flow).
+    Skips transcription and rewrite — goes straight to TTS → clips → montage.
+    metadata: optional dict with keys title, titles, description, tags.
+    """
+    def log(step, msg):
+        print(f"[movie_pipeline:from_script:{step}] {msg}", flush=True)
+        if emit:
+            emit(step, msg)
+
+    proj_id  = f"writer_{language}_{int(time.time())}"
+    proj_dir = os.path.join(config.PROJECTS_DIR, proj_id)
+    os.makedirs(proj_dir, exist_ok=True)
+
+    # Детермінований RNG для ефектів кліпів
+    clip_seed = int.from_bytes(hashlib.md5(proj_id.encode()).digest()[:4], "big")
+    clip_rng  = random.Random(clip_seed)
+
+    # ── Save script ───────────────────────────────────────────────────────────
+    script_path = os.path.join(proj_dir, "script.txt")
+    with open(script_path, "w", encoding="utf-8") as f:
+        f.write(script)
+
+    if len(script.split()) < 100:
+        raise RuntimeError(
+            f"Script too short ({len(script.split())} words). "
+            "Please provide a longer script."
+        )
+
+    # ── Save metadata ─────────────────────────────────────────────────────────
+    meta = metadata or {}
+    meta_path = os.path.join(proj_dir, "metadata.json")
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    log("script", f"Script: {len(script)} chars, {len(script.split())} words")
+
+    # ── TTS ───────────────────────────────────────────────────────────────────
+    audio_path = os.path.join(proj_dir, "voiceover.mp3")
+    if not os.path.exists(audio_path):
+        log("tts", "Generating voiceover...")
+        tts.generate(script, language, audio_path)
+        log("tts", "Voiceover done.")
+    else:
+        log("tts", "Voiceover cached.")
+
+    audio_dur = _get_duration(audio_path)
+    log("tts", f"Audio duration: {audio_dur:.1f}s")
+
+    if audio_dur < MIN_AUDIO_DURATION:
+        raise RuntimeError(
+            f"Voiceover too short: {audio_dur:.1f}s (min {MIN_AUDIO_DURATION}s). "
+            "Script may be too short or TTS failed."
+        )
+
+    # ── Segments with timestamps ──────────────────────────────────────────────
+    chunks              = _split_into_chunks(script, WORDS_PER_SECTION)
+    segments_with_times = _segments_from_audio(audio_path, chunks, audio_dur)
+    log("segments", f"{len(segments_with_times)} segments, "
+        f"last ends at {segments_with_times[-1]['end']:.1f}s")
+
+    # ── Text overlays ─────────────────────────────────────────────────────────
+    log("overlays", "Planning text overlays...")
+    overlay_plan  = _plan_text_overlays(segments_with_times, emit=emit)
+    text_overlays = _build_text_overlays(overlay_plan, segments_with_times)
+    log("overlays", f"Planned {len(text_overlays)} text overlays.")
+
+    # ── Clip selection ────────────────────────────────────────────────────────
+    log("clips", f"Selecting clips from '{movie_name}' (Gemini batch validation)...")
+    clip_files = _select_clips_for_segments(
+        segments_with_times, movie_name, audio_dur,
+        global_used_ids=global_used_ids,
+    )
+    if not clip_files:
+        raise RuntimeError(f"No clips found for movie '{movie_name}'. Is it indexed?")
+    log("clips", f"Selected {len(clip_files)} clips.")
+
+    # ── Normalize + uniqualize + effects ──────────────────────────────────────
+    log("clips", "Preparing clips (normalize + uniqualize + effects)...")
+    uniq_params = make_uniq_params_for_language(language, proj_id)
+    effects     = _assign_clip_effects(len(clip_files), clip_rng)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        prepared = []
+        for i, (cf, fx) in enumerate(zip(clip_files, effects)):
+            out = os.path.join(tmp_dir, f"clip_{i:04d}.mp4")
+            ok  = _prepare_movie_clip(
+                cf, out, uniq_params,
+                max_dur=fx["max_dur"],
+                effect=fx["effect"],
+                speed=fx["speed"],
+            )
+            if ok:
+                prepared.append(out)
+            if emit and (i + 1) % 10 == 0:
+                emit("clips", f"Prepared {i + 1}/{len(clip_files)} clips...")
+
+        if not prepared:
+            raise RuntimeError("No clips survived preparation.")
+
+        log("montage", f"Assembling {len(prepared)} clips ({audio_dur:.1f}s audio)...")
+        output_path = os.path.join(proj_dir, f"{proj_id}.mp4")
+        _build_movie_video(
+            clips         = prepared,
+            audio_path    = audio_path,
+            output_path   = output_path,
+            text_overlays = text_overlays,
+            proj_id       = proj_id,
+        )
+
+    log("done", f"Video ready: {output_path}")
+
+    return {
+        "project_id":  proj_id,
+        "project_dir": proj_dir,
+        "output_path": output_path,
+        "audio_dur":   round(audio_dur, 1),
+        "clips_used":  len(prepared),
+        "title":       meta.get("title", title),
+        "titles":      meta.get("titles", []),
+        "description": meta.get("description", ""),
+        "tags":        meta.get("tags", []),
+    }
+
+
 def produce_batch(prepare_id: str, movie_name: str, language: str,
                   count: int = 3, emit=None) -> list:
     """

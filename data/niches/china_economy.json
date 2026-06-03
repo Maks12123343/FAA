@@ -1,6 +1,7 @@
 {
   "name": "China Economy",
   "description": "Chinese economy, finance, trade, infrastructure",
+  "montage_style": "standard",
   "title_keywords": ["china", "chinese", "china's", "beijing", "shanghai"],
   "channels": [
     "https://www.youtube.com/@thedarkspan",

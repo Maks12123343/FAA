@@ -17,6 +17,29 @@ _COMPETITOR_MAX_USES = 3
 _STOCK_MAX_USES = 1
 
 
+def _load_session_blocked(prepare_dir: str) -> set:
+    """Load session-blocked clips (every 3rd used clip per video is blocked for subsequent videos)."""
+    path = os.path.join(prepare_dir, "session_blocked.json")
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def _save_session_blocked(prepare_dir: str, blocked: set):
+    """Atomic save of session-blocked clips."""
+    path = os.path.join(prepare_dir, "session_blocked.json")
+    tmp  = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(list(blocked), f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def _load_global_used(prepare_dir: str) -> dict:
     """Load cross-video clip usage counter from prepare_dir."""
     path = os.path.join(prepare_dir, "global_used_clips.json")
@@ -151,6 +174,13 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
     top_video   = state["top_video"]
     transcript  = state["transcript"]
     source_meta = state["source_meta"]
+
+    # Load niche config to get montage_style
+    niche_path = os.path.join(config.NICHES_DIR, f"{niche_name}.json")
+    with open(niche_path, encoding="utf-8") as _nf:
+        _niche_data = json.load(_nf)
+    montage_style = _niche_data.get("montage_style", "standard")
+    log("media", f"Montage style: {montage_style}")
 
     # Check if a previous incomplete run for this prepare+language already has
     # script/voiceover/whisper — if so, reuse them to save time
@@ -344,10 +374,14 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
     global_used = _load_global_used(prepare_dir)
     log("media", f"Global used clips loaded: {len(global_used)} clips tracked so far")
 
+    # Load session blocked clips (every 3rd clip from previous videos in this session)
+    session_blocked = _load_session_blocked(prepare_dir)
+    log("media", f"Session blocked clips: {len(session_blocked)} clips unavailable this session")
+
     # Pre-warm stock validation — precompute contexts once, reuse in assembly loop
     log("media", "Pre-validating stock clips in batch mode...")
     from backend.stocks_library import prewarm_stock_validation
-    chunks_prebuilt   = _rechunk_segments(whisper_segments)
+    chunks_prebuilt   = _rechunk_segments(whisper_segments, style=montage_style)
     stock_contexts    = _build_stock_contexts(chunks_prebuilt, title)
     synthetic_segs    = [{"text": ctx} for ctx in stock_contexts]
     prewarm_stock_validation(synthetic_segs, config.load_settings(), emit=emit)
@@ -357,6 +391,7 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
         video_title=title,
         precomputed_chunks=chunks_prebuilt,
         precomputed_stock_contexts=stock_contexts,
+        session_blocked=session_blocked,
     )
     log("media", f"Total clips assembled: {len(clips)}")
     if not clips:
@@ -369,6 +404,10 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
     _save_global_used(prepare_dir, global_used)
     log("media", "Global used clips tracker saved")
 
+    # Save updated session blocked clips
+    _save_session_blocked(prepare_dir, session_blocked)
+    log("media", f"Session blocked clips saved: {len(session_blocked)} total")
+
     # -- Text overlays --------------------------------------------------------
     log("text", "Generating text overlays...")
     overlays = text_renderer.generate_stat_overlays(script, audio_dur)
@@ -376,7 +415,7 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
     # -- Montage --------------------------------------------------------------
     log("montage", "Assembling video...")
     output_path = os.path.join(project_dir, "output.mp4")
-    montage.assemble(clips, audio_path, output_path, text_overlays=overlays)
+    montage.assemble(clips, audio_path, output_path, text_overlays=overlays, montage_style=montage_style)
 
     # -- Final validation -----------------------------------------------------
     if not os.path.exists(output_path):
@@ -443,19 +482,44 @@ def _build_stock_contexts(chunks: list, video_title: str) -> list:
     return contexts
 
 
+def _dynamic_max_dur(t: float) -> float:
+    """
+    Return max clip duration based on timeline position for dynamic pacing:
+      0–30s  → 3s  (fast cuts at the start to hook the viewer)
+      30–90s → 4s  (medium pace in the middle)
+      90s+   → 5s  (slower, more relaxed towards the end)
+    """
+    if t < 30:
+        return 3.0
+    elif t < 90:
+        return 4.0
+    else:
+        return 5.0
+
+
 def _rechunk_segments(
     whisper_segments: list,
     min_dur: float = 2.0,
     max_dur: float = 5.0,
+    style: str = "standard",
 ) -> list:
     """
     Merge short Whisper segments and cap long ones so every chunk is 2-5 seconds.
+    cinematic style: uses dynamic max duration (3/4/5s) based on timeline position.
+    standard style:  uses fixed max_dur=5s throughout.
     Returns [{"start": float, "end": float, "text": str}, ...]
     """
+    _use_dynamic = (style == "cinematic")
+
     chunks    = []
     buf_start = None
     buf_end   = None
     buf_texts = []
+
+    def _cur_max() -> float:
+        if _use_dynamic:
+            return _dynamic_max_dur(buf_start) if buf_start is not None else max_dur
+        return max_dur
 
     def _save():
         dur  = buf_end - buf_start
@@ -475,7 +539,7 @@ def _rechunk_segments(
             buf_start, buf_end, buf_texts = s, e, [t]
             continue
 
-        if e - buf_start <= max_dur:
+        if e - buf_start <= _cur_max():
             buf_end = e
             buf_texts.append(t)
         else:
@@ -485,17 +549,19 @@ def _rechunk_segments(
     if buf_start is not None:
         _save()
 
-    # Split any chunks that still exceed max_dur (e.g. single long Whisper segment)
+    # Split any chunks that still exceed their max_dur
     final = []
     for chunk in chunks:
-        dur = chunk["end"] - chunk["start"]
-        if dur <= max_dur:
+        dur     = chunk["end"] - chunk["start"]
+        cur_max = _dynamic_max_dur(chunk["start"]) if _use_dynamic else max_dur
+        if dur <= cur_max:
             final.append(chunk)
             continue
         words   = chunk["text"].split()
         t_start = chunk["start"]
         while chunk["end"] - t_start > 0.1:
-            t_end     = min(t_start + max_dur, chunk["end"])
+            seg_max   = _dynamic_max_dur(t_start) if _use_dynamic else max_dur
+            t_end     = min(t_start + seg_max, chunk["end"])
             remaining = chunk["end"] - t_end
             if 0 < remaining < min_dur:
                 t_end = chunk["end"]  # absorb tiny tail into current chunk
@@ -522,6 +588,7 @@ def _assemble_clips_from_candidates(
     video_title: str = "",
     precomputed_chunks: list = None,
     precomputed_stock_contexts: list = None,
+    session_blocked: set = None,
 ) -> list:
     """
     validated_candidates: list[list[(clip_path, score)]] sorted by score desc per section.
@@ -532,6 +599,10 @@ def _assemble_clips_from_candidates(
       3. Any clip with score >= threshold
       4. Any available clip
       5. Fallback: random competitor clip
+
+    session_blocked: set of clip paths blocked for this session (every 3rd used clip
+    from previous videos). Updated in-place — every 3rd clip used in THIS video
+    is added to session_blocked so subsequent videos avoid it.
     """
     from backend.stocks_library import validate_stock_for_section, STOCK_SCORE_THRESHOLD
 
@@ -590,6 +661,8 @@ def _assemble_clips_from_candidates(
         if _clip_action(clip) == "reject":
             return False
         if global_used.get(clip, 0) >= _COMPETITOR_MAX_USES:
+            return False
+        if session_blocked and clip in session_blocked:
             return False
         if last_source and _source_of(clip) == last_source:
             return False
@@ -711,6 +784,18 @@ def _assemble_clips_from_candidates(
         _record_used(clip_path)
         last_source = _source_of(clip_path)
         all_clips.append((clip_path, use_dur))
+
+    # Session blocking: every 3rd used clip is blocked for subsequent videos in this session.
+    # Update session_blocked in-place so the caller can persist it.
+    if session_blocked is not None:
+        for i, (clip_path, _) in enumerate(all_clips):
+            if (i + 1) % 3 == 0:  # 3rd, 6th, 9th, ...
+                session_blocked.add(clip_path)
+        print(
+            f"[pipeline] Session blocked: {len(session_blocked)} clips total "
+            f"(added {sum(1 for i in range(len(all_clips)) if (i+1) % 3 == 0)} from this video)",
+            flush=True,
+        )
 
     return all_clips
 

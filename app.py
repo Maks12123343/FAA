@@ -15,6 +15,7 @@ import config
 from backend import pipeline, media_library, clip_sourcer
 from backend import stocks_library, competitor_finder
 from backend import movie_library, movie_pipeline
+from backend import writer as writer_backend
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FAA_SECRET_KEY", "faa-local-dev-only-change-for-network-use")
@@ -533,7 +534,6 @@ def api_movies_process_folder():
         global _job_active
         def _emit(step, msg):
             socketio.emit("progress", {"step": step, "message": msg})
-            eventlet.sleep(0)
         try:
             result = movie_library.process_movie_folder(folder_path, movie_name, emit=_emit)
             socketio.emit("movie_indexed", {
@@ -548,7 +548,8 @@ def api_movies_process_folder():
             with _job_lock:
                 _job_active = False
 
-    socketio.start_background_task(run)
+    import threading
+    threading.Thread(target=run, daemon=True).start()
     return jsonify({"ok": True})
 
 
@@ -635,6 +636,122 @@ def download_movie_video(project_id):
     if not os.path.exists(output):
         return jsonify({"error": "Not found"}), 404
     return send_file(output, as_attachment=True, download_name=f"{safe_id}.mp4")
+
+
+# ── Writer routes ─────────────────────────────────────────────────────────────
+
+@app.route("/writer")
+def writer_page():
+    movies = movie_library.list_movies()
+    languages = _languages()
+    return render_template("writer.html", movies=movies, languages=languages)
+
+
+@app.route("/api/writer/generate", methods=["POST"])
+def api_writer_generate():
+    global _job_active
+    data        = request.json or {}
+    topic       = data.get("topic", "").strip()
+    language    = data.get("language", "en").strip()
+    style_notes = data.get("style_notes", "").strip()
+    feedback    = data.get("feedback", "").strip()
+
+    if not topic:
+        return jsonify({"error": "topic required"}), 400
+
+    with _job_lock:
+        if _job_active:
+            return jsonify({"error": "A job is already running. Wait for it to finish."}), 429
+        _job_active = True
+
+    def run():
+        global _job_active
+        try:
+            script = writer_backend.generate_script(
+                topic=topic, language=language,
+                style_notes=style_notes, feedback=feedback,
+            )
+            draft_id = writer_backend.save_draft(topic, language, script, style_notes)
+            socketio.emit("writer_generated", {
+                "draft_id":   draft_id,
+                "script":     script,
+                "script_len": len(script),
+            })
+        except Exception as e:
+            import traceback
+            print(f"[app] writer generate error: {e}\n{traceback.format_exc()}", flush=True)
+            socketio.emit("error", {"message": str(e)})
+        finally:
+            with _job_lock:
+                _job_active = False
+
+    socketio.start_background_task(run)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/writer/metadata", methods=["POST"])
+def api_writer_metadata():
+    data     = request.json or {}
+    topic    = data.get("topic", "").strip()
+    language = data.get("language", "en").strip()
+    script   = data.get("script", "").strip()
+
+    if not script:
+        return jsonify({"error": "script required"}), 400
+
+    try:
+        meta = writer_backend.generate_metadata(topic, language, script)
+        return jsonify(meta)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/writer/produce", methods=["POST"])
+def api_writer_produce():
+    global _job_active
+    data       = request.json or {}
+    script     = data.get("script", "").strip()
+    title      = data.get("title", "").strip()
+    movie_name = data.get("movie_name", "").strip()
+    language   = data.get("language", "en").strip()
+    draft_id   = data.get("draft_id")
+    metadata   = data.get("metadata", {})
+
+    if not script:
+        return jsonify({"error": "script required"}), 400
+    if not movie_name:
+        return jsonify({"error": "movie_name required"}), 400
+
+    with _job_lock:
+        if _job_active:
+            return jsonify({"error": "A job is already running. Wait for it to finish."}), 429
+        _job_active = True
+
+    def run():
+        global _job_active
+        def _emit(step, msg):
+            socketio.emit("progress", {"step": step, "message": msg})
+            eventlet.sleep(0)
+        try:
+            result = movie_pipeline.produce_from_script(
+                script=script,
+                title=title or "writer_video",
+                movie_name=movie_name,
+                language=language,
+                emit=_emit,
+                metadata=metadata,
+            )
+            socketio.emit("writer_produce_done", result)
+        except Exception as e:
+            import traceback
+            print(f"[app] writer produce error: {e}\n{traceback.format_exc()}", flush=True)
+            socketio.emit("error", {"message": str(e)})
+        finally:
+            with _job_lock:
+                _job_active = False
+
+    socketio.start_background_task(run)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/cleanup", methods=["POST"])

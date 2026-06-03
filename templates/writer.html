@@ -1,0 +1,365 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>✍️ Script Writer</h1>
+<p style="color:#888;margin-top:-16px;margin-bottom:24px;font-size:14px;">
+  Generate a YouTube voiceover script from scratch, review & edit it, then produce the video.
+</p>
+
+<!-- ── Step 1: Generate ─────────────────────────────────────────────────── -->
+<div class="card" id="card-generate">
+  <h2>Step 1 — Generate Script</h2>
+
+  <div class="field">
+    <label>Topic / Title idea</label>
+    <input type="text" id="topic" placeholder="e.g. The Dark Psychology of Shrek — Why He Chose Isolation">
+  </div>
+
+  <div class="grid-2">
+    <div class="field">
+      <label>Language</label>
+      <select id="lang-select">
+        {% for l in languages %}
+        <option value="{{ l.code }}">{{ l.name }} ({{ l.code }})</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>Style notes <span style="color:#555;">(optional)</span></label>
+      <input type="text" id="style-notes" placeholder="e.g. dark tone, focus on childhood trauma">
+    </div>
+  </div>
+
+  <button class="btn btn-primary" id="btn-generate" onclick="doGenerate()">
+    🤖 Generate Script
+  </button>
+
+  <div id="gen-log" class="progress-log" style="margin-top:16px;display:none;"></div>
+</div>
+
+<!-- ── Step 2: Review & Approve ─────────────────────────────────────────── -->
+<div class="card" id="card-review" style="display:none;">
+  <h2>Step 2 — Review & Edit Script</h2>
+
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+    <span id="script-stats" style="color:#888;font-size:13px;"></span>
+    <div style="display:flex;gap:8px;">
+      <button class="btn btn-gray" onclick="copyScript()" style="padding:6px 14px;font-size:13px;">📋 Copy</button>
+      <button class="btn btn-gray" onclick="downloadScript()" style="padding:6px 14px;font-size:13px;">⬇️ Download</button>
+    </div>
+  </div>
+
+  <textarea id="script-area" rows="20"
+    style="font-family:monospace;font-size:13px;line-height:1.6;resize:vertical;"
+    oninput="updateStats()"></textarea>
+
+  <!-- Regenerate with feedback -->
+  <div style="margin-top:16px;padding:16px;background:#111;border-radius:8px;border:1px solid #2a2a2a;">
+    <label style="margin-bottom:8px;">Feedback for regeneration <span style="color:#555;">(optional)</span></label>
+    <textarea id="feedback-area" rows="3"
+      placeholder="e.g. Make it darker, add more examples about childhood, focus less on the ending..."
+      style="font-size:13px;margin-bottom:10px;"></textarea>
+    <button class="btn btn-gray" id="btn-regen" onclick="doRegenerate()">
+      🔄 Regenerate with Feedback
+    </button>
+  </div>
+
+  <!-- Metadata section -->
+  <div id="metadata-block" style="display:none;margin-top:16px;padding:16px;background:#111;border-radius:8px;border:1px solid #2a2a2a;">
+    <h2 style="margin-bottom:12px;">Generated Metadata</h2>
+    <div class="field">
+      <label>Title options</label>
+      <select id="title-select" style="margin-bottom:8px;"></select>
+    </div>
+    <div class="field">
+      <label>Description</label>
+      <textarea id="meta-description" rows="4" style="font-size:13px;"></textarea>
+    </div>
+    <div class="field">
+      <label>Tags</label>
+      <textarea id="meta-tags" rows="2" style="font-size:13px;"></textarea>
+    </div>
+  </div>
+
+  <div style="margin-top:20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+    <button class="btn btn-primary" id="btn-gen-meta" onclick="doGenerateMeta()">
+      📊 Generate Metadata
+    </button>
+    <button class="btn btn-success" id="btn-approve" onclick="doApprove()">
+      ✅ Approve & Produce
+    </button>
+  </div>
+</div>
+
+<!-- ── Step 3: Produce ───────────────────────────────────────────────────── -->
+<div class="card" id="card-produce" style="display:none;">
+  <h2>Step 3 — Produce Video</h2>
+
+  <div class="grid-2">
+    <div class="field">
+      <label>Movie to use</label>
+      <select id="movie-select">
+        <option value="">— select movie —</option>
+        {% for m in movies %}
+        <option value="{{ m.name }}">{{ m.name }} ({{ m.clip_count }} clips)</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>Language (for TTS)</label>
+      <select id="produce-lang-select">
+        {% for l in languages %}
+        <option value="{{ l.code }}">{{ l.name }} ({{ l.code }})</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:12px;align-items:center;">
+    <button class="btn btn-success" id="btn-produce" onclick="doProduce()">
+      🎬 Produce Video
+    </button>
+    <button class="btn btn-gray" onclick="backToReview()">
+      ← Back to Review
+    </button>
+  </div>
+
+  <div id="produce-log" class="progress-log" style="margin-top:16px;display:none;"></div>
+
+  <div id="result-block" style="display:none;margin-top:20px;">
+    <h2>Done! 🎉</h2>
+    <p id="result-title" style="color:#22c55e;margin-bottom:12px;font-size:16px;font-weight:600;"></p>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;">
+      <a id="result-download" class="btn btn-success" href="#" download>⬇️ Download Video</a>
+      <button class="btn btn-primary" onclick="produceAnother()">🔄 Produce Another Language</button>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+const socket = io();
+let draftId   = null;
+let currentScript = '';
+
+// ── Logging ────────────────────────────────────────────────────────────────
+function logTo(id, msg, cls = '') {
+  const el = document.getElementById(id);
+  el.style.display = '';
+  const line = document.createElement('div');
+  line.className = 'log-line ' + cls;
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearLog(id) {
+  const el = document.getElementById(id);
+  el.innerHTML = '';
+  el.style.display = 'none';
+}
+
+// ── Stats ──────────────────────────────────────────────────────────────────
+function updateStats() {
+  const text  = document.getElementById('script-area').value;
+  const chars = text.length;
+  const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+  const mins  = Math.round(words / 145);
+  const ok    = chars >= 20000;
+  document.getElementById('script-stats').innerHTML =
+    `<span style="color:${ok ? '#22c55e' : '#f59e0b'}">${chars.toLocaleString()} chars</span>` +
+    ` · ${words.toLocaleString()} words · ~${mins} min voiceover` +
+    (ok ? '' : ' <span style="color:#f59e0b">⚠ target: 20,000+ chars</span>');
+}
+
+// ── Step 1: Generate ───────────────────────────────────────────────────────
+async function doGenerate(feedback = '') {
+  const topic      = document.getElementById('topic').value.trim();
+  const lang       = document.getElementById('lang-select').value;
+  const styleNotes = document.getElementById('style-notes').value.trim();
+
+  if (!topic) { alert('Enter a topic'); return; }
+
+  clearLog('gen-log');
+  document.getElementById('btn-generate').disabled = true;
+  document.getElementById('btn-regen').disabled    = true;
+  logTo('gen-log', feedback
+    ? `Regenerating with feedback: "${feedback.slice(0, 80)}..."...`
+    : `Generating script: "${topic}"...`
+  );
+
+  const r = await fetch('/api/writer/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic, language: lang, style_notes: styleNotes, feedback }),
+  });
+  const d = await r.json();
+  if (d.error) {
+    logTo('gen-log', 'ERROR: ' + d.error, 'error');
+    document.getElementById('btn-generate').disabled = false;
+    document.getElementById('btn-regen').disabled    = false;
+  }
+  // Result comes via socket 'writer_generated'
+}
+
+async function doRegenerate() {
+  const feedback = document.getElementById('feedback-area').value.trim();
+  await doGenerate(feedback);
+}
+
+socket.on('writer_generated', d => {
+  draftId = d.draft_id;
+  currentScript = d.script;
+
+  document.getElementById('script-area').value = d.script;
+  document.getElementById('card-review').style.display = '';
+  document.getElementById('btn-generate').disabled = false;
+  document.getElementById('btn-regen').disabled    = false;
+  document.getElementById('metadata-block').style.display = 'none';
+
+  // Sync produce-lang-select with gen lang
+  const lang = document.getElementById('lang-select').value;
+  document.getElementById('produce-lang-select').value = lang;
+
+  updateStats();
+  logTo('gen-log', `Script ready: ${d.script_len} chars (draft: ${d.draft_id})`, 'done');
+  document.getElementById('card-review').scrollIntoView({ behavior: 'smooth' });
+});
+
+// ── Generate Metadata ──────────────────────────────────────────────────────
+async function doGenerateMeta() {
+  const topic  = document.getElementById('topic').value.trim();
+  const lang   = document.getElementById('lang-select').value;
+  const script = document.getElementById('script-area').value.trim();
+
+  if (!script) { alert('Generate a script first'); return; }
+
+  document.getElementById('btn-gen-meta').disabled = true;
+  document.getElementById('btn-gen-meta').textContent = '⏳ Generating...';
+
+  const r = await fetch('/api/writer/metadata', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic, language: lang, script, draft_id: draftId }),
+  });
+  const d = await r.json();
+
+  document.getElementById('btn-gen-meta').disabled = false;
+  document.getElementById('btn-gen-meta').textContent = '📊 Generate Metadata';
+
+  if (d.error) { alert('Error: ' + d.error); return; }
+
+  // Populate title select
+  const sel = document.getElementById('title-select');
+  sel.innerHTML = '';
+  (d.titles || []).forEach(t => {
+    const opt = document.createElement('option');
+    opt.value = t;
+    opt.textContent = t;
+    sel.appendChild(opt);
+  });
+
+  document.getElementById('meta-description').value = d.description || '';
+  document.getElementById('meta-tags').value         = d.tags_raw || '';
+  document.getElementById('metadata-block').style.display = '';
+});
+
+// ── Approve ────────────────────────────────────────────────────────────────
+function doApprove() {
+  const script = document.getElementById('script-area').value.trim();
+  if (!script) { alert('Script is empty'); return; }
+  if (script.length < 5000) {
+    if (!confirm(`Script is only ${script.length} chars. Continue anyway?`)) return;
+  }
+  currentScript = script;
+  document.getElementById('card-produce').style.display = '';
+  document.getElementById('card-produce').scrollIntoView({ behavior: 'smooth' });
+}
+
+function backToReview() {
+  document.getElementById('card-produce').style.display = 'none';
+  document.getElementById('card-review').scrollIntoView({ behavior: 'smooth' });
+}
+
+// ── Produce ────────────────────────────────────────────────────────────────
+async function doProduce() {
+  const movie  = document.getElementById('movie-select').value;
+  const lang   = document.getElementById('produce-lang-select').value;
+  const topic  = document.getElementById('topic').value.trim();
+  const script = document.getElementById('script-area').value.trim();
+
+  if (!movie)  { alert('Select a movie'); return; }
+  if (!script) { alert('Script is empty'); return; }
+
+  // Collect metadata if available
+  const titleSel = document.getElementById('title-select');
+  const title    = titleSel.value || topic;
+  const description = document.getElementById('meta-description').value.trim();
+  const tagsRaw     = document.getElementById('meta-tags').value.trim();
+  const tags        = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
+
+  clearLog('produce-log');
+  document.getElementById('result-block').style.display = 'none';
+  document.getElementById('btn-produce').disabled = true;
+  logTo('produce-log', `Producing video (${lang}) using "${movie}"...`);
+
+  const r = await fetch('/api/writer/produce', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      script, title, movie_name: movie, language: lang,
+      draft_id: draftId,
+      metadata: { title, description, tags },
+    }),
+  });
+  const d = await r.json();
+  if (d.error) {
+    logTo('produce-log', 'ERROR: ' + d.error, 'error');
+    document.getElementById('btn-produce').disabled = false;
+  }
+}
+
+socket.on('progress', d => {
+  logTo('gen-log',     `[${d.step}] ${d.message}`);
+  logTo('produce-log', `[${d.step}] ${d.message}`);
+});
+
+socket.on('writer_produce_done', d => {
+  logTo('produce-log', `Done: ${d.project_id}`, 'done');
+  document.getElementById('result-block').style.display = '';
+  document.getElementById('result-title').textContent   = d.title || d.project_id;
+  document.getElementById('result-download').href       = `/api/movies/download/${d.project_id}`;
+  document.getElementById('btn-produce').disabled       = false;
+});
+
+socket.on('error', d => {
+  logTo('gen-log',     'ERROR: ' + d.message, 'error');
+  logTo('produce-log', 'ERROR: ' + d.message, 'error');
+  document.getElementById('btn-generate').disabled = false;
+  document.getElementById('btn-regen').disabled    = false;
+  document.getElementById('btn-produce').disabled  = false;
+});
+
+// ── Utilities ──────────────────────────────────────────────────────────────
+function copyScript() {
+  const text = document.getElementById('script-area').value;
+  navigator.clipboard.writeText(text).then(() => alert('Copied!'));
+}
+
+function downloadScript() {
+  const text  = document.getElementById('script-area').value;
+  const topic = document.getElementById('topic').value.trim() || 'script';
+  const blob  = new Blob([text], { type: 'text/plain' });
+  const a     = document.createElement('a');
+  a.href      = URL.createObjectURL(blob);
+  a.download  = topic.slice(0, 60).replace(/[^a-zA-Z0-9 _-]/g, '') + '.txt';
+  a.click();
+}
+
+function produceAnother() {
+  document.getElementById('result-block').style.display = 'none';
+  clearLog('produce-log');
+  document.getElementById('btn-produce').disabled = false;
+}
+</script>
+{% endblock %}

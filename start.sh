@@ -35,6 +35,6 @@ export FAA_PORT="${FAA_PORT:-5050}"
 echo "Starting FAA on $FAA_HOST:$FAA_PORT"
 exec "$VENV_DIR/bin/gunicorn" --worker-class eventlet -w 1 \
     --bind "$FAA_HOST:$FAA_PORT" \
-    --timeout 600 \
+    --timeout 0 \
     --keep-alive 5 \
     app:app

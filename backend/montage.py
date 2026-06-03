@@ -247,7 +247,7 @@ def _build_concat(clip_items: list, output: str, width: int, height: int, fps: i
         _xfade_join(segment_files, output, FADE_DUR)
 
 
-def _fetch_bg_music(duration: float, project_dir: str) -> str | None:
+def _fetch_bg_music(duration: float, project_dir: str, montage_style: str = "standard") -> str | None:
     """Download a background music track from Pixabay matching the video duration."""
     import requests as _requests
 
@@ -260,13 +260,21 @@ def _fetch_bg_music(duration: float, project_dir: str) -> str | None:
     if os.path.exists(music_path):
         return music_path
 
+    # Choose music query based on niche style
+    if montage_style == "cinematic":
+        primary_query = "dark cinematic psychological thriller"
+        fallback_query = "dark ambient emotional"
+    else:
+        primary_query = "cinematic ambient documentary"
+        fallback_query = "ambient background"
+
     try:
         r = _requests.get(
             "https://pixabay.com/api/",
             params={
                 "key": api_key,
                 "media_type": "music",
-                "q": "cinematic ambient documentary",
+                "q": primary_query,
                 "per_page": 10,
                 "min_duration": max(0, int(duration) - 30),
                 "order": "popular",
@@ -284,7 +292,7 @@ def _fetch_bg_music(duration: float, project_dir: str) -> str | None:
                 params={
                     "key": api_key,
                     "media_type": "music",
-                    "q": "ambient background",
+                    "q": fallback_query,
                     "per_page": 10,
                     "order": "popular",
                 },
@@ -396,12 +404,14 @@ def assemble(
     width: int = 1920,
     height: int = 1080,
     fps: int = 30,
+    montage_style: str = "standard",
 ) -> str:
     """
     clips        -- list of video file paths (or (path, duration) tuples)
     audio_path   -- MP3 voiceover
     output_path  -- final output path
     text_overlays -- list of {"text": str, "start": float, "duration": float, "position": str}
+    montage_style -- "standard" (china_economy) or "cinematic" (psychology_movies)
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -438,8 +448,8 @@ def assemble(
             print("[montage] with_audio exists but is corrupt/too small -- rebuilding...", flush=True)
             os.remove(with_audio)
         audio_dur = _audio_duration(audio_path)
-        print("[montage] Fetching background music...", flush=True)
-        music_path = _fetch_bg_music(audio_dur, project_dir)
+        print(f"[montage] Fetching background music (style={montage_style})...", flush=True)
+        music_path = _fetch_bg_music(audio_dur, project_dir, montage_style=montage_style)
         print("[montage] Adding audio...", flush=True)
         _add_audio(raw_video, audio_path, with_audio, music_path=music_path)
     else:
