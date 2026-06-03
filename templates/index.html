@@ -47,9 +47,10 @@
     <h2>Step 2 — Add Source Videos for Clips</h2>
     <p style="color:#aaa;font-size:13px;margin-bottom:12px">
       Paste YouTube URLs (one per line). System will cut clips from these videos.
-      Mix: these clips + Envato stocks (auto).
+      Mix: these clips + Envato stocks (auto).<br>
+      <span style="color:#6b7280"><em>Optional — leave empty to use clips already in the Library for this niche.</em></span>
     </p>
-    <textarea id="ytUrls" rows="10" placeholder="https://www.youtube.com/watch?v=...&#10;https://www.youtube.com/watch?v=...&#10;..." style="width:100%;background:#111;border:1px solid #333;border-radius:6px;padding:10px;color:#fff;font-size:13px;resize:vertical"></textarea>
+    <textarea id="ytUrls" rows="10" placeholder="https://www.youtube.com/watch?v=...&#10;https://www.youtube.com/watch?v=...&#10;(optional — leave empty to use Library clips)" style="width:100%;background:#111;border:1px solid #333;border-radius:6px;padding:10px;color:#fff;font-size:13px;resize:vertical"></textarea>
   </div>
 
   <div class="card">
@@ -136,7 +137,6 @@ function startProduce() {
     .map(el => el.value);
 
   if (!langs.length) { alert('Select at least one language'); return; }
-  if (!urls.length)  { alert('Add at least one YouTube URL'); return; }
 
   document.getElementById('produceBtn').disabled = true;
   document.getElementById('progressLog').innerHTML = '';
@@ -194,7 +194,7 @@ socket.on('prepare_done', data => {
 
   document.getElementById('transcriptPreview').textContent = data.transcript || '';
   document.getElementById('phase2Card').style.display = 'block';
-  log('Prepare done. Add YouTube URLs and select languages.', 'done');
+  log('Prepare done. Select languages and click Start Production. (YouTube URLs are optional if Library has clips.)', 'done');
 });
 
 socket.on('produce_done', data => {

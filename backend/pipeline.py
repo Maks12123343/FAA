@@ -227,14 +227,36 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
     ] if os.path.exists(pool_dir) else []
 
     if not existing_clips:
-        log("clips", f"Downloading {len(youtube_urls)} YouTube videos...")
-        yt_pool, clips_index = build_pool(youtube_urls, pool_dir, emit=emit)
-        if not clips_index:
-            raise RuntimeError(
-                "Clip pool is empty after download — all YouTube URLs may be "
-                "geo-blocked, private, or yt-dlp was blocked. "
-                "Check URLs and try again."
-            )
+        if not youtube_urls:
+            # No URLs provided — try to fall back to library clips for this niche
+            lib_dir = os.path.join(config.LIBRARY_DIR, niche_name, "raw")
+            lib_clips = _glob.glob(os.path.join(lib_dir, "*.mp4")) if os.path.exists(lib_dir) else []
+            if lib_clips:
+                log("clips", f"No YouTube URLs provided — using {len(lib_clips)} clips from Library ({niche_name})")
+                os.makedirs(pool_dir, exist_ok=True)
+                import shutil as _shutil
+                for lc in lib_clips:
+                    dst = os.path.join(pool_dir, os.path.basename(lc))
+                    if not os.path.exists(dst):
+                        _shutil.copy2(lc, dst)
+                yt_pool = [os.path.join(pool_dir, os.path.basename(lc)) for lc in lib_clips]
+                clips_index = [{"path": p, "score": 1.0} for p in yt_pool]
+                with open(index_path, "w", encoding="utf-8") as f:
+                    json.dump(clips_index, f)
+            else:
+                raise RuntimeError(
+                    f"No YouTube URLs provided and Library is empty for niche '{niche_name}'. "
+                    "Add YouTube URLs in Step 2, or first populate the Library via the Library page."
+                )
+        else:
+            log("clips", f"Downloading {len(youtube_urls)} YouTube videos...")
+            yt_pool, clips_index = build_pool(youtube_urls, pool_dir, emit=emit)
+            if not clips_index:
+                raise RuntimeError(
+                    "Clip pool is empty after download — all YouTube URLs may be "
+                    "geo-blocked, private, or yt-dlp was blocked. "
+                    "Check URLs and try again."
+                )
     else:
         yt_pool = existing_clips
         if os.path.exists(index_path):
