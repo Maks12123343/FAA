@@ -54,6 +54,23 @@
 </div>
 
 <div class="card">
+  <h2>Pioneer.ai (Gemini proxy — безкоштовний)</h2>
+  <p style="color:#aaa;font-size:13px;margin-bottom:16px">
+    OpenAI-compatible API. Якщо ключі є — використовується замість Vertex AI. Можна додати кілька ключів для паралельної валідації.
+  </p>
+  <div class="field">
+    <label>API Keys (по одному на рядок)</label>
+    <textarea id="pioneer_api_keys" rows="4" style="width:100%;background:#1a1a1a;color:#e0e0e0;border:1px solid #333;border-radius:6px;padding:8px;font-family:monospace;font-size:13px">{{ (settings.pioneer_api_keys or []) | join('\n') }}</textarea>
+  </div>
+  <div class="grid-2">
+    <div class="field"><label>Model ID</label>
+      <input type="text" id="pioneer_model" value="{{ settings.pioneer_model or 'a87f8985-e7d8-4012-adac-6d5c66287213' }}"></div>
+    <div class="field"><label>API URL</label>
+      <input type="text" id="pioneer_api_url" value="{{ settings.pioneer_api_url or 'https://api.pioneer.ai/v1/chat/completions' }}"></div>
+  </div>
+</div>
+
+<div class="card">
   <h2>Vertex AI (Gemini)</h2>
   <div class="grid-2">
     <div class="field"><label>Project ID</label>
@@ -127,7 +144,14 @@ function saveSettings() {
     };
   });
 
+  // Pioneer keys: split by newline, filter empty
+  const pioneer_api_keys = document.getElementById('pioneer_api_keys').value
+    .split('\n').map(k => k.trim()).filter(k => k.length > 0);
+
   const data = {
+    pioneer_api_keys,
+    pioneer_model:     document.getElementById('pioneer_model').value,
+    pioneer_api_url:   document.getElementById('pioneer_api_url').value,
     claude_api_key:    document.getElementById('claude_api_key').value,
     claude_model:      document.getElementById('claude_model').value,
     tts_api_key:       document.getElementById('tts_api_key').value,
