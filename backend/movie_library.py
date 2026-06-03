@@ -55,7 +55,7 @@ def _get_duration(path: str) -> float:
     try:
         r = subprocess.run(
             [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "json", path],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=120,
         )
         return float(json.loads(r.stdout)["format"]["duration"])
     except Exception:
@@ -66,8 +66,8 @@ def _cut_clip(src: str, out: str, start: float, duration: float):
     subprocess.run(
         [FFMPEG, "-y", "-ss", f"{start:.3f}", "-i", src,
          "-t", f"{duration:.3f}",
-         *config.get_video_encoder_args("ultrafast"), "-an", out],
-        capture_output=True, timeout=60,
+         "-c", "copy", "-an", out],
+        capture_output=True, timeout=300,
     )
 
 
@@ -162,7 +162,7 @@ def _frame_bytes(clip_path: str, ratio: float) -> bytes:
     subprocess.run(
         [FFMPEG, "-y", "-ss", f"{ts:.3f}", "-i", clip_path,
          "-vframes", "1", "-vf", "scale=640:-2", "-q:v", "4", tmp.name],
-        capture_output=True, timeout=30,
+        capture_output=True, timeout=120,
     )
     data = b""
     if os.path.exists(tmp.name):
@@ -277,7 +277,7 @@ def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
                 frames.append(fb)
         return {"clip": clip, "frames": frames}
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         items = list(pool.map(_extract_frames, to_analyze))
     items = [it for it in items if it["frames"]]
 

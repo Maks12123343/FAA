@@ -175,7 +175,6 @@ def get_movies_dir() -> str:
 
 
 def _qsv_available() -> bool:
-    import functools
     if not hasattr(_qsv_available, "_cached"):
         try:
             r = __import__("subprocess").run(
@@ -189,11 +188,27 @@ def _qsv_available() -> bool:
     return _qsv_available._cached
 
 
+def _nvenc_available() -> bool:
+    if not hasattr(_nvenc_available, "_cached"):
+        try:
+            r = __import__("subprocess").run(
+                [FFMPEG, "-hide_banner", "-encoders"],
+                capture_output=True, text=True, timeout=10,
+            )
+            _nvenc_available._cached = "h264_nvenc" in r.stdout
+        except Exception:
+            _nvenc_available._cached = False
+        print(f"[config] h264_nvenc available: {_nvenc_available._cached}", flush=True)
+    return _nvenc_available._cached
+
+
 def get_video_encoder_args(preset: str = "ultrafast", crf: int = None) -> list:
     """Return ffmpeg video encoder args optimized for current platform.
-    On Windows tries Intel Quick Sync (h264_qsv), falls back to libx264 if unavailable.
-    On Linux uses libx264 (RunPod/server).
-    crf: quality level for libx264 (18=high quality, 23=default, 28=lower). Ignored for QSV.
+    Priority:
+      Windows  → h264_qsv  (Intel Quick Sync, iGPU)
+      Linux    → h264_nvenc (NVIDIA GPU, e.g. Paperspace/Vast.ai)
+      Fallback → libx264   (CPU)
+    crf: quality for libx264/nvenc (18=high, 23=default, 28=lower).
     """
     if platform.system() == "Windows" and _qsv_available():
         qsv_preset_map = {
@@ -209,6 +224,22 @@ def get_video_encoder_args(preset: str = "ultrafast", crf: int = None) -> list:
         if crf is not None:
             args += ["-global_quality", str(crf)]
         return args
+
+    if platform.system() != "Windows" and _nvenc_available():
+        nvenc_preset_map = {
+            "ultrafast": "p1",
+            "superfast": "p2",
+            "veryfast":  "p3",
+            "faster":    "p4",
+            "fast":      "p4",
+            "medium":    "p5",
+            "slow":      "p6",
+        }
+        args = ["-c:v", "h264_nvenc", "-preset", nvenc_preset_map.get(preset, "p4")]
+        if crf is not None:
+            args += ["-cq", str(crf)]
+        return args
+
     args = ["-c:v", "libx264", "-preset", preset]
     if crf is not None:
         args += ["-crf", str(crf)]
