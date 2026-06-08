@@ -34,3 +34,7 @@ flask_debug.log
 # Google credentials (на всяк випадок)
 *.json.tmp
 application_default_credentials.json
+.config/
+
+# Local deploy secrets (never push)
+deploy_secrets.sh
