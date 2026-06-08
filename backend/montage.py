@@ -63,15 +63,18 @@ def _prepare_clip(clip_path: str, out_path: str, width: int = 1920, height: int 
             f"fps={fps}"
         )
 
-    r = subprocess.run(
-        [FFMPEG, "-y", "-i", clip_path,
-         "-vf", vf,
-         *config.get_video_encoder_args("medium", crf=18), "-pix_fmt", "yuv420p", "-an",
-         "-t", str(max_duration), out_path],
-        capture_output=True, timeout=60,
-    )
-    if r.returncode != 0:
-        print(f"[montage] _prepare_clip failed: {r.stderr.decode(errors='replace')[-500:]}", flush=True)
+    try:
+        r = subprocess.run(
+            [FFMPEG, "-y", "-i", clip_path,
+             "-vf", vf,
+             *config.get_video_encoder_args("medium", crf=18), "-pix_fmt", "yuv420p", "-an",
+             "-t", str(max_duration), out_path],
+            capture_output=True, timeout=60,
+        )
+        if r.returncode != 0:
+            print(f"[montage] _prepare_clip failed: {r.stderr.decode(errors='replace')[-500:]}", flush=True)
+    except subprocess.TimeoutExpired:
+        print(f"[montage] _prepare_clip timed out: {clip_path}", flush=True)
 
 
 def _get_clip_action(clip_path: str) -> tuple:
@@ -116,9 +119,9 @@ def _process_one_clip(args):
 def _concat_clip_list(clip_paths: list, output: str):
     """Concat pre-normalized clips with hard cuts using concat demuxer."""
     list_file = output + ".txt"
-    with open(list_file, "w") as f:
+    with open(list_file, "w", encoding="utf-8") as f:
         for p in clip_paths:
-            safe_p = p.replace("\\", "/")
+            safe_p = p.replace("\\", "/").replace("'", "'\\''")
             f.write(f"file '{safe_p}'\n")
     try:
         r = subprocess.run(
@@ -386,14 +389,17 @@ def _uniqualize_clip(input_path: str, output_path: str, params: dict):
         f"noise=alls={grain:.1f}:allf=t+u"
     )
 
-    r = subprocess.run(
-        [FFMPEG, "-y", "-i", input_path,
-         "-vf", vf,
-         *config.get_video_encoder_args("medium", crf=18), "-pix_fmt", "yuv420p", "-an",
-         output_path],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
-    )
-    return r.returncode == 0
+    try:
+        r = subprocess.run(
+            [FFMPEG, "-y", "-i", input_path,
+             "-vf", vf,
+             *config.get_video_encoder_args("medium", crf=18), "-pix_fmt", "yuv420p", "-an",
+             output_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+        )
+        return r.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def assemble(
@@ -476,9 +482,14 @@ def pick_clips(validated_clips: list, target_duration: float, min_dur: float = 2
     random.shuffle(pool)
     selected = []
     total = 0.0
+    max_refills = 3
+    refills = 0
 
     while total < target_duration:
         if not pool:
+            refills += 1
+            if refills >= max_refills:
+                break
             pool = list(validated_clips)
             random.shuffle(pool)
         clip = pool.pop()
@@ -491,4 +502,6 @@ def pick_clips(validated_clips: list, target_duration: float, min_dur: float = 2
         if total >= target_duration * 1.05:
             break
 
+    if not selected:
+        raise RuntimeError("No clips with sufficient duration found in pool")
     return selected

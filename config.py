@@ -32,13 +32,21 @@ if platform.system() == "Windows":
 else:
     FFMPEG  = shutil.which("ffmpeg")  or "ffmpeg"
     FFPROBE = shutil.which("ffprobe") or "ffprobe"
-    # faa system user has no home dir, credentials stored under app dir
+    # Vast.ai / RunPod: credentials in home dir or app dir
     _cred_app = "/opt/faa/.config/gcloud/application_default_credentials.json"
     _cred_home = os.path.expanduser("~/.config/gcloud/application_default_credentials.json")
-    VERTEX_CREDENTIALS = _cred_app if os.path.exists(_cred_app) else _cred_home
-    # On Linux stocks are served from Google Drive mounted via rclone at /mnt/gdrive
-    _DEFAULT_STOCKS_DIR = "/mnt/gdrive/FAA/stocks"
-    _DEFAULT_MOVIES_DIR = "/mnt/gdrive/FAA/movies"
+    _cred_workspace = "/workspace/FAA/.config/gcloud/application_default_credentials.json"
+    VERTEX_CREDENTIALS = next(
+        (p for p in [_cred_workspace, _cred_home, _cred_app] if os.path.exists(p)),
+        _cred_home,
+    )
+    # Stocks/movies: local copy preferred (faster), rclone mount as fallback
+    _local_stocks = os.path.join(os.path.dirname(__file__), "stocks")
+    _local_movies = os.path.join(os.path.dirname(__file__), "movies")
+    _mount_stocks = "/mnt/gdrive/FAA/stocks"
+    _mount_movies = "/mnt/gdrive/FAA/movies"
+    _DEFAULT_STOCKS_DIR = _local_stocks if os.path.isdir(_local_stocks) else _mount_stocks
+    _DEFAULT_MOVIES_DIR = _local_movies if os.path.isdir(_local_movies) else _mount_movies
 
 STOCKS_DIR = _DEFAULT_STOCKS_DIR
 
@@ -146,15 +154,25 @@ def _coerce_settings(data: dict) -> dict:
     return data
 
 
+_settings_cache = {"data": None, "mtime": 0.0}
+
 def load_settings() -> dict:
     os.makedirs(DATA_DIR, exist_ok=True)
     if not os.path.exists(SETTINGS_FILE):
         save_settings(DEFAULT_SETTINGS)
         return DEFAULT_SETTINGS.copy()
+    try:
+        mtime = os.path.getmtime(SETTINGS_FILE)
+    except OSError:
+        mtime = 0.0
+    if _settings_cache["data"] is not None and _settings_cache["mtime"] == mtime:
+        return _settings_cache["data"].copy()
     with open(SETTINGS_FILE, "r", encoding="utf-8-sig") as f:
         data = json.load(f)
-    merged = {**DEFAULT_SETTINGS, **data}
-    return _coerce_settings(merged)
+    merged = _coerce_settings({**DEFAULT_SETTINGS, **data})
+    _settings_cache["data"] = merged
+    _settings_cache["mtime"] = mtime
+    return merged.copy()
 
 
 def save_settings(settings: dict):
@@ -166,6 +184,8 @@ def save_settings(settings: dict):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp_path, SETTINGS_FILE)
+    _settings_cache["data"] = None
+    _settings_cache["mtime"] = 0.0
 
 
 def get_setting(key: str):
@@ -197,11 +217,30 @@ def _qsv_available() -> bool:
 def _nvenc_available() -> bool:
     if not hasattr(_nvenc_available, "_cached"):
         try:
+            import tempfile
             r = __import__("subprocess").run(
                 [FFMPEG, "-hide_banner", "-encoders"],
                 capture_output=True, text=True, timeout=10,
             )
-            _nvenc_available._cached = "h264_nvenc" in r.stdout
+            if "h264_nvenc" not in r.stdout:
+                _nvenc_available._cached = False
+            else:
+                # Do a real test encode — nvenc may be compiled in but CUDA absent
+                with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+                    tmp_path = tmp.name
+                try:
+                    r2 = __import__("subprocess").run(
+                        [FFMPEG, "-y", "-f", "lavfi",
+                         "-i", "color=black:size=64x64:duration=0.1",
+                         "-c:v", "h264_nvenc", "-frames:v", "1", tmp_path],
+                        capture_output=True, timeout=15,
+                    )
+                    _nvenc_available._cached = r2.returncode == 0
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
         except Exception:
             _nvenc_available._cached = False
         print(f"[config] h264_nvenc available: {_nvenc_available._cached}", flush=True)

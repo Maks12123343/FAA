@@ -10,3 +10,4 @@ python-dotenv==1.0.1
 tqdm==4.66.5
 gunicorn==21.2.0
 eventlet==0.35.2
+youtube-transcript-api==1.0.3

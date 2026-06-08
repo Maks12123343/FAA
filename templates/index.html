@@ -7,7 +7,7 @@
   <h2>Step 1 — Prepare</h2>
   <div class="field">
     <label>Niche</label>
-    <select id="niche">
+    <select id="niche" onchange="onNicheChange()">
       {% for n in niches %}
       <option value="{{ n.id }}">{{ n.name }}</option>
       {% endfor %}
@@ -43,7 +43,8 @@
     <div id="transcriptPreview" style="background:#111;border-radius:6px;padding:12px;font-size:13px;color:#ccc;max-height:160px;overflow-y:auto;white-space:pre-wrap"></div>
   </div>
 
-  <div class="card">
+  <!-- Standard pipeline: YouTube URLs for clips -->
+  <div class="card" id="standardClipBlock">
     <h2>Step 2 — Add Source Videos for Clips</h2>
     <p style="color:#aaa;font-size:13px;margin-bottom:12px">
       Paste YouTube URLs (one per line). System will cut clips from these videos.
@@ -51,6 +52,20 @@
       <span style="color:#6b7280"><em>Optional — leave empty to use clips already in the Library for this niche.</em></span>
     </p>
     <textarea id="ytUrls" rows="10" placeholder="https://www.youtube.com/watch?v=...&#10;https://www.youtube.com/watch?v=...&#10;(optional — leave empty to use Library clips)" style="width:100%;background:#111;border:1px solid #333;border-radius:6px;padding:10px;color:#fff;font-size:13px;resize:vertical"></textarea>
+  </div>
+
+  <!-- Movie pipeline: Select movie -->
+  <div class="card" id="movieClipBlock" style="display:none">
+    <h2>Step 2 — Select Movie for Clips</h2>
+    <p style="color:#aaa;font-size:13px;margin-bottom:12px">
+      Clips will be selected from the indexed movie library based on the script content.
+    </p>
+    <div class="field">
+      <label>Movie</label>
+      <select id="movieSelect" style="background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px;color:#fff;font-size:13px">
+        <option value="">Loading movies...</option>
+      </select>
+    </div>
   </div>
 
   <div class="card">
@@ -81,6 +96,8 @@
 <script>
 const socket = io();
 let currentPrepareId = null;
+let currentPipelineType = 'standard';
+let currentMovieName = '';
 let _producing = false;
 
 function log(msg, cls='') {
@@ -94,6 +111,53 @@ function log(msg, cls='') {
   el.scrollTop = el.scrollHeight;
 }
 
+// Load movies list for movie pipeline dropdown
+async function loadMovies() {
+  const sel = document.getElementById('movieSelect');
+  try {
+    const r = await fetch('/api/movies/list');
+    const movies = await r.json();
+    sel.innerHTML = '';
+    if (movies.length === 0) {
+      sel.innerHTML = '<option value="">No movies indexed yet. Go to Library to add movies.</option>';
+      return;
+    }
+    movies.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.name;
+      opt.textContent = `${m.name} (${m.clip_count} clips, ${Math.round(m.duration/60)} min)`;
+      sel.appendChild(opt);
+    });
+    currentMovieName = sel.value;
+    sel.onchange = () => { currentMovieName = sel.value; };
+  } catch (e) {
+    sel.innerHTML = '<option value="">Error loading movies</option>';
+  }
+}
+
+// When niche changes, detect pipeline type and update UI
+async function onNicheChange() {
+  const niche = document.getElementById('niche').value;
+  try {
+    const r = await fetch('/api/niche/info?niche=' + encodeURIComponent(niche));
+    const data = await r.json();
+    const isMovie = data.pipeline_type === 'movie' || (data.movie_library && data.movie_library.length > 0);
+
+    if (isMovie) {
+      document.getElementById('standardClipBlock').style.display = 'none';
+      document.getElementById('movieClipBlock').style.display = '';
+      loadMovies();
+    } else {
+      document.getElementById('standardClipBlock').style.display = '';
+      document.getElementById('movieClipBlock').style.display = 'none';
+    }
+  } catch (e) {
+    // fallback to standard
+    document.getElementById('standardClipBlock').style.display = '';
+    document.getElementById('movieClipBlock').style.display = 'none';
+  }
+}
+
 function resumePrepare() {
   const pid = document.getElementById('resumePrepareId').value.trim();
   if (!pid) { alert('Paste a Prepare ID first'); return; }
@@ -101,7 +165,7 @@ function resumePrepare() {
   document.getElementById('phase2Card').style.display = 'block';
   document.getElementById('progressCard').style.display = 'block';
   document.getElementById('progressLog').innerHTML = '';
-  log(`Resumed prepare: ${pid}. Add YouTube URLs and select languages, then click Start Production.`, 'done');
+  log(`Resumed prepare: ${pid}. Select movie / add YouTube URLs and select languages, then click Start Production.`, 'done');
 }
 
 function startPrepare() {
@@ -131,17 +195,27 @@ function startPrepare() {
 }
 
 function startProduce() {
-  const urls = document.getElementById('ytUrls').value
-    .split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
-
   const langs = [...document.querySelectorAll('#langCheckboxes input:checked')]
     .map(el => el.value);
 
   if (!langs.length) { alert('Select at least one language'); return; }
-
   if (!currentPrepareId) {
     log('ERROR: No prepare session found. Please click "Find Top Video & Transcribe" first.', 'error');
     return;
+  }
+
+  let movie_name = '';
+  let youtube_urls = [];
+
+  if (currentPipelineType === 'movie') {
+    movie_name = document.getElementById('movieSelect').value;
+    if (!movie_name) {
+      log('ERROR: No movie selected. Please select a movie from the dropdown.', 'error');
+      return;
+    }
+  } else {
+    youtube_urls = document.getElementById('ytUrls').value
+      .split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
   }
 
   _producing = true;
@@ -150,14 +224,17 @@ function startProduce() {
   document.getElementById('progressCard').style.display = 'block';
   log(`Starting production for ${langs.length} language(s)...`);
 
+  const payload = {
+    prepare_id:   currentPrepareId,
+    languages:    langs,
+  };
+  if (movie_name) payload.movie_name = movie_name;
+  if (youtube_urls.length) payload.youtube_urls = youtube_urls;
+
   fetch('/api/produce', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      prepare_id:   currentPrepareId,
-      youtube_urls: urls,
-      languages:    langs,
-    })
+    body: JSON.stringify(payload)
   }).then(r => r.json()).then(d => {
     if (d.error) {
       log('ERROR: ' + d.error, 'error');
@@ -180,6 +257,7 @@ function safeUrl(u) { return /^https?:\/\//.test(u) ? u : '#'; }
 
 socket.on('prepare_done', data => {
   currentPrepareId = data.prepare_id;
+  currentPipelineType = data.pipeline_type || 'standard';
   document.getElementById('prepareBtn').disabled = false;
 
   const info = document.getElementById('sourceInfo');
@@ -196,8 +274,24 @@ socket.on('prepare_done', data => {
   info.appendChild(views);
 
   document.getElementById('transcriptPreview').textContent = data.transcript || '';
+
+  // Show correct Step 2 block based on pipeline type
+  if (currentPipelineType === 'movie') {
+    document.getElementById('standardClipBlock').style.display = 'none';
+    document.getElementById('movieClipBlock').style.display = '';
+    loadMovies();
+  } else {
+    document.getElementById('standardClipBlock').style.display = '';
+    document.getElementById('movieClipBlock').style.display = 'none';
+  }
+
   document.getElementById('phase2Card').style.display = 'block';
-  log('Prepare done. Select languages and click Start Production. (YouTube URLs are optional if Library has clips.)', 'done');
+
+  if (currentPipelineType === 'movie') {
+    log('Prepare done. Select a movie and languages, then click Start Production.', 'done');
+  } else {
+    log('Prepare done. Add YouTube URLs (optional) and select languages, then click Start Production.', 'done');
+  }
 });
 
 socket.on('produce_done', data => {
@@ -229,13 +323,13 @@ socket.on('all_done', () => {
 
 socket.on('error', data => {
   log('ERROR: ' + data.message, 'error');
-  // Always re-enable prepare button (prepare errors are always fatal)
   document.getElementById('prepareBtn').disabled = false;
-  // Only re-enable produce button if NOT currently in a produce run
-  // (during produce, per-language errors are non-fatal — job continues)
   if (!_producing) {
     document.getElementById('produceBtn').disabled = false;
   }
 });
+
+// Initialize on page load
+onNicheChange();
 </script>
 {% endblock %}

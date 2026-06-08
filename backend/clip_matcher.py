@@ -11,6 +11,13 @@ import config
 FFMPEG  = config.FFMPEG
 FFPROBE = config.FFPROBE
 
+# In-memory metadata registry populated by analyze_all_clips().
+# Important for movie_library_mode: movie clips are already pre-analyzed in
+# index.json, but we do not necessarily write a <clip>.analysis.json file next
+# to the mp4 (often on a slow/read-only gdrive mount). batch_validate_candidates()
+# receives only clip paths, so text-only validation reads descriptions/tags here.
+_CLIP_META_BY_PATH: dict = {}
+
 
 def _is_gemini_auth_error(err) -> bool:
     text = str(err).lower()
@@ -298,12 +305,31 @@ def analyze_all_clips(clips_index: list, emit=None) -> list:
         clip_path = clip_info.get("file", "")
         if not os.path.exists(clip_path):
             continue
+        # If clip already has pre-analyzed data (e.g. from movie library index.json),
+        # use it directly — no Gemini call needed
+        if clip_info.get("description") and clip_info.get("tags") is not None:
+            meta = {
+                "file":               clip_path,
+                "id":                 clip_info.get("id", ""),
+                "description":        clip_info["description"],
+                "tags":               clip_info.get("tags", []),
+                "category":           clip_info.get("category", "generic"),
+                "is_blurry":          clip_info.get("is_blurry", False),
+                "is_static":          clip_info.get("is_static", False),
+                "action":             clip_info.get("action", "use"),
+                "crop_percent":       clip_info.get("crop_percent", 0),
+                "watermark_position": clip_info.get("watermark_position", "none"),
+            }
+            _CLIP_META_BY_PATH[clip_path] = meta
+            cached.append(meta)
+            continue
         ap = _analysis_path(clip_path)
         if os.path.exists(ap) and _cache_valid(clip_path, ap):
             try:
                 with open(ap, encoding="utf-8") as f:
                     data = json.load(f)
                 data["file"] = clip_path
+                _CLIP_META_BY_PATH[clip_path] = data
                 cached.append(data)
             except Exception:
                 to_analyze.append(clip_info)
@@ -357,6 +383,7 @@ def analyze_all_clips(clips_index: list, emit=None) -> list:
                 for item, analysis in zip(batch, analyses):
                     analysis["id"]   = item["clip_id"]
                     analysis["file"] = item["clip_path"]
+                    _CLIP_META_BY_PATH[item["clip_path"]] = analysis
                     ap = _analysis_path(item["clip_path"])
                     with open(ap, "w", encoding="utf-8") as f:
                         json.dump(analysis, f, ensure_ascii=False, indent=2)
@@ -520,6 +547,178 @@ def validate_clip_for_section(clip_path: str, section_text: str) -> float:
     return score
 
 
+# ── Text-only batch validation for movie library clips ───────────────────────
+
+def _validate_movie_clips_text_batch(items: list, client, model: str) -> list:
+    """
+    Text-only Gemini validation for movie library clips (no frame extraction).
+    items: [{"clip_path": str, "section_text": str, "description": str, "tags": list}, ...]
+    Returns list of scores (float 0.0-1.0) in same order.
+    """
+    import re as _re
+
+    if not items:
+        return []
+
+    prompt_parts = [f"Score how well each of {len(items)} movie clips matches its script segment.\n"]
+    for idx, item in enumerate(items):
+        tags_str = ", ".join(item.get("tags", [])[:10]) or "none"
+        prompt_parts.append(
+            f"CLIP {idx + 1}:\n"
+            f"  Description: {item['description'][:300]}\n"
+            f"  Tags: {tags_str}\n"
+            f"  Script segment: \"{item['section_text'][:200]}\"\n"
+        )
+    prompt_parts.append(
+        f"\nFor each clip, rate how well it visually illustrates its script segment.\n"
+        f"Consider: mood, action, characters, setting, visual theme.\n"
+        f"Reply ONLY with a JSON array of exactly {len(items)} objects:\n"
+        f'[{{"score": 0.0}}, {{"score": 0.8}}, ...] where 0.0=no match, 1.0=perfect match.'
+    )
+
+    prompt = "\n".join(prompt_parts)
+    try:
+        response = client.models.generate_content(model=model, contents=[prompt])
+        text = _re.sub(r"^```(?:json)?\s*", "", response.text.strip())
+        text = _re.sub(r"\s*```$", "", text)
+        m = _re.search(r"\[.*\]", text, _re.DOTALL)
+        raw = json.loads(m.group() if m else text)
+        scores = [float(r.get("score", 0.0)) if isinstance(r, dict) else 0.0 for r in raw]
+        # Gemini should return exactly len(items), but be defensive: pad/truncate so
+        # every candidate always receives a deterministic score and zip() cannot drop it.
+        if len(scores) < len(items):
+            scores.extend([0.0] * (len(items) - len(scores)))
+        return scores[:len(items)]
+    except Exception as e:
+        # Do NOT silently return/cache zero scores here. If the LLM/API is down or
+        # returns invalid JSON, failing the validation is safer than poisoning the
+        # per-clip cache and project validated_candidates.json with fake 0.0 scores.
+        raise RuntimeError(f"[clip_matcher] text batch validation error: {e}") from e
+
+
+def _pioneer_keys() -> list:
+    settings = config.load_settings()
+    keys = settings.get("pioneer_api_keys", [])
+    if isinstance(keys, str):
+        keys = [k.strip() for k in keys.split(",") if k.strip()]
+    return [k for k in keys if k]
+
+
+def _validate_movie_clips_text_pioneer_batch(items: list, api_key: str) -> list:
+    """
+    Text-only Pioneer.ai validation for movie library clips.
+    Same contract as _validate_movie_clips_text_batch(), but uses the
+    OpenAI-compatible Pioneer endpoint and a specific API key.
+    """
+    import re as _re
+    import time as _time
+    import urllib.request
+
+    if not items:
+        return []
+
+    settings = config.load_settings()
+    api_url  = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
+    model    = settings.get("pioneer_model", "a87f8985-e7d8-4012-adac-6d5c66287213")
+    timeout  = int(settings.get("pioneer_timeout", 180) or 180)
+    retries  = int(settings.get("pioneer_retries", 2) or 2)
+
+    prompt_parts = [f"Score how well each of {len(items)} movie clips matches its script segment.\n"]
+    for idx, item in enumerate(items):
+        tags_str = ", ".join(item.get("tags", [])[:10]) or "none"
+        prompt_parts.append(
+            f"CLIP {idx + 1}:\n"
+            f"  Description: {item['description'][:300]}\n"
+            f"  Tags: {tags_str}\n"
+            f"  Script segment: \"{item['section_text'][:200]}\"\n"
+        )
+    prompt_parts.append(
+        f"\nFor each clip, rate how well it visually illustrates its script segment.\n"
+        f"Consider: mood, action, characters, setting, visual theme.\n"
+        f"Reply ONLY with a JSON array of exactly {len(items)} objects:\n"
+        f'[{{"score": 0.0}}, {{"score": 0.8}}, ...] where 0.0=no match, 1.0=perfect match.'
+    )
+
+    payload = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": "\n".join(prompt_parts)}],
+        "stream": False,
+    }).encode("utf-8")
+
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            req = urllib.request.Request(
+                api_url,
+                data=payload,
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            text = body["choices"][0]["message"]["content"]
+            text = _re.sub(r"^```(?:json)?\s*", "", text.strip())
+            text = _re.sub(r"\s*```$", "", text)
+            m = _re.search(r"\[.*\]", text, _re.DOTALL)
+            raw = json.loads(m.group() if m else text)
+            scores = [float(r.get("score", 0.0)) if isinstance(r, dict) else 0.0 for r in raw]
+            if len(scores) < len(items):
+                scores.extend([0.0] * (len(items) - len(scores)))
+            return scores[:len(items)]
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                _time.sleep(10 * (attempt + 1))
+                continue
+
+    # Do NOT silently return/cache zero scores here. A temporary Pioneer/API
+    # issue is handled by the caller, which can fallback to Vertex without
+    # poisoning the per-clip cache with fake 0.0 scores.
+    raise RuntimeError(f"[clip_matcher] pioneer text batch validation error: {last_error}") from last_error
+
+
+def _txt_cache_path(clip_path: str, section_text: str, cache_scope: str = "shared") -> str:
+    import hashlib
+    safe_scope = re.sub(r"[^a-zA-Z0-9_.-]+", "_", cache_scope or "shared")[:40]
+    h = hashlib.md5(("movie_txt_v3\n" + safe_scope + "\n" + section_text[:300]).encode()).hexdigest()[:12]
+    return clip_path + f".val_txt_v3_{safe_scope}_{h}.json"
+
+
+def _read_txt_cache(clip_path: str, section_text: str, cache_scope: str = "shared"):
+    cp = _txt_cache_path(clip_path, section_text, cache_scope)
+    if os.path.exists(cp):
+        try:
+            with open(cp, encoding="utf-8") as f:
+                return float(json.load(f).get("score", 0.0))
+        except Exception:
+            pass
+    return None
+
+
+def _write_txt_cache(clip_path: str, section_text: str, score: float, cache_scope: str = "shared"):
+    cp = _txt_cache_path(clip_path, section_text, cache_scope)
+    try:
+        with open(cp, "w", encoding="utf-8") as f:
+            json.dump({"score": score}, f)
+    except Exception:
+        pass
+
+
+def _get_clip_meta(clip_path: str) -> dict:
+    if clip_path in _CLIP_META_BY_PATH:
+        return _CLIP_META_BY_PATH[clip_path]
+    ap = clip_path + ".analysis.json"
+    if os.path.exists(ap):
+        try:
+            with open(ap, encoding="utf-8") as f:
+                data = json.load(f)
+                _CLIP_META_BY_PATH[clip_path] = data
+                return data
+        except Exception:
+            pass
+    return {}
+
+
 # ── Batch validation (8 pairs per Gemini call, 3 parallel workers) ────────────
 
 _VALIDATION_BATCH_SIZE = 8
@@ -551,8 +750,8 @@ def _validate_batch_chunk(items: list, client, model: str) -> list:
     try:
         raw = json.loads(m.group() if m else text)
         return [float(item.get("score", 0.0)) if isinstance(item, dict) else 0.0 for item in raw]
-    except Exception:
-        return [0.0] * len(items)
+    except Exception as e:
+        raise RuntimeError(f"[clip_matcher] batch validation parse error: {e}") from e
 
 
 def _build_validation_result(
@@ -577,6 +776,7 @@ def batch_validate_candidates(
     section_texts: list,
     settings: dict,
     emit=None,
+    movie_library_mode: bool = False,
 ) -> list:
     """
     Batch validate competitor clip candidates per section with Gemini.
@@ -584,10 +784,169 @@ def batch_validate_candidates(
     section_texts: list[str] — original transcript section texts
     Returns: list[list[(clip_path, score)]] sorted by score desc per section.
     Disk-cached per (clip, section_text) — first language pays, others are free.
+
+    movie_library_mode=True: skip frame extraction (clips are on slow gdrive mount)
+    and validate with Gemini text-only using movie index description/tags.
+    Validates top-3 first; if none score >= 0.75, validates candidates 4-5 too.
     """
     import threading
     import time as _time
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Movie library: text-only validation (no frame extraction).
+    # Runs sections in parallel across independent backends:
+    #   - 1 Vertex Gemini worker
+    #   - up to 3 Pioneer.ai Gemini-proxy workers (one API key per worker)
+    # Each section stays on exactly one worker/backend, so scores cannot be mixed.
+    # Per section: validate top-3 first; if none ≥ 0.75, validate clips 4-5 too; take best.
+    if movie_library_mode:
+        MOVIE_THRESHOLD = 0.75
+        vertex_client, vertex_model = _gemini()
+        backends = [{"kind": "vertex", "name": "Vertex", "client": vertex_client, "model": vertex_model}]
+        for i, key in enumerate(_pioneer_keys()[:3], start=1):
+            backends.append({"kind": "pioneer", "name": f"Pioneer-{i}", "api_key": key})
+
+        sections = list(enumerate(zip(section_candidates, section_texts)))
+        assigned = [[] for _ in backends]
+        for n, section_arg in enumerate(sections):
+            assigned[n % len(backends)].append(section_arg)
+
+        results_by_sec = {}
+        totals = {"validated": 0, "cached": 0}
+        totals_lock = threading.Lock()
+
+        def _items_for(clips_to_score: list, section_text: str) -> list:
+            items = []
+            for c in clips_to_score:
+                meta = _get_clip_meta(c)
+                items.append({
+                    "clip_path": c,
+                    "section_text": section_text,
+                    "description": meta.get("description", os.path.basename(c)),
+                    "tags": meta.get("tags", []),
+                })
+            return items
+
+        def _score_items(items: list, backend: dict) -> list:
+            if backend["kind"] == "pioneer":
+                try:
+                    return _validate_movie_clips_text_pioneer_batch(items, backend["api_key"])
+                except Exception as e:
+                    print(
+                        f"[clip_matcher] {backend['name']} failed ({e}); falling back to Vertex text validation for this batch",
+                        flush=True,
+                    )
+                    try:
+                        return _validate_movie_clips_text_batch(items, vertex_client, vertex_model)
+                    except Exception as fallback_error:
+                        print(
+                            f"[clip_matcher] Vertex fallback also failed for {backend['name']} batch: {fallback_error}; skipping batch",
+                            flush=True,
+                        )
+                        return []
+            try:
+                return _validate_movie_clips_text_batch(items, backend["client"], backend["model"])
+            except Exception as e:
+                print(
+                    f"[clip_matcher] {backend['name']} text validation failed ({e}); skipping batch",
+                    flush=True,
+                )
+                return []
+
+        def _process_section(sec_idx: int, clips: list, section_text: str, backend: dict) -> tuple:
+            existing = [c for c in clips if os.path.exists(c)]
+            if not existing:
+                return sec_idx, [], 0, 0
+
+            all_scores = {}
+            local_validated = 0
+            local_cached = 0
+
+            cache_scope = backend["name"]
+
+            # Check cache + collect uncached for top-3
+            to_validate_a = []
+            for clip in existing[:3]:
+                cached = _read_txt_cache(clip, section_text, cache_scope)
+                if cached is not None:
+                    all_scores[clip] = cached
+                    local_cached += 1
+                else:
+                    to_validate_a.append(clip)
+
+            # Validate top-3 uncached in one batch call
+            if to_validate_a:
+                scores_a = _score_items(_items_for(to_validate_a, section_text), backend)
+                for clip, score in zip(to_validate_a, scores_a):
+                    score = round(min(max(float(score), 0.0), 1.0), 4)
+                    all_scores[clip] = score
+                    _write_txt_cache(clip, section_text, score, cache_scope)
+                    local_validated += 1
+
+            best_so_far = max((all_scores.get(c, 0.0) for c in existing[:3]), default=0.0)
+
+            # If no clip ≥ threshold in top-3, validate clips 4-5
+            if best_so_far < MOVIE_THRESHOLD and len(existing) > 3:
+                to_validate_b = []
+                for clip in existing[3:5]:
+                    cached = _read_txt_cache(clip, section_text, cache_scope)
+                    if cached is not None:
+                        all_scores[clip] = cached
+                        local_cached += 1
+                    else:
+                        to_validate_b.append(clip)
+
+                if to_validate_b:
+                    scores_b = _score_items(_items_for(to_validate_b, section_text), backend)
+                    for clip, score in zip(to_validate_b, scores_b):
+                        score = round(min(max(float(score), 0.0), 1.0), 4)
+                        all_scores[clip] = score
+                        _write_txt_cache(clip, section_text, score, cache_scope)
+                        local_validated += 1
+
+            # Sort all scored clips by score desc
+            scored = [(c, all_scores[c]) for c in existing[:5] if c in all_scores]
+            scored.sort(key=lambda x: -x[1])
+            return sec_idx, scored, local_validated, local_cached
+
+        def _process_backend(backend: dict, backend_sections: list):
+            print(f"[clip_matcher] Movie text worker {backend['name']}: {len(backend_sections)} sections", flush=True)
+            for sec_idx, (clips, section_text) in backend_sections:
+                try:
+                    sec_idx, scored, v_count, c_count = _process_section(sec_idx, clips, section_text, backend)
+                except Exception as e:
+                    print(
+                        f"[clip_matcher] Movie text section {sec_idx + 1} failed on {backend['name']}: {e}; skipping section",
+                        flush=True,
+                    )
+                    scored, v_count, c_count = [], 0, 0
+                with totals_lock:
+                    results_by_sec[sec_idx] = scored
+                    totals["validated"] += v_count
+                    totals["cached"] += c_count
+                    done = len(results_by_sec)
+                if emit and done % 8 == 0:
+                    emit("media", f"Movie library: text-validated sections {done}/{len(sections)}...")
+
+        with ThreadPoolExecutor(max_workers=len(backends)) as pool:
+            futures = [
+                pool.submit(_process_backend, backend, backend_sections)
+                for backend, backend_sections in zip(backends, assigned)
+                if backend_sections
+            ]
+            for f in as_completed(futures):
+                f.result()
+
+        result = [results_by_sec.get(i, []) for i in range(len(sections))]
+        backend_names = ", ".join(b["name"] for b in backends)
+        print(
+            f"[clip_matcher] Movie text validation ({backend_names}): "
+            f"{totals['validated']} validated, {totals['cached']} cached",
+            flush=True,
+        )
+        if emit:
+            emit("media", f"Movie library: text-validated {totals['validated']} clips ({totals['cached']} cached) via {backend_names}")
+        return result
 
     cached_scores: dict = {}
     to_validate:   list = []

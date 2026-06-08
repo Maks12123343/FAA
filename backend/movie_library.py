@@ -737,31 +737,56 @@ def get_movie_clips(movie_name: str) -> list:
 
 
 def _score_clip(clip: dict, segment_text: str) -> float:
-    """Швидкий keyword-based скор без Gemini."""
+    """Розумний keyword-based скор без Gemini. Fuzzy matching:
+    - Shifu знаходить Master Shifu
+    - po знаходить kung fu panda, young panda
+    - anger знаходить anger, angry, outburst of anger
+    """
     text_lower = segment_text.lower()
+    text_words = set(text_lower.split())
     score = 0.0
 
-    for char in clip.get("characters", []):
-        if char.lower() in text_lower:
-            score += 5.0
+    def _word_match(query: str, text: str, full_bonus: float = 1.0, partial_bonus: float = 0.4) -> float:
+        """Повертає бонус якщо query входить в text (повністю або частково)."""
+        q = query.lower().strip()
+        if not q:
+            return 0.0
+        # Full match
+        if q in text:
+            return full_bonus
+        # Partial: Shifu matches Master Shifu
+        words = text.split()
+        for w in words:
+            if q in w or w in q:
+                return partial_bonus
+        return 0.0
 
+    # Characters: "Master Shifu" matches "Shifu teaches Po" -> Shifu = partial match
+    for char in clip.get("characters", []):
+        score += _word_match(char, text_lower, full_bonus=5.0, partial_bonus=3.0)
+
+    # Emotion: strong match
+    if clip.get("emotion"):
+        score += _word_match(clip["emotion"], text_lower, full_bonus=4.0, partial_bonus=2.5)
+
+    # Scene type
+    if clip.get("scene_type"):
+        score += _word_match(clip["scene_type"], text_lower, full_bonus=3.0, partial_bonus=1.5)
+
+    # Themes: each word of theme checked separately
     for theme in clip.get("themes", []):
         for w in theme.replace("_", " ").split():
-            if w in text_lower:
-                score += 3.0
+            if len(w) > 2:
+                score += _word_match(w, text_lower, full_bonus=2.5, partial_bonus=1.5)
 
+    # Tags: full tag match + partial word match
     for tag in clip.get("tags", []):
-        tag_lower = tag.lower()
-        if tag_lower in text_lower:
-            score += 2.0
-        else:
-            for word in tag_lower.split():
-                if len(word) > 3 and word in text_lower:
-                    score += 0.7
+        score += _word_match(tag, text_lower, full_bonus=2.0, partial_bonus=1.0)
 
+    # Description: words > 4 chars
     for word in clip.get("description", "").lower().split():
-        if len(word) > 4 and word in text_lower:
-            score += 0.3
+        if len(word) > 4:
+            score += _word_match(word, text_lower, full_bonus=0.8, partial_bonus=0.3)
 
     return score
 

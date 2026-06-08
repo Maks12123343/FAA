@@ -29,6 +29,7 @@ def _esc(text: str) -> str:
             .replace("'", "\\'")
             .replace(":", "\\:")
             .replace(",", "\\,")
+            .replace(";", "\\;")
             .replace("%", "\\%")
             .replace("[", "\\[")
             .replace("]", "\\]")

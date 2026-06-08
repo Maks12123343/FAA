@@ -18,7 +18,7 @@ from backend import movie_library, movie_pipeline
 from backend import writer as writer_backend
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FAA_SECRET_KEY", "faa-local-dev-only-change-for-network-use")
+app.secret_key = os.environ.get("FAA_SECRET_KEY") or os.urandom(32).hex()
 
 _cors_env = os.environ.get("FAA_CORS_ORIGIN", "")
 _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_env else ["http://localhost:5050", "http://127.0.0.1:5050"]
@@ -40,9 +40,8 @@ def _require_auth():
         return
     if request.path.startswith("/static"):
         return
-    # Requests from localhost (e.g. cleanup timer) — check real IP behind nginx
-    real_ip = request.headers.get("X-Real-IP", request.remote_addr)
-    if real_ip in ("127.0.0.1", "::1"):
+    # Only trust remote_addr (set by the OS/nginx), never trust X-Real-IP from client
+    if request.remote_addr in ("127.0.0.1", "::1"):
         return
     auth = request.authorization
     if auth and auth.username == _AUTH_USER and auth.password == _AUTH_PASS:
@@ -117,8 +116,17 @@ def library_page():
 @app.route("/api/settings", methods=["POST"])
 def save_settings():
     data = request.json or {}
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
     settings = config.load_settings()
-    settings.update(data)
+    # Deep merge: for dict-valued keys (like voice_profiles), merge instead of overwrite
+    for key, value in data.items():
+        if key not in config.DEFAULT_SETTINGS:
+            continue
+        if isinstance(value, dict) and isinstance(settings.get(key), dict):
+            settings[key].update(value)
+        else:
+            settings[key] = value
     config.save_settings(settings)
     return jsonify({"ok": True})
 
@@ -134,6 +142,16 @@ def api_prepare():
 
     source_url = data.get("source_url") or None
 
+    # Detect niche pipeline type
+    niche_path = os.path.join(config.NICHES_DIR, f"{niche}.json")
+    pipeline_type = "standard"
+    movie_names = []
+    if os.path.exists(niche_path):
+        with open(niche_path, encoding="utf-8") as f:
+            niche_data = json.load(f)
+        pipeline_type = niche_data.get("pipeline_type", "standard")
+        movie_names = niche_data.get("movie_library", [])
+
     with _job_lock:
         if _job_active:
             return jsonify({"error": "A job is already running. Wait for it to finish."}), 429
@@ -147,12 +165,36 @@ def api_prepare():
             eventlet.sleep(0)
 
         try:
-            result = pipeline.prepare(
-                niche,
-                source_url=source_url,
-                emit=_emit,
-            )
-            socketio.emit("prepare_done", result)
+            if pipeline_type == "movie" or movie_names:
+                # Movie pipeline: just transcribe source URL
+                if not source_url:
+                    raise ValueError("Movie pipeline requires a source YouTube URL. Please paste a URL in Step 1.")
+                result = movie_pipeline.prepare(source_url, emit=_emit)
+                # Store movie name in state for later produce
+                prepare_dir = result.get("prepare_dir", os.path.join(config.PROJECTS_DIR, f"_prepare_{result['prepare_id']}"))
+                state_path = os.path.join(prepare_dir, "state.json")
+                if os.path.exists(state_path):
+                    with open(state_path, encoding="utf-8") as f:
+                        state = json.load(f)
+                    state["_niche_pipeline_type"] = "movie"
+                    state["_movie_names"] = movie_names
+                    state["_niche"] = niche
+                    with open(state_path, "w", encoding="utf-8") as f:
+                        json.dump(state, f, ensure_ascii=False, indent=2)
+                socketio.emit("prepare_done", {
+                    **result,
+                    "pipeline_type": "movie",
+                    "movie_names": movie_names,
+                    "niche": niche,
+                })
+            else:
+                # Standard pipeline: find top video + transcribe
+                result = pipeline.prepare(
+                    niche,
+                    source_url=source_url,
+                    emit=_emit,
+                )
+                socketio.emit("prepare_done", {**result, "pipeline_type": "standard"})
         except Exception as e:
             import traceback
             print(f"[app] ERROR in prepare: {e}\n{traceback.format_exc()}", flush=True)
@@ -169,12 +211,26 @@ def api_prepare():
 def api_produce():
     global _job_active
     data        = request.json or {}
-    prepare_id  = data.get("prepare_id")
+    prepare_id  = data.get("prepare_id", "").strip()
     youtube_urls = data.get("youtube_urls", [])
     languages   = data.get("languages", [])
+    movie_name  = data.get("movie_name", "").strip()
 
     if not prepare_id or not languages:
         return jsonify({"error": "prepare_id and languages required"}), 400
+    if os.path.sep in prepare_id or ".." in prepare_id:
+        return jsonify({"error": "Invalid prepare_id"}), 400
+
+    # Detect pipeline type from prepare state
+    prepare_dir = os.path.join(config.PROJECTS_DIR, f"_prepare_{prepare_id}")
+    state_path = os.path.join(prepare_dir, "state.json")
+    pipeline_type = "standard"
+    movie_names = []
+    if os.path.exists(state_path):
+        with open(state_path, encoding="utf-8") as f:
+            state = json.load(f)
+        pipeline_type = state.get("_niche_pipeline_type", "standard")
+        movie_names = state.get("_movie_names", [])
 
     with _job_lock:
         if _job_active:
@@ -189,21 +245,45 @@ def api_produce():
             eventlet.sleep(0)
 
         try:
-            for lang in languages:
-                try:
-                    socketio.emit("progress", {"step": "produce", "message": f"Starting language: {lang}"})
-                    eventlet.sleep(0)
-                    result = pipeline.produce(
-                        prepare_id   = prepare_id,
-                        youtube_urls = youtube_urls,
-                        language     = lang,
-                        emit=_emit,
-                    )
-                    socketio.emit("produce_done", result)
-                except Exception as e:
-                    import traceback
-                    print(f"[app] ERROR in produce [{lang}]: {e}\n{traceback.format_exc()}", flush=True)
-                    socketio.emit("error", {"message": f"[{lang}] {e}"})
+            if pipeline_type == "movie" or movie_names:
+                # Movie pipeline
+                _movie = movie_name if movie_name else (movie_names[0] if movie_names else "")
+                if not _movie:
+                    _emit("error", "No movie selected for movie pipeline. Index a movie first.")
+                    socketio.emit("error", {"message": "No movie selected for movie pipeline. Index a movie first."})
+                    return
+                for lang in languages:
+                    try:
+                        socketio.emit("progress", {"step": "produce", "message": f"Starting language: {lang}"})
+                        eventlet.sleep(0)
+                        result = movie_pipeline.produce(
+                            prepare_id = prepare_id,
+                            movie_name = _movie,
+                            language   = lang,
+                            emit=_emit,
+                        )
+                        socketio.emit("produce_done", result)
+                    except Exception as e:
+                        import traceback
+                        print(f"[app] ERROR in movie produce [{lang}]: {e}\n{traceback.format_exc()}", flush=True)
+                        socketio.emit("error", {"message": f"[{lang}] {e}"})
+            else:
+                # Standard pipeline
+                for lang in languages:
+                    try:
+                        socketio.emit("progress", {"step": "produce", "message": f"Starting language: {lang}"})
+                        eventlet.sleep(0)
+                        result = pipeline.produce(
+                            prepare_id   = prepare_id,
+                            youtube_urls = youtube_urls,
+                            language     = lang,
+                            emit=_emit,
+                        )
+                        socketio.emit("produce_done", result)
+                    except Exception as e:
+                        import traceback
+                        print(f"[app] ERROR in produce [{lang}]: {e}\n{traceback.format_exc()}", flush=True)
+                        socketio.emit("error", {"message": f"[{lang}] {e}"})
             socketio.emit("all_done", {})
         finally:
             with _job_lock:
@@ -269,13 +349,20 @@ def library_stats():
 def download_video(project_id):
     # Sanitize: strip any directory traversal attempts
     safe_id = os.path.basename(project_id)
-    output  = os.path.join(config.PROJECTS_DIR, safe_id, "output.mp4")
+    # Standard pipeline output
+    output = os.path.join(config.PROJECTS_DIR, safe_id, "output.mp4")
+    # Movie pipeline output (named after project_id)
+    output2 = os.path.join(config.PROJECTS_DIR, safe_id, f"{safe_id}.mp4")
     # Verify the resolved path is still inside PROJECTS_DIR
-    if not os.path.realpath(output).startswith(os.path.realpath(config.PROJECTS_DIR)):
-        return jsonify({"error": "Invalid project id"}), 400
-    if not os.path.exists(output):
-        return jsonify({"error": "Not found"}), 404
-    return send_file(output, as_attachment=True, download_name=f"{safe_id}.mp4")
+    if os.path.exists(output):
+        if not os.path.realpath(output).startswith(os.path.realpath(config.PROJECTS_DIR)):
+            return jsonify({"error": "Invalid project id"}), 400
+        return send_file(output, as_attachment=True, download_name=f"{safe_id}.mp4")
+    if os.path.exists(output2):
+        if not os.path.realpath(output2).startswith(os.path.realpath(config.PROJECTS_DIR)):
+            return jsonify({"error": "Invalid project id"}), 400
+        return send_file(output2, as_attachment=True, download_name=f"{safe_id}.mp4")
+    return jsonify({"error": "Not found"}), 404
 
 
 @app.route("/api/library/fetch_stocks", methods=["POST"])
@@ -411,6 +498,21 @@ def stocks_analyze():
     return jsonify({"ok": True})
 
 
+@app.route("/api/niche/info")
+def niche_info():
+    """Return full niche config including pipeline_type and movie_library."""
+    try:
+        niche = _safe_id(request.args.get("niche", ""), "niche")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    path = os.path.join(config.NICHES_DIR, f"{niche}.json")
+    if not os.path.exists(path):
+        return jsonify({"error": "niche not found"}), 404
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return jsonify(data)
+
+
 @app.route("/api/niche", methods=["POST"])
 def create_niche():
     data = request.json or {}
@@ -423,10 +525,16 @@ def create_niche():
     niche = {
         "name": data.get("name", name),
         "description": data.get("description", ""),
+        "pipeline_type": data.get("pipeline_type", "standard"),
+        "montage_style": data.get("montage_style", "standard"),
         "channels": data.get("channels", []),
         "search_keywords": data.get("keywords", []),
         "stock_tags": data.get("stock_tags", []),
     }
+    if data.get("movie_library"):
+        niche["movie_library"] = data["movie_library"]
+    if data.get("clip_score_threshold"):
+        niche["clip_score_threshold"] = data["clip_score_threshold"]
     with open(path, "w", encoding="utf-8") as f:
         json.dump(niche, f, ensure_ascii=False, indent=2)
     return jsonify({"ok": True})
@@ -548,8 +656,7 @@ def api_movies_process_folder():
             with _job_lock:
                 _job_active = False
 
-    import threading
-    threading.Thread(target=run, daemon=True).start()
+    socketio.start_background_task(run)
     return jsonify({"ok": True})
 
 
@@ -596,6 +703,8 @@ def api_movies_produce():
 
     if not prepare_id or not movie_name or not languages:
         return jsonify({"error": "prepare_id, movie_name and languages required"}), 400
+    if os.path.sep in prepare_id or ".." in prepare_id:
+        return jsonify({"error": "Invalid prepare_id"}), 400
 
     with _job_lock:
         if _job_active:

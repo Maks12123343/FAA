@@ -97,36 +97,16 @@ must be STRICTLY between 490 and 500 characters. Adjust tag count/length to fit 
 
 # ── Claude helper ─────────────────────────────────────────────────────────────
 
-def _call_claude(system: str, messages: list) -> tuple:
-    import requests as _req
-    settings = config.load_settings()
+from backend import api_client
 
-    api_keys = settings.get("pioneer_api_keys", [])
-    api_key  = api_keys[0] if api_keys else ""
-    model    = settings.get("pioneer_model", "ca143171-0ff9-4ca9-86e6-f5731d36bdea")
-    api_url  = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
-
-    payload = {
-        "model":    model,
-        "messages": [{"role": "system", "content": system}] + messages,
-        "stream":   False,
-    }
-    resp = _req.post(
-        api_url,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-        json=payload,
-        timeout=600,
-    )
-    resp.raise_for_status()
-    data         = resp.json()
-    text         = data["choices"][0]["message"]["content"].strip()
-    finish       = data["choices"][0]["finish_reason"]
-    # Map OpenAI "length" → "max_tokens" so callers stay unchanged
-    stop_reason  = "max_tokens" if finish == "length" else finish
-    return text, stop_reason
+def _call_claude(system: str, messages: list, timeout: int = 180) -> tuple:
+    """Call Pioneer API with automatic key rotation and retry."""
+    return api_client.call_pioneer(system, messages, timeout=timeout)
 
 
 def _extract_code_block(text: str) -> str:
+    if not text:
+        raise RuntimeError("LLM returned empty response — check API key and connectivity")
     m = re.search(r"```(?:\w+)?\n?(.*?)```", text, re.DOTALL)
     return m.group(1).strip() if m else text.strip()
 

@@ -6,8 +6,8 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
 
-POLL_INTERVAL = 5   # seconds between status checks
-MAX_WAIT      = 600 # max seconds to wait for task
+POLL_INTERVAL = 5    # seconds between status checks
+MAX_WAIT      = 1800 # max seconds to wait for task (30 min — long scripts need time)
 
 
 def _get_voice_profile(language: str) -> dict:
@@ -53,6 +53,8 @@ def generate(text: str, language: str, output_path: str) -> str:
     print(f"[tts] Task created: {task_id}", flush=True)
 
     # Poll until done
+    _DONE_STATUSES = {"ending", "completed", "done", "finished", "success"}
+    _FAIL_STATUSES = {"error", "failed", "cancelled"}
     waited = 0
     status = ""
     while waited < MAX_WAIT:
@@ -64,12 +66,12 @@ def generate(text: str, language: str, output_path: str) -> str:
         status = sr.json().get("status", "")
         print(f"[tts] Status: {status}", flush=True)
 
-        if status == "ending":
+        if status in _DONE_STATUSES:
             break
-        if status == "error":
-            raise RuntimeError(f"TTS task {task_id} failed with error status")
+        if status in _FAIL_STATUSES:
+            raise RuntimeError(f"TTS task {task_id} failed (status: {status})")
 
-    if status != "ending":
+    if status not in _DONE_STATUSES:
         raise RuntimeError(f"TTS task {task_id} timed out after {MAX_WAIT}s (last status: {status})")
 
     # Download result

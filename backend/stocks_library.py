@@ -394,7 +394,13 @@ def _pexels_fallback(section_text: str, n: int) -> list:
     if not api_keys:
         return []
 
-    query = " ".join(section_text.split()[:5])
+    # Extract "Segment to illustrate:" line if present, otherwise use raw text
+    query_text = section_text
+    for line in section_text.splitlines():
+        if line.startswith("Segment to illustrate:"):
+            query_text = line[len("Segment to illustrate:"):].strip()
+            break
+    query = " ".join(query_text.split()[:6])
     stocks_dir = config.get_stocks_dir()
     general_dir = os.path.join(stocks_dir, "general")
     os.makedirs(general_dir, exist_ok=True)
@@ -690,7 +696,7 @@ def prewarm_stock_validation(whisper_segments: list, settings: dict, emit=None) 
         seg_text = seg.get("text", "").strip()
         if not seg_text:
             continue
-        candidates = pick_stock_clips(seg_text, n=5)
+        candidates = pick_stock_clips(seg_text, n=3)
         for clip_path in candidates:
             h = hashlib.md5(seg_text[:300].encode()).hexdigest()[:12]
             cache_path = clip_path + f".stockval_{h}.json"

@@ -2,20 +2,27 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
 
 _whisper_model = None
+_whisper_lock = threading.Lock()
 
 
 def _get_whisper_model():
     global _whisper_model
     if _whisper_model is None:
-        import whisper
-        print("[transcriber] Loading Whisper model...", flush=True)
-        _whisper_model = whisper.load_model("base")
+        with _whisper_lock:
+            if _whisper_model is None:
+                import torch
+                import whisper
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                model_name = "medium" if device == "cuda" else "base"
+                print(f"[transcriber] Loading Whisper model ({model_name}) on {device}...", flush=True)
+                _whisper_model = whisper.load_model(model_name, device=device)
     return _whisper_model
 
 
@@ -47,7 +54,10 @@ def _get_subtitles(url: str, tmp_dir: str) -> str | None:
     ]
     cmd += _cookies_arg(tmp_dir)
     cmd.append(url)
-    subprocess.run(cmd, capture_output=True, timeout=60)
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return None
 
     for f in os.listdir(tmp_dir):
         if f.endswith(".json3"):
@@ -83,7 +93,10 @@ def _whisper_transcribe(url: str, tmp_dir: str) -> str:
     ]
     dl_cmd += _cookies_arg(tmp_dir)
     dl_cmd.append(url)
-    subprocess.run(dl_cmd, timeout=300)
+    try:
+        subprocess.run(dl_cmd, capture_output=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Audio download timed out for {url}")
     if not os.path.exists(audio_path):
         raise RuntimeError(f"Audio download failed for {url}")
 
@@ -120,31 +133,54 @@ def transcribe_segments(audio_path: str) -> list:
     Uses cached model -- loads once, reuses across all languages.
     Sanitizes segments and merges short ones (< 2s), capped at 5s per merged segment.
     """
-    print(f"[transcriber] Whisper (base) segmenting {os.path.basename(audio_path)}...", flush=True)
+    import time as _time
+
+    file_size_mb = os.path.getsize(audio_path) / (1024 * 1024) if os.path.exists(audio_path) else 0
+    print(f"[transcriber] === WHISPER SEGMENTATION START ===", flush=True)
+    print(f"[transcriber] File: {os.path.basename(audio_path)} ({file_size_mb:.1f} MB)", flush=True)
+
+    print(f"[transcriber] Step 1/5: Loading Whisper model...", flush=True)
+    t0 = _time.time()
     model = _get_whisper_model()
+    print(f"[transcriber] Step 1/5: Model loaded in {_time.time()-t0:.1f}s", flush=True)
+
+    print(f"[transcriber] Step 2/5: Running transcription (this may take a while on slow hardware)...", flush=True)
+    t1 = _time.time()
     result = model.transcribe(audio_path, word_timestamps=False, task="transcribe")
+    print(f"[transcriber] Step 2/5: Transcription done in {_time.time()-t1:.1f}s", flush=True)
 
     raw = result.get("segments", [])
+    print(f"[transcriber] Step 3/5: Got {len(raw)} raw segments from Whisper", flush=True)
     if not raw:
+        print(f"[transcriber] WARNING: Whisper returned 0 segments — audio may be silent or corrupted", flush=True)
         return []
 
     # Sanitize: drop segments with missing/invalid timestamps
     sanitized = []
+    dropped = 0
     for seg in raw:
         try:
             start = float(seg["start"])
             end   = float(seg["end"])
         except (KeyError, TypeError, ValueError):
+            dropped += 1
             continue
         if end <= start:
+            dropped += 1
             continue
         sanitized.append({"text": str(seg.get("text", "")).strip(), "start": start, "end": end})
 
+    if dropped:
+        print(f"[transcriber] Step 3/5: Dropped {dropped} invalid segments", flush=True)
+
     if not sanitized:
+        print(f"[transcriber] WARNING: All segments invalid after sanitization", flush=True)
         return []
 
     # Sort by start time
     sanitized.sort(key=lambda s: s["start"])
+    total_dur = sanitized[-1]["end"] - sanitized[0]["start"]
+    print(f"[transcriber] Step 4/5: {len(sanitized)} valid segments, covering {total_dur:.1f}s", flush=True)
 
     # Merge segments shorter than 2s into the previous one,
     # but cap merged segment at 5s to avoid huge gaps in montage.
@@ -158,7 +194,12 @@ def transcribe_segments(audio_path: str) -> list:
         else:
             merged.append(dict(seg))
 
-    return [{"text": s["text"].strip(), "start": s["start"], "end": s["end"]} for s in merged]
+    final = [{"text": s["text"].strip(), "start": s["start"], "end": s["end"]} for s in merged]
+    print(f"[transcriber] Step 5/5: Merged into {len(final)} segments (2-5s each)", flush=True)
+    print(f"[transcriber]   First: {final[0]['start']:.1f}-{final[0]['end']:.1f}s", flush=True)
+    print(f"[transcriber]   Last:  {final[-1]['start']:.1f}-{final[-1]['end']:.1f}s", flush=True)
+    print(f"[transcriber] === WHISPER SEGMENTATION DONE ===", flush=True)
+    return final
 
 
 def get_transcript(url: str, fallback_whisper: bool = True) -> dict:

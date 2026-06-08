@@ -1,0 +1,21 @@
+{
+  "name": "New Niche",
+  "description": "Description of this niche for Gemini analysis context",
+  "pipeline_type": "standard",
+  "montage_style": "standard",
+  "title_keywords": ["keyword1", "keyword2", "keyword3"],
+  "channels": [
+    "https://www.youtube.com/@ExampleChannel1",
+    "https://www.youtube.com/@ExampleChannel2"
+  ],
+  "search_keywords": [
+    "keyword 2024",
+    "keyword topic",
+    "keyword analysis"
+  ],
+  "stock_tags": [
+    "tag1", "tag2", "tag3",
+    "visual_tag", "location_tag"
+  ],
+  "clip_score_threshold": 0.85
+}

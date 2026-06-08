@@ -232,6 +232,7 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
             lib_dir = os.path.join(config.LIBRARY_DIR, niche_name, "raw")
             lib_clips = _glob.glob(os.path.join(lib_dir, "*.mp4")) if os.path.exists(lib_dir) else []
             if lib_clips:
+                _from_movie_library = False
                 log("clips", f"No YouTube URLs provided — using {len(lib_clips)} clips from Library ({niche_name})")
                 os.makedirs(pool_dir, exist_ok=True)
                 import shutil as _shutil
@@ -244,11 +245,57 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
                 with open(index_path, "w", encoding="utf-8") as f:
                     json.dump(clips_index, f)
             else:
-                raise RuntimeError(
-                    f"No YouTube URLs provided and Library is empty for niche '{niche_name}'. "
-                    "Add YouTube URLs in Step 2, or first populate the Library via the Library page."
-                )
+                # Check movie library (niche config: "movie_library": ["Movie Name", ...])
+                movie_names = _niche_data.get("movie_library", [])
+                movie_clips_index = []
+                for movie_name in movie_names:
+                    movie_idx_path = os.path.join(config.get_movies_dir(), movie_name, "index.json")
+                    if os.path.exists(movie_idx_path):
+                        with open(movie_idx_path, encoding="utf-8") as _mf:
+                            movie_idx = json.load(_mf)
+                        for clip in movie_idx.get("clips", []):
+                            clip_file = clip.get("file", "")
+                            if not clip_file or not os.path.exists(clip_file):
+                                continue
+                            if clip.get("is_blurry") or clip.get("is_static"):
+                                continue
+                            # Merge themes + emotion into tags for better semantic matching
+                            merged_tags = list(clip.get("tags", []))
+                            for t in clip.get("themes", []):
+                                if t not in merged_tags:
+                                    merged_tags.append(t)
+                            if clip.get("emotion") and clip["emotion"] not in merged_tags:
+                                merged_tags.append(clip["emotion"])
+                            movie_clips_index.append({
+                                "file":               clip_file,
+                                "id":                 clip.get("id", ""),
+                                "score":              1.0,
+                                "description":        clip.get("description", ""),
+                                "tags":               merged_tags,
+                                "category":           clip.get("scene_type", "generic"),
+                                "is_blurry":          False,
+                                "is_static":          False,
+                                "action":             "use",
+                                "crop_percent":       0,
+                                "watermark_position": "none",
+                                "_size":              clip.get("_size"),
+                                "_mtime":             clip.get("_mtime"),
+                            })
+                if movie_clips_index:
+                    log("clips", f"No YouTube URLs — using {len(movie_clips_index)} clips from Movie Library ({', '.join(movie_names)})")
+                    os.makedirs(pool_dir, exist_ok=True)
+                    with open(index_path, "w", encoding="utf-8") as f:
+                        json.dump(movie_clips_index, f)
+                    yt_pool = [c["file"] for c in movie_clips_index]
+                    clips_index = movie_clips_index
+                    _from_movie_library = True
+                else:
+                    raise RuntimeError(
+                        f"No YouTube URLs provided and Library is empty for niche '{niche_name}'. "
+                        "Add YouTube URLs in Step 2, or first populate the Library via the Library page."
+                    )
         else:
+            _from_movie_library = False
             log("clips", f"Downloading {len(youtube_urls)} YouTube videos...")
             yt_pool, clips_index = build_pool(youtube_urls, pool_dir, emit=emit)
             if not clips_index:
@@ -264,6 +311,8 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
                 clips_index = json.load(f)
         else:
             clips_index = []
+        # Detect movie library mode from cached index (clips have pre-analyzed description)
+        _from_movie_library = bool(clips_index and clips_index[0].get("description"))
         if not clips_index:
             raise RuntimeError(
                 f"Clip pool index is empty (pool_dir={pool_dir}). "
@@ -362,11 +411,21 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
         log("media", "Analyzing clips with Gemini (cached results reused)...")
         analyzed_index = analyze_all_clips(clips_index, emit=emit)
 
-    # Build pre-validated candidate pool — shared across all languages, cached once
-    val_path      = os.path.join(prepare_dir, "validated_candidates.json")
-    section_texts = list(_split_into_chunks(transcript, WORDS_PER_SECTION))
-    cur_settings  = config.load_settings()
-    fingerprint   = _val_fingerprint(transcript, clips_index, cur_settings)
+    # Rechunk Whisper segments first — we match clips per Whisper chunk (1:1)
+    log("media", f"Rechunking {len(whisper_segments)} Whisper segments (style={montage_style})...")
+    chunks_prebuilt = _rechunk_segments(whisper_segments, style=montage_style)
+    chunk_texts     = [c["text"] for c in chunks_prebuilt]
+    if chunks_prebuilt:
+        log("media", f"Rechunked: {len(chunk_texts)} chunks, "
+            f"first={chunks_prebuilt[0]['start']:.1f}-{chunks_prebuilt[0]['end']:.1f}s, "
+            f"last={chunks_prebuilt[-1]['start']:.1f}-{chunks_prebuilt[-1]['end']:.1f}s")
+    else:
+        log("media", "WARNING: rechunk produced 0 chunks — Whisper may have failed")
+
+    # Build validated candidate pool — per language/project (cached in project_dir)
+    val_path     = os.path.join(project_dir, "validated_candidates.json")
+    cur_settings = config.load_settings()
+    fingerprint  = _val_fingerprint(chunk_texts, clips_index, cur_settings)
 
     validated_candidates = None
     if os.path.exists(val_path):
@@ -375,22 +434,25 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
                 cached = json.load(f)
             if cached.get("fp") == fingerprint:
                 validated_candidates = [[(item[0], item[1]) for item in sec] for sec in cached["data"]]
-                log("media", f"Validated candidates loaded from cache ({len(validated_candidates)} sections)")
+                log("media", f"Validated candidates loaded from cache ({len(validated_candidates)} chunks)")
             else:
-                log("media", "Validated candidates cache outdated (pool/model/threshold changed), rebuilding...")
+                log("media", "Validated candidates cache outdated, rebuilding...")
                 os.remove(val_path)
         except Exception:
             os.remove(val_path)
 
     if validated_candidates is None:
-        log("media", "Matching and validating clips against original transcript (cached for all languages)...")
-        raw_candidates = match_clips_multi(section_texts, analyzed_index, top_n=15, emit=emit)
+        # Match per Whisper chunk — 1 chunk → top_n candidates
+        _top_n = 5 if _from_movie_library else 10
+        log("media", f"Matching clips per chunk (top_n={_top_n}, movie_library={_from_movie_library}, chunks={len(chunk_texts)})...")
+        raw_candidates = match_clips_multi(chunk_texts, analyzed_index, top_n=_top_n, emit=emit)
         validated_candidates = batch_validate_candidates(
-            raw_candidates, section_texts, cur_settings, emit=emit
+            raw_candidates, chunk_texts, cur_settings, emit=emit,
+            movie_library_mode=_from_movie_library,
         )
         with open(val_path, "w", encoding="utf-8") as f:
             json.dump({"fp": fingerprint, "data": validated_candidates}, f, ensure_ascii=False)
-        log("media", f"Validation done: {len(validated_candidates)} sections")
+        log("media", f"Validation done: {len(validated_candidates)} chunks")
 
     # Load global used clips tracker (cross-video uniqueness)
     global_used = _load_global_used(prepare_dir)
@@ -400,13 +462,16 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
     session_blocked = _load_session_blocked(prepare_dir)
     log("media", f"Session blocked clips: {len(session_blocked)} clips unavailable this session")
 
-    # Pre-warm stock validation — precompute contexts once, reuse in assembly loop
-    log("media", "Pre-validating stock clips in batch mode...")
-    from backend.stocks_library import prewarm_stock_validation
-    chunks_prebuilt   = _rechunk_segments(whisper_segments, style=montage_style)
-    stock_contexts    = _build_stock_contexts(chunks_prebuilt, title)
-    synthetic_segs    = [{"text": ctx} for ctx in stock_contexts]
-    prewarm_stock_validation(synthetic_segs, config.load_settings(), emit=emit)
+    # Pre-warm stock validation — skip entirely for movie_library mode (only movie clips used)
+    if not _from_movie_library:
+        log("media", "Pre-validating stock clips in batch mode...")
+        from backend.stocks_library import prewarm_stock_validation
+        stock_contexts = _build_stock_contexts(chunks_prebuilt, title)
+        synthetic_segs = [{"text": ctx} for ctx in stock_contexts]
+        prewarm_stock_validation(synthetic_segs, config.load_settings(), emit=emit)
+    else:
+        log("media", "movie_library mode — skipping stock pre-warm (only movie clips will be used)")
+        stock_contexts = []
 
     clips = _assemble_clips_from_candidates(
         validated_candidates, whisper_segments, yt_pool, audio_dur, global_used,
@@ -414,6 +479,7 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
         precomputed_chunks=chunks_prebuilt,
         precomputed_stock_contexts=stock_contexts,
         session_blocked=session_blocked,
+        movie_library_mode=_from_movie_library,
     )
     log("media", f"Total clips assembled: {len(clips)}")
     if not clips:
@@ -421,14 +487,6 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
             "No clips assembled — clip pool may be empty, all clips were rejected by Gemini, "
             "or Whisper produced no segments. Check logs above."
         )
-
-    # Save updated global used clips tracker
-    _save_global_used(prepare_dir, global_used)
-    log("media", "Global used clips tracker saved")
-
-    # Save updated session blocked clips
-    _save_session_blocked(prepare_dir, session_blocked)
-    log("media", f"Session blocked clips saved: {len(session_blocked)} total")
 
     # -- Text overlays --------------------------------------------------------
     log("text", "Generating text overlays...")
@@ -454,6 +512,14 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
         )
     log("done", f"Video ready: {output_path} ({output_size // 1_000_000}MB, {output_dur:.0f}s)")
 
+    # Save global used clips tracker AFTER successful render
+    _save_global_used(prepare_dir, global_used)
+    log("media", "Global used clips tracker saved")
+
+    # Save session blocked clips AFTER successful render
+    _save_session_blocked(prepare_dir, session_blocked)
+    log("media", f"Session blocked clips saved: {len(session_blocked)} total")
+
     return {
         "project_id":   project_id,
         "output":       output_path,
@@ -469,8 +535,16 @@ def _stock_max() -> float:
     return float(config.load_settings().get("stock_max_duration", 6))
 
 
-def _val_fingerprint(transcript: str, clips_index: list, settings: dict) -> str:
+def _val_fingerprint(chunk_texts_or_transcript, clips_index: list, settings: dict) -> str:
     import hashlib
+    pioneer_keys = settings.get("pioneer_api_keys", []) or []
+    if isinstance(pioneer_keys, str):
+        pioneer_keys = [k.strip() for k in pioneer_keys.split(",") if k.strip()]
+    # Accept both list[str] (new: whisper chunks) and str (legacy: transcript)
+    if isinstance(chunk_texts_or_transcript, list):
+        text_key = " ".join(chunk_texts_or_transcript)[:1000]
+    else:
+        text_key = str(chunk_texts_or_transcript)[:1000]
     clip_parts = []
     for clip in clips_index:
         path = clip.get("file", "") if isinstance(clip, dict) else str(clip)
@@ -480,10 +554,13 @@ def _val_fingerprint(transcript: str, clips_index: list, settings: dict) -> str:
         except Exception:
             clip_parts.append(path)
     key = "|".join([
-        transcript[:1000],
+        "validation_fp_v3_movie_text_parallel",
+        text_key,
         hashlib.md5("\n".join(sorted(clip_parts)).encode()).hexdigest(),
         settings.get("gemini_model", ""),
         str(settings.get("clip_score_threshold", 0.85)),
+        str(settings.get("pioneer_model", "")),
+        str(len(pioneer_keys)),
     ])
     return hashlib.md5(key.encode()).hexdigest()[:16]
 
@@ -611,6 +688,7 @@ def _assemble_clips_from_candidates(
     precomputed_chunks: list = None,
     precomputed_stock_contexts: list = None,
     session_blocked: set = None,
+    movie_library_mode: bool = False,
 ) -> list:
     """
     validated_candidates: list[list[(clip_path, score)]] sorted by score desc per section.
@@ -639,7 +717,7 @@ def _assemble_clips_from_candidates(
 
     settings        = config.load_settings()
     comp_ratio      = float(settings.get("competitor_ratio", 0.60))
-    score_threshold = float(settings.get("clip_score_threshold", 0.85))
+    score_threshold = 0.75 if movie_library_mode else float(settings.get("clip_score_threshold", 0.85))
 
     chunks   = precomputed_chunks if precomputed_chunks is not None else _rechunk_segments(whisper_segments)
     n_chunks = len(chunks)
@@ -732,8 +810,9 @@ def _assemble_clips_from_candidates(
             continue
 
         chunk_text = chunk["text"]
-        tr_idx     = min(int(chunk_idx * n_cand / max(1, n_chunks)), n_cand - 1) if n_cand > 0 else 0
-        sec_cands  = validated_candidates[tr_idx] if 0 <= tr_idx < n_cand else []
+        # 1:1 mapping: each Whisper chunk has its own candidate pool
+        tr_idx    = chunk_idx if chunk_idx < n_cand else n_cand - 1
+        sec_cands = validated_candidates[tr_idx] if 0 <= tr_idx < n_cand else []
 
         clip_path   = None
         is_stock    = False
@@ -751,9 +830,9 @@ def _assemble_clips_from_candidates(
             parts.append(f"Segment to illustrate: {chunk_text}")
             stock_context = "\n".join(parts)
 
-        # Try stock clip (use stock_context for candidate matching — same as prewarm)
-        if random.random() >= comp_ratio and chunk_text.strip():
-            for sc in pick_stock_clips(stock_context, n=5):
+        # Try stock clip — disabled in movie_library mode (only movie clips allowed)
+        if not movie_library_mode and random.random() >= comp_ratio and chunk_text.strip():
+            for sc in pick_stock_clips(stock_context, n=3):
                 if sc in used_clips or global_used.get(sc, 0) >= _STOCK_MAX_USES:
                     continue
                 if _clip_action(sc) in ("reject",):
@@ -782,6 +861,21 @@ def _assemble_clips_from_candidates(
                         break
                     if clip_path:
                         break
+                if clip_path:
+                    break
+
+        # Movie library fallback: if all validated candidates are below 0.75,
+        # still use the highest-scored available one before falling back randomly.
+        if not clip_path and movie_library_mode:
+            fresh_passes = [True] if over_limit else [True, False]
+            for prefer_fresh in fresh_passes:
+                for candidate, _score in sec_cands:
+                    if not _is_usable(candidate):
+                        continue
+                    if prefer_fresh and global_used.get(candidate, 0) > 0:
+                        continue
+                    clip_path = candidate
+                    break
                 if clip_path:
                     break
 

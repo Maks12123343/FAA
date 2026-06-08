@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
@@ -17,7 +18,7 @@ def _cookies_arg(tmp_dir: str) -> list:
     if not os.path.exists(COOKIES_FILE):
         return []
     import shutil
-    tmp = os.path.join(tmp_dir, "cookies_tmp.txt")
+    tmp = os.path.join(tmp_dir, f"cookies_{os.getpid()}_{threading.current_thread().ident}.txt")
     shutil.copy2(COOKIES_FILE, tmp)
     return ["--cookies", tmp]
 
@@ -31,13 +32,13 @@ def _clip_limits() -> tuple:
 
 
 def _get_duration(path: str) -> float:
-    r = subprocess.run(
-        [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "json", path],
-        capture_output=True, text=True, timeout=30,
-    )
     try:
+        r = subprocess.run(
+            [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "json", path],
+            capture_output=True, text=True, timeout=30,
+        )
         return float(json.loads(r.stdout)["format"]["duration"])
-    except Exception:
+    except (subprocess.TimeoutExpired, Exception):
         return 0.0
 
 
@@ -88,12 +89,16 @@ def _detect_scene_timestamps(video_path: str) -> list:
     Uses showinfo filter to extract pts_time of frames where scene score > SCENE_THRESHOLD.
     Always includes 0.0. Returns empty list (only 0.0) if no changes detected.
     """
-    r = subprocess.run(
-        [FFMPEG, "-threads", "6", "-i", video_path,
-         "-vf", f"select=gt(scene\\,{SCENE_THRESHOLD}),showinfo",
-         "-vsync", "vfr", "-f", "null", "-"],
-        capture_output=True, text=True, timeout=300,
-    )
+    try:
+        r = subprocess.run(
+            [FFMPEG, "-threads", "6", "-i", video_path,
+             "-vf", f"select=gt(scene\\,{SCENE_THRESHOLD}),showinfo",
+             "-vsync", "vfr", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[downloader] Scene detection timed out — will use fixed cuts.", flush=True)
+        return [0.0]
     if r.returncode != 0:
         print(
             f"[downloader] Scene detection failed (ffmpeg exit {r.returncode}) "
@@ -243,17 +248,21 @@ def download_and_cut(video_url: str, pool_dir: str, emit=None) -> list:
     ]
     dl_cmd += _cookies_arg(pool_dir)
     dl_cmd.append(video_url)
-    dl = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=600)
-    if dl.returncode != 0:
-        print(f"[downloader] yt-dlp error: {dl.stderr[-300:].strip()}", flush=True)
+    try:
+        dl = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=600)
+        if dl.returncode != 0:
+            print(f"[downloader] yt-dlp error: {dl.stderr[-300:].strip()}", flush=True)
+    except subprocess.TimeoutExpired:
+        _log(f"{vid_id}: download timed out (10min limit)")
+        return []
 
-    # Remove cookie temp copy left by _cookies_arg
-    _cookie_tmp = os.path.join(pool_dir, "cookies_tmp.txt")
-    if os.path.exists(_cookie_tmp):
-        try:
-            os.unlink(_cookie_tmp)
-        except Exception:
-            pass
+    # Remove cookie temp copies left by _cookies_arg
+    for _f in os.listdir(pool_dir):
+        if _f.startswith("cookies_") and _f.endswith(".txt"):
+            try:
+                os.unlink(os.path.join(pool_dir, _f))
+            except Exception:
+                pass
 
     if not os.path.exists(src_path):
         _log(f"{vid_id}: download failed")
