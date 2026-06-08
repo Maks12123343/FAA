@@ -608,7 +608,8 @@ def _validate_movie_clips_text_pioneer_batch(items: list, api_key: str) -> list:
     """
     Text-only Pioneer.ai validation for movie library clips.
     Same contract as _validate_movie_clips_text_batch(), but uses the
-    OpenAI-compatible Pioneer endpoint and a specific API key.
+    OpenAI-compatible Pioneer endpoint. Tries the given api_key first,
+    then rotates through all available keys if it fails.
     """
     import re as _re
     import time as _time
@@ -619,7 +620,7 @@ def _validate_movie_clips_text_pioneer_batch(items: list, api_key: str) -> list:
 
     settings = config.load_settings()
     api_url  = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
-    model    = settings.get("pioneer_model", "a87f8985-e7d8-4012-adac-6d5c66287213")
+    model    = settings.get("pioneer_model", "gemini-3.5-flash")
     timeout  = int(settings.get("pioneer_timeout", 180) or 180)
     retries  = int(settings.get("pioneer_retries", 2) or 2)
 
@@ -645,36 +646,44 @@ def _validate_movie_clips_text_pioneer_batch(items: list, api_key: str) -> list:
         "stream": False,
     }).encode("utf-8")
 
-    last_error = None
-    for attempt in range(retries + 1):
-        try:
-            req = urllib.request.Request(
-                api_url,
-                data=payload,
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-            text = body["choices"][0]["message"]["content"]
-            text = _re.sub(r"^```(?:json)?\s*", "", text.strip())
-            text = _re.sub(r"\s*```$", "", text)
-            m = _re.search(r"\[.*\]", text, _re.DOTALL)
-            raw = json.loads(m.group() if m else text)
-            scores = [float(r.get("score", 0.0)) if isinstance(r, dict) else 0.0 for r in raw]
-            if len(scores) < len(items):
-                scores.extend([0.0] * (len(items) - len(scores)))
-            return scores[:len(items)]
-        except Exception as e:
-            last_error = e
-            if attempt < retries:
-                _time.sleep(10 * (attempt + 1))
-                continue
+    # Build key list: given key first, then all others as fallback
+    all_keys = _pioneer_keys()
+    keys_to_try = [api_key] + [k for k in all_keys if k != api_key]
 
-    # Do NOT silently return/cache zero scores here. A temporary Pioneer/API
-    # issue is handled by the caller, which can fallback to Vertex without
-    # poisoning the per-clip cache with fake 0.0 scores.
-    raise RuntimeError(f"[clip_matcher] pioneer text batch validation error: {last_error}") from last_error
+    last_error = None
+    for key in keys_to_try:
+        for attempt in range(retries + 1):
+            try:
+                req = urllib.request.Request(
+                    api_url,
+                    data=payload,
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                text = body["choices"][0]["message"]["content"]
+                text = _re.sub(r"^```(?:json)?\s*", "", text.strip())
+                text = _re.sub(r"\s*```$", "", text)
+                m = _re.search(r"\[.*\]", text, _re.DOTALL)
+                raw = json.loads(m.group() if m else text)
+                scores = [float(r.get("score", 0.0)) if isinstance(r, dict) else 0.0 for r in raw]
+                if len(scores) < len(items):
+                    scores.extend([0.0] * (len(items) - len(scores)))
+                return scores[:len(items)]
+            except Exception as e:
+                last_error = e
+                print(
+                    f"[clip_matcher] Pioneer validation error (key ...{key[-12:]}, "
+                    f"attempt {attempt+1}/{retries+1}): {e}",
+                    flush=True,
+                )
+                if attempt < retries:
+                    _time.sleep(10 * (attempt + 1))
+                    continue
+                break  # try next key
+
+    raise RuntimeError(f"[clip_matcher] pioneer text batch validation error (all keys failed): {last_error}") from last_error
 
 
 def _txt_cache_path(clip_path: str, section_text: str, cache_scope: str = "shared") -> str:

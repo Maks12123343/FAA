@@ -90,7 +90,7 @@ DEFAULT_SETTINGS = {
     # Pioneer.ai API (OpenAI-compatible — used for script writing & rewriting)
     # Add up to N keys for parallel validation (1 key per thread)
     "pioneer_api_keys": [],
-    "pioneer_model": "ca143171-0ff9-4ca9-86e6-f5731d36bdea",
+    "pioneer_model": "gemini-3.5-flash",
     "pioneer_api_url": "https://api.pioneer.ai/v1/chat/completions",
 
     # Unofficial Gemini cookie API (optional — doubles throughput alongside Vertex AI)
