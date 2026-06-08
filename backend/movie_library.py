@@ -30,7 +30,7 @@ def _is_gemini_auth_error(err) -> bool:
     text = str(err).lower()
     return any(x in text for x in (
         "401", "403", "permission", "credentials",
-        "unauthenticated", "unauthorized", "invalid_argument",
+        "unauthenticated", "unauthorized",
     ))
 
 

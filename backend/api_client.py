@@ -24,7 +24,7 @@ def call_pioneer(system: str, messages: list, timeout: int = 180, max_retries: i
     if not api_keys:
         raise RuntimeError("No pioneer_api_keys configured in Settings.")
 
-    model   = settings.get("pioneer_model", "ca143171-0ff9-4ca9-86e6-f5731d36bdea")
+    model   = settings.get("pioneer_model", "gemini-3.5-flash")
     api_url = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
 
     payload = {

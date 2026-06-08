@@ -722,6 +722,8 @@ def _assemble_clips_from_candidates(
     chunks   = precomputed_chunks if precomputed_chunks is not None else _rechunk_segments(whisper_segments)
     n_chunks = len(chunks)
     n_cand   = len(validated_candidates)
+    if n_cand == 0:
+        print("[pipeline] WARNING: validated_candidates is empty — all clips will come from fallback pool", flush=True)
     print(f"[pipeline] Whisper segs: {len(whisper_segments)} → chunks: {n_chunks}", flush=True)
 
     all_clips:          list       = []
