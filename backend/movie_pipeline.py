@@ -199,10 +199,8 @@ Return ONLY a JSON array, no markdown:
 
 
 def _plan_text_overlays(segments_with_times: list, emit=None) -> list:
-    """Claude читає сегменти скрипту і повертає план текстових оверлеїв."""
-    import anthropic
-    settings = config.load_settings()
-    client   = anthropic.Anthropic(api_key=settings.get("claude_api_key", ""), timeout=120.0)
+    """Pioneer (Claude Opus) читає сегменти скрипту і повертає план текстових оверлеїв."""
+    from backend import api_client
 
     seg_data = [
         {"index": s["index"], "start": round(s["start"], 1), "text": s["text"][:120]}
@@ -213,12 +211,12 @@ def _plan_text_overlays(segments_with_times: list, emit=None) -> list:
     )
 
     try:
-        r = client.messages.create(
-            model=settings.get("claude_model", "claude-sonnet-4-6"),
-            max_tokens=2048,
+        text, _ = api_client.call_pioneer(
+            system="You are a creative video editor planning text overlays.",
             messages=[{"role": "user", "content": prompt}],
+            timeout=120,
         )
-        text = re.sub(r"^```(?:json)?\s*", "", r.content[0].text.strip())
+        text = re.sub(r"^```(?:json)?\s*", "", text.strip())
         text = re.sub(r"\s*```$", "", text)
         m    = re.search(r"\[.*\]", text, re.DOTALL)
         plan = json.loads(m.group() if m else text)
