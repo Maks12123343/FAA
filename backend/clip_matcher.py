@@ -650,6 +650,12 @@ def _validate_movie_clips_text_pioneer_batch(items: list, api_key: str) -> list:
     prompt_parts.append(
         f"\nRate how well each clip visually illustrates the narration.\n"
         f"Consider: mood, action, characters, setting.\n"
+        f"IMPORTANT: Score 0.0 for ANY of these:\n"
+        f"- Credits/end credits (author names, directed by, produced by, cast list)\n"
+        f"- Title cards, text-only screens, intertitles\n"
+        f"- Black/blank screens, studio logos\n"
+        f"- Static frames with only text and no action\n"
+        f"Only score > 0 for clips showing actual visual ACTION (characters, scenes, environments).\n"
         f"Reply ONLY with a JSON array of {len(items)} objects:\n"
         f'[{{"score": 0.0}}, {{"score": 0.8}}, ...] where 0.0=no match, 1.0=perfect match.'
     )

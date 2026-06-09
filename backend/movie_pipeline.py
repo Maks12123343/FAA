@@ -31,6 +31,28 @@ from backend.clip_matcher import _validate_movie_clips_text_pioneer_batch
 WORDS_PER_SECTION  = 35
 MIN_AUDIO_DURATION = 60.0   # секунд — менше цього вважається помилкою TTS
 
+_REJECT_KEYWORDS = {
+    "credits", "credit", "end credits", "opening credits", "title card",
+    "title screen", "text screen", "intertitle", "author", "authors",
+    "directed by", "produced by", "written by", "cast", "crew",
+    "copyright", "logo", "studio logo", "black screen", "blank",
+    "the end", "fin",
+}
+
+
+def _is_text_clip(clip: dict) -> bool:
+    """Returns True for credits, title cards, text-only screens."""
+    desc = clip.get("description", "").lower()
+    tags = [t.lower() for t in clip.get("tags", [])]
+    scene = clip.get("scene_type", "").lower()
+    for kw in _REJECT_KEYWORDS:
+        if kw in desc or kw in scene:
+            return True
+        for tag in tags:
+            if kw in tag:
+                return True
+    return False
+
 # ── Whisper model cache (loaded once, reused across calls) ──────────────────────
 _WHISPER_MODEL = None
 _WHISPER_LOCK = threading.Lock()
@@ -388,6 +410,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
                 c for c in all_movie_clips
                 if c.get("id") not in used_ids
                 and os.path.exists(c.get("file", ""))
+                and not _is_text_clip(c)
             ]
             random.shuffle(candidates)
             candidates = candidates[:5]
@@ -396,6 +419,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
             candidates = [
                 c for c in all_movie_clips
                 if os.path.exists(c.get("file", ""))
+                and not _is_text_clip(c)
             ]
             random.shuffle(candidates)
             candidates = candidates[:5]

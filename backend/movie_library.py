@@ -179,7 +179,7 @@ For each clip, 3 frames are shown (start/middle/end), labeled CLIP 1, CLIP 2, et
 For EACH clip return a JSON object with:
 - characters: list of character names visible (e.g. "Tigress", "Po", "Shifu")
 - emotion: one of: joy, sadness, fear, anger, determination, vulnerability, shame, guilt, pride, neutral
-- scene_type: one of: training, fight, emotional_dialogue, rejection, acceptance, flashback, celebration, isolation, comedy, action, quiet_moment, transformation
+- scene_type: one of: training, fight, emotional_dialogue, rejection, acceptance, flashback, celebration, isolation, comedy, action, quiet_moment, transformation, credits, title_card
 - themes: 2-4 from: [growth, trauma, impostor_syndrome, false_self, identity, rejection, acceptance, vulnerability, shame, fear, determination, healing, connection, isolation, anger, betrayal, grief, love, trust]
 - description: 1-2 sentence visual description
 - tags: 8-12 topic tags
@@ -736,12 +736,33 @@ def get_movie_clips(movie_name: str) -> list:
     return data.get("clips", [])
 
 
+_REJECT_KEYWORDS = {
+    "credits", "credit", "end credits", "opening credits", "title card",
+    "title screen", "text screen", "intertitle", "author", "authors",
+    "directed by", "produced by", "written by", "cast", "crew",
+    "copyright", "logo", "studio logo", "black screen", "blank",
+    "the end", "fin",
+}
+
+
 def _score_clip(clip: dict, segment_text: str) -> float:
     """Розумний keyword-based скор без Gemini. Fuzzy matching:
     - Shifu знаходить Master Shifu
     - po знаходить kung fu panda, young panda
     - anger знаходить anger, angry, outburst of anger
+    Rejects: credits, title cards, text-only screens → score = -1
     """
+    desc_lower = clip.get("description", "").lower()
+    tags_lower = [t.lower() for t in clip.get("tags", [])]
+    scene_type = clip.get("scene_type", "").lower()
+
+    for kw in _REJECT_KEYWORDS:
+        if kw in desc_lower or kw in scene_type:
+            return -1.0
+        for tag in tags_lower:
+            if kw in tag:
+                return -1.0
+
     text_lower = segment_text.lower()
     text_words = set(text_lower.split())
     score = 0.0
