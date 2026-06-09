@@ -417,6 +417,14 @@ def _select_clips_for_segments(segments: list, movie_name: str,
 
     n_workers = len(pioneer_keys)
 
+    # API call counters (thread-safe)
+    _api_counts = {"text": 0, "visual": 0, "text_retry": 0}
+    _api_lock = threading.Lock()
+
+    def _inc(counter: str, n: int = 1):
+        with _api_lock:
+            _api_counts[counter] += n
+
     # ── Phase 1 + 2: text validation (parallel) ──
     # Build segment data: for each segment collect initial 5 candidates
     seg_info = []
@@ -455,6 +463,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
             try:
                 scores = _validate_movie_clips_text_pioneer_batch(items, api_key)
                 scores = [round(min(max(float(s), 0.0), 1.0), 4) for s in scores]
+                _inc("text")
             except Exception as e:
                 print(f"[movie_pipeline] Pioneer text error seg {si}: {e}", flush=True)
                 scores = [0.0] * len(pool)
@@ -529,6 +538,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
                 try:
                     scores = _validate_movie_clips_text_pioneer_batch(items, key)
                     scores = [round(min(max(float(s), 0.0), 1.0), 4) for s in scores]
+                    _inc("text_retry")
                 except Exception:
                     scores = [0.0] * len(new_candidates)
                 scored = sorted(zip(new_candidates, scores), key=lambda x: -x[1])
@@ -540,6 +550,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
                 tried_ids.add(cid)
 
                 visual_score = _validate_clip_visual_pioneer(clip["file"], chunk, key)
+                _inc("visual")
                 all_tried.append((clip, txt_score, visual_score))
 
                 if visual_score >= VISUAL_THRESHOLD:
@@ -583,9 +594,16 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         selected.append({"file": clip["file"], "duration": seg_dur, "id": cid})
         used_ids_final.add(cid)
 
+    total_api = _api_counts["text"] + _api_counts["visual"] + _api_counts["text_retry"]
     print(
         f"[movie_pipeline] Selected {len(selected)} clips for {audio_dur:.1f}s audio "
         f"(visual: {visual_passed} passed, {visual_retried} used best-effort)",
+        flush=True,
+    )
+    print(
+        f"[movie_pipeline] API calls: {total_api} total "
+        f"(text: {_api_counts['text']}, visual: {_api_counts['visual']}, "
+        f"text_retry: {_api_counts['text_retry']})",
         flush=True,
     )
     return selected
