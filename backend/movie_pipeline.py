@@ -741,6 +741,20 @@ def prepare(source_url: str, emit=None) -> dict:
     from backend import channel_scanner
     meta = channel_scanner.get_video_metadata(source_url)
 
+    # Fallback: if YouTube API failed (empty title), get title via yt-dlp
+    if not meta.get("title"):
+        log("prepare", "YouTube API returned no title, trying yt-dlp...")
+        try:
+            r = subprocess.run(
+                ["yt-dlp", "--no-warnings", "--quiet", "--print", "%(title)s", source_url],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                meta["title"] = r.stdout.strip()
+                log("prepare", f"Got title via yt-dlp: {meta['title'][:80]}")
+        except Exception as e:
+            log("prepare", f"yt-dlp title fallback failed: {e}")
+
     state = {
         "prepare_id":         prepare_id,
         "prepare_dir":        prepare_dir,
@@ -782,6 +796,8 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
 
     transcript   = state["transcript"]
     source_title = state.get("source_title", "")
+    if not source_title:
+        source_title = transcript[:150].split(".")[0].strip() or "Movie Psychology Analysis"
 
     # ── Resume: шукаємо існуючий проект з тим самим prepare_id + language ────
     _resume_proj_id = None
