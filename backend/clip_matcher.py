@@ -620,7 +620,7 @@ def _validate_movie_clips_text_pioneer_batch(items: list, api_key: str) -> list:
 
     settings = config.load_settings()
     api_url  = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
-    model    = settings.get("pioneer_model", "gemini-3.5-flash")
+    model    = settings.get("pioneer_validation_model", settings.get("pioneer_model", "gemini-3.5-flash"))
     timeout  = int(settings.get("pioneer_timeout", 180) or 180)
     retries  = int(settings.get("pioneer_retries", 2) or 2)
 
