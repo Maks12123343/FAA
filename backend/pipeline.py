@@ -80,6 +80,7 @@ from backend.aligner import _split_into_chunks, _get_duration
 from backend.clip_downloader import build_pool
 from backend.clip_matcher import match_clips_multi, analyze_all_clips, batch_validate_candidates
 from backend.stocks_library import pick_stock_clips
+from backend.translator import translate_sections
 
 WORDS_PER_SECTION = 35
 
@@ -422,10 +423,13 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
     else:
         log("media", "WARNING: rechunk produced 0 chunks — Whisper may have failed")
 
+    # Translate chunk texts to English for clip matching (tags/descriptions are English)
+    chunk_texts_en = translate_sections(chunk_texts, language, project_dir=project_dir, emit=emit)
+
     # Build validated candidate pool — per language/project (cached in project_dir)
     val_path     = os.path.join(project_dir, "validated_candidates.json")
     cur_settings = config.load_settings()
-    fingerprint  = _val_fingerprint(chunk_texts, clips_index, cur_settings)
+    fingerprint  = _val_fingerprint(chunk_texts_en, clips_index, cur_settings)
 
     validated_candidates = None
     if os.path.exists(val_path):
@@ -444,10 +448,10 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
     if validated_candidates is None:
         # Match per Whisper chunk — 1 chunk → top_n candidates
         _top_n = 5 if _from_movie_library else 10
-        log("media", f"Matching clips per chunk (top_n={_top_n}, movie_library={_from_movie_library}, chunks={len(chunk_texts)})...")
-        raw_candidates = match_clips_multi(chunk_texts, analyzed_index, top_n=_top_n, emit=emit)
+        log("media", f"Matching clips per chunk (top_n={_top_n}, movie_library={_from_movie_library}, chunks={len(chunk_texts_en)})...")
+        raw_candidates = match_clips_multi(chunk_texts_en, analyzed_index, top_n=_top_n, emit=emit)
         validated_candidates = batch_validate_candidates(
-            raw_candidates, chunk_texts, cur_settings, emit=emit,
+            raw_candidates, chunk_texts_en, cur_settings, emit=emit,
             movie_library_mode=_from_movie_library,
         )
         with open(val_path, "w", encoding="utf-8") as f:

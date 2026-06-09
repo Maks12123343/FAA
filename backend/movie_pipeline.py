@@ -30,6 +30,7 @@ from backend.clip_matcher import (
     _validate_movie_clips_text_pioneer_batch,
     _validate_clip_visual_pioneer,
 )
+from backend.translator import translate_sections
 
 WORDS_PER_SECTION  = 35
 MIN_AUDIO_DURATION = 60.0   # секунд — менше цього вважається помилкою TTS
@@ -1106,6 +1107,14 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
     text_overlays = _build_text_overlays(overlay_plan, segments_with_times)
     log("overlays", f"Planned {len(text_overlays)} text overlays.")
 
+    # ── Translate segment texts to English for clip matching ────────────────
+    seg_texts_orig = [s.get("text", "") for s in segments_with_times]
+    seg_texts_en = translate_sections(seg_texts_orig, language, project_dir=proj_dir, emit=emit)
+    segments_en = [
+        {**s, "text": en_text}
+        for s, en_text in zip(segments_with_times, seg_texts_en)
+    ]
+
     # ── Підбір кліпів: 3 кандидати на сегмент → Gemini → найкращий ───────────
     clips_cache = os.path.join(proj_dir, "clips.json")
     if os.path.exists(clips_cache):
@@ -1120,7 +1129,7 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
     else:
         log("clips", f"Selecting clips from '{movie_name}' (3 candidates/seg → Gemini)...")
         clip_data = _select_clips_for_segments(
-            segments_with_times, movie_name, audio_dur,
+            segments_en, movie_name, audio_dur,
             global_used_ids=global_used_ids,
         )
         if not clip_data:
@@ -1292,10 +1301,18 @@ def produce_from_script(
     text_overlays = _build_text_overlays(overlay_plan, segments_with_times)
     log("overlays", f"Planned {len(text_overlays)} text overlays.")
 
+    # ── Translate segment texts to English for clip matching ────────────────
+    seg_texts_orig = [s.get("text", "") for s in segments_with_times]
+    seg_texts_en = translate_sections(seg_texts_orig, language, project_dir=proj_dir, emit=emit)
+    segments_en = [
+        {**s, "text": en_text}
+        for s, en_text in zip(segments_with_times, seg_texts_en)
+    ]
+
     # ── Clip selection: 3 candidates/seg → Gemini → best ─────────────────────
     log("clips", f"Selecting clips from '{movie_name}' (3 candidates/seg → Gemini)...")
     clip_data = _select_clips_for_segments(
-        segments_with_times, movie_name, audio_dur,
+        segments_en, movie_name, audio_dur,
         global_used_ids=global_used_ids,
     )
     if not clip_data:
