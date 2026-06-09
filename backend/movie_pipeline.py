@@ -829,10 +829,16 @@ def _build_movie_video(clips: list, audio_path: str, output_path: str,
 
 def prepare(source_url: str, emit=None) -> dict:
     """Фаза 1: транскрипція джерельного відео."""
+    _t0 = time.time()
+
+    def _elapsed():
+        s = int(time.time() - _t0)
+        return f"{s // 60}:{s % 60:02d}"
+
     def log(step, msg):
-        print(f"[movie_pipeline:prepare:{step}] {msg}", flush=True)
+        print(f"[movie_pipeline:prepare:{step}] [{_elapsed()}] {msg}", flush=True)
         if emit:
-            emit(step, msg)
+            emit(step, f"[{_elapsed()}] {msg}")
 
     prepare_id  = f"movie_{int(time.time())}"
     prepare_dir = os.path.join(config.PROJECTS_DIR, f"_prepare_{prepare_id}")
@@ -890,10 +896,16 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
     global_used_ids — множина clip ID вже використаних в попередніх відео батчу.
     Передається ззовні щоб гарантувати різноманітність відеоряду між відео.
     """
+    _t0 = time.time()
+
+    def _elapsed():
+        s = int(time.time() - _t0)
+        return f"{s // 60}:{s % 60:02d}"
+
     def log(step, msg):
-        print(f"[movie_pipeline:produce:{step}] {msg}", flush=True)
+        print(f"[movie_pipeline:produce:{step}] [{_elapsed()}] {msg}", flush=True)
         if emit:
-            emit(step, msg)
+            emit(step, f"[{_elapsed()}] {msg}")
 
     prepare_dir = os.path.join(config.PROJECTS_DIR, f"_prepare_{prepare_id}")
     with open(os.path.join(prepare_dir, "state.json"), encoding="utf-8") as f:
