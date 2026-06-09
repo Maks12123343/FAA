@@ -130,7 +130,7 @@ def _expand_script(script: str, language: str, video_title: str) -> str:
 
 # ── Quality check ─────────────────────────────────────────────────────────────
 
-def _quality_check_script(script: str, transcript: str, language: str) -> tuple:
+def _quality_check_script(script: str, transcript: str, language: str, test_mode: bool = False) -> tuple:
     """
     Claude перевіряє якість рірайту.
     Повертає (passed: bool, feedback: str).
@@ -182,8 +182,8 @@ def _quality_check_script(script: str, transcript: str, language: str) -> tuple:
         feedback = data.get("feedback", "")
         issues   = data.get("issues", [])
 
-        # Додаткова перевірка довжини незалежно від Claude
-        if script_len < orig_len * 0.90:
+        # Додаткова перевірка довжини незалежно від Claude (skip in test mode)
+        if not test_mode and script_len < orig_len * 0.90:
             passed   = False
             feedback = (
                 f"Script is too short: {script_len} chars ({pct}% of original {orig_len} chars). "
@@ -307,29 +307,29 @@ def rewrite_all(
     feedback = ""
 
     if test_mode:
-        print("[rewriter] TEST MODE: using short prompt (~750 words, no expand/quality check)", flush=True)
-        script = _rewrite_script(transcript, language, source_title, test_mode=True)
-    else:
-        for attempt in range(MAX_REWRITE_ATTEMPTS):
-            print(
-                f"[rewriter] Rewrite attempt {attempt + 1}/{MAX_REWRITE_ATTEMPTS}"
-                + (f" (feedback: {feedback[:80]}...)" if feedback else ""),
-                flush=True,
-            )
-            script = _rewrite_script(transcript, language, source_title, feedback=feedback)
+        print("[rewriter] TEST MODE: using short prompt (~750 words)", flush=True)
+
+    for attempt in range(MAX_REWRITE_ATTEMPTS):
+        print(
+            f"[rewriter] Rewrite attempt {attempt + 1}/{MAX_REWRITE_ATTEMPTS}"
+            + (f" (feedback: {feedback[:80]}...)" if feedback else ""),
+            flush=True,
+        )
+        script = _rewrite_script(transcript, language, source_title, feedback=feedback, test_mode=test_mode)
+        if not test_mode:
             script = _expand_script(script, language, source_title)
 
-            passed, feedback = _quality_check_script(script, transcript, language)
-            if passed:
-                print(f"[rewriter] Quality check PASSED on attempt {attempt + 1}", flush=True)
-                break
-            else:
-                print(
-                    f"[rewriter] Quality check FAILED on attempt {attempt + 1}: {feedback[:120]}",
-                    flush=True,
-                )
-                if attempt == MAX_REWRITE_ATTEMPTS - 1:
-                    print("[rewriter] WARNING: all attempts failed quality check, using last result", flush=True)
+        passed, feedback = _quality_check_script(script, transcript, language, test_mode=test_mode)
+        if passed:
+            print(f"[rewriter] Quality check PASSED on attempt {attempt + 1}", flush=True)
+            break
+        else:
+            print(
+                f"[rewriter] Quality check FAILED on attempt {attempt + 1}: {feedback[:120]}",
+                flush=True,
+            )
+            if attempt == MAX_REWRITE_ATTEMPTS - 1:
+                print("[rewriter] WARNING: all attempts failed quality check, using last result", flush=True)
 
     meta = _rewrite_metadata(
         language           = language,

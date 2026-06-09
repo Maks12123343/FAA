@@ -1033,7 +1033,7 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
 
     # ── Рірайт ────────────────────────────────────────────────────────────────
     script_path = os.path.join(proj_dir, "script.txt")
-    if os.path.exists(script_path) and not test_mode:
+    if os.path.exists(script_path):
         with open(script_path, encoding="utf-8") as f:
             script = f.read()
         log("rewrite", f"Script cached ({len(script)} chars)")
@@ -1056,9 +1056,8 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
                 f"Script too short ({len(script.split())} words). "
                 "Rewriter may have failed — check Claude API key and prompt."
             )
-        if not test_mode:
-            with open(script_path, "w", encoding="utf-8") as f:
-                f.write(script)
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(script)
         meta_path = os.path.join(proj_dir, "metadata.json")
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump({k: v for k, v in result.items() if k != "script"},
