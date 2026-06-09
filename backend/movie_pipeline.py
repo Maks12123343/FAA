@@ -398,7 +398,12 @@ def _extract_global_context(segments: list, movie_name: str) -> str:
 
     char_counts = {}
     for char in known_characters:
-        count = full_text.count(char)
+        if len(char) <= 2:
+            # Short names (Li, Po) — match whole words only to avoid false positives
+            import re as _re
+            count = len(_re.findall(r'\b' + _re.escape(char) + r'\b', full_text))
+        else:
+            count = full_text.count(char)
         if count > 0:
             char_counts[char] = count
 
