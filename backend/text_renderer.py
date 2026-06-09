@@ -24,7 +24,12 @@ else:
 
 def _esc_textfile(text: str) -> str:
     """Escape text for FFmpeg drawtext textfile content."""
-    return text.replace("\\", "\\\\").replace("\n", " ").replace("\r", "")
+    return (
+        text.replace("\\", "\\\\")
+            .replace("%", "%%")
+            .replace("\n", " ")
+            .replace("\r", "")
+    )
 
 
 def _build_drawtext(overlay: dict, text_dir: str, idx: int) -> str:
