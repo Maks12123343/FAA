@@ -348,13 +348,12 @@ def _prepare_movie_clip(clip_path: str, out_path: str, uniq_params: dict,
         return False
 
 
-def _pioneer_text_fallback(clips: list, section_text: str) -> list:
-    """Pioneer text-only validation fallback when Vertex Gemini is unavailable."""
+def _validate_via_pioneer(clips: list, section_text: str) -> list:
+    """Primary validation: Pioneer API (gemini-3.5-flash) text-based."""
     settings = config.load_settings()
     pioneer_keys = settings.get("pioneer_api_keys", [])
     if not pioneer_keys:
-        print("[movie_pipeline] No Pioneer keys for fallback, returning 0.0", flush=True)
-        return [0.0] * len(clips)
+        raise RuntimeError("No Pioneer API keys configured")
     items = []
     for c in clips:
         meta = _get_clip_meta(c.get("file", ""))
@@ -364,12 +363,14 @@ def _pioneer_text_fallback(clips: list, section_text: str) -> list:
             "description": meta.get("description", os.path.basename(c.get("file", ""))),
             "tags": meta.get("tags", []),
         })
-    try:
-        scores = _validate_movie_clips_text_pioneer_batch(items, pioneer_keys[0])
-        return [round(min(max(float(s), 0.0), 1.0), 4) for s in scores]
-    except Exception as e2:
-        print(f"[movie_pipeline] Pioneer text fallback also failed: {e2}", flush=True)
-        return [0.0] * len(clips)
+    scores = _validate_movie_clips_text_pioneer_batch(items, pioneer_keys[0])
+    return [round(min(max(float(s), 0.0), 1.0), 4) for s in scores]
+
+
+def _validate_via_vertex(clips: list, section_text: str) -> list:
+    """Fallback validation: Vertex Gemini vision-based (frames)."""
+    clip_paths = [c["file"] for c in clips]
+    return validate_clips_batch(clip_paths, section_text)
 
 
 # ── Clip selection ─────────────────────────────────────────────────────────────
@@ -426,29 +427,33 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         if not candidates:
             continue
 
-        # Gemini batch validation (3 кандидати за 1 запит)
+        # Validation: Pioneer (primary) → Vertex (fallback)
         pool       = [c for c in candidates if os.path.exists(c.get("file", ""))][:5]
         if not pool:
             continue
         first_pool = pool[:3]
-        clip_paths = [c["file"] for c in first_pool]
         try:
-            scores = validate_clips_batch(clip_paths, chunk)
+            scores = _validate_via_pioneer(first_pool, chunk)
         except Exception as e:
-            print(f"[movie_pipeline] Vertex validation error: {e}, trying Pioneer text fallback...", flush=True)
-            scores = _pioneer_text_fallback(first_pool, chunk)
+            print(f"[movie_pipeline] Pioneer validation error: {e}, trying Vertex fallback...", flush=True)
+            try:
+                scores = _validate_via_vertex(first_pool, chunk)
+            except Exception as e2:
+                print(f"[movie_pipeline] Vertex fallback also failed: {e2}", flush=True)
+                scores = [0.0] * len(first_pool)
 
         validation_threshold = 0.75
         scored_pool = list(zip(first_pool, scores))
 
         if scored_pool and max((s for _, s in scored_pool), default=0.0) < validation_threshold and len(pool) > 3:
             extra_pool = pool[3:5]
-            extra_paths = [c["file"] for c in extra_pool]
             try:
-                extra_scores = validate_clips_batch(extra_paths, chunk)
+                extra_scores = _validate_via_pioneer(extra_pool, chunk)
             except Exception as e:
-                print(f"[movie_pipeline] Extra Vertex validation error: {e}, trying Pioneer text fallback...", flush=True)
-                extra_scores = _pioneer_text_fallback(extra_pool, chunk)
+                try:
+                    extra_scores = _validate_via_vertex(extra_pool, chunk)
+                except Exception as e2:
+                    extra_scores = [0.0] * len(extra_pool)
             scored_pool.extend(zip(extra_pool, extra_scores))
 
         # Вибираємо найкращий
