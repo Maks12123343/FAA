@@ -713,6 +713,86 @@ def _validate_movie_clips_text_pioneer_batch(items: list, api_key: str) -> list:
     raise RuntimeError(f"[clip_matcher] pioneer text batch validation error (all keys failed): {last_error}") from last_error
 
 
+def _validate_clip_visual_pioneer(clip_path: str, section_text: str, api_key: str) -> float:
+    """
+    Visual validation: extract 3 frames from clip, send as base64 images
+    to Pioneer (OpenAI-compatible) along with section text.
+    Returns score 0.0-1.0.
+    """
+    import base64
+    import time as _time
+    import urllib.request
+
+    frames = []
+    for ratio in [0.0, 0.5, 1.0]:
+        fb = _frame_bytes(clip_path, ratio)
+        if fb:
+            frames.append(base64.b64encode(fb).decode("ascii"))
+
+    if not frames:
+        return 0.0
+
+    settings = config.load_settings()
+    api_url = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
+    model = settings.get("pioneer_validation_model", settings.get("pioneer_model", "gemini-3.5-flash"))
+    timeout = int(settings.get("pioneer_timeout", 180) or 180)
+
+    content_parts = []
+    content_parts.append({
+        "type": "text",
+        "text": (
+            f'These are 3 frames (start/middle/end) from a video clip.\n'
+            f'Script narration this clip should illustrate: "{section_text[:300]}"\n\n'
+            f'Rate how well this clip VISUALLY matches the narration.\n'
+            f'IMPORTANT - Score 0.0 for ANY of these:\n'
+            f'- Credits/end credits (names, "directed by", cast lists)\n'
+            f'- Title cards, text-only screens, intertitles\n'
+            f'- Black/blank screens, studio logos\n'
+            f'- Static frames with only text and no real action\n'
+            f'Only score > 0 for clips with actual visual content (characters, scenes, environments, action).\n'
+            f'JSON only: {{"score": 0.0}} where 0.0=reject, 1.0=perfect match.'
+        ),
+    })
+    for b64 in frames:
+        content_parts.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+        })
+
+    payload = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": content_parts}],
+        "stream": False,
+    }).encode("utf-8")
+
+    all_keys = _pioneer_keys()
+    keys_to_try = [api_key] + [k for k in all_keys if k != api_key]
+
+    for key in keys_to_try:
+        for attempt in range(2):
+            try:
+                req = urllib.request.Request(
+                    api_url,
+                    data=payload,
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                text = body["choices"][0]["message"]["content"]
+                text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+                text = re.sub(r"\s*```$", "", text)
+                m = re.search(r"\{.*\}", text, re.DOTALL)
+                data = json.loads(m.group() if m else text)
+                return round(min(max(float(data.get("score", 0.0)), 0.0), 1.0), 4)
+            except Exception as e:
+                if attempt < 1:
+                    _time.sleep(5)
+                    continue
+                break
+    return 0.0
+
+
 def _txt_cache_path(clip_path: str, section_text: str, cache_scope: str = "shared") -> str:
     import hashlib
     safe_scope = re.sub(r"[^a-zA-Z0-9_.-]+", "_", cache_scope or "shared")[:40]
