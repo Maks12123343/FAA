@@ -22,32 +22,21 @@ else:
     FONT_PATH = next((f for f in _candidates if os.path.exists(f)), _candidates[-1])
 
 
-def _esc(text: str) -> str:
-    """Escape text for FFmpeg drawtext."""
-    return (
-        text.replace("\\", "\\\\")
-            .replace("'", "\\'")
-            .replace(":", "\\:")
-            .replace(",", "\\,")
-            .replace(";", "\\;")
-            .replace("%", "\\%")
-            .replace("[", "\\[")
-            .replace("]", "\\]")
-            .replace("\n", " ")
-            .replace("\r", "")
-    )
+def _esc_textfile(text: str) -> str:
+    """Escape text for FFmpeg drawtext textfile content."""
+    return text.replace("\\", "\\\\").replace("\n", " ").replace("\r", "")
 
 
-def _build_drawtext(overlay: dict) -> str:
-    text     = _esc(overlay["text"])
-    start    = overlay.get("start", 0.0)
+def _build_drawtext(overlay: dict, text_dir: str, idx: int) -> str:
+    text = _esc_textfile(overlay["text"])
+    start = overlay.get("start", 0.0)
     duration = overlay.get("duration", 3.0)
     position = overlay.get("position", "bottom-right")
-    size     = overlay.get("size", 36)
-    color    = overlay.get("color", "white")
+    size = overlay.get("size", 36)
+    color = overlay.get("color", "white")
     bg_color = overlay.get("bg_color", "black@0.45")
 
-    fade_in  = 0.5
+    fade_in = 0.5
     fade_out = 0.5
     slide_px = 20
 
@@ -64,29 +53,34 @@ def _build_drawtext(overlay: dict) -> str:
     else:
         base_x, base_y = "w-tw-40", "h-th-60"
 
-    # Slide-up: text starts 20px lower and slides to final position
-    slide_expr = f"min(1\\,(t-{start:.2f})/{fade_in:.2f})"
+    txt_file = os.path.join(text_dir, f"overlay_{idx}.txt")
+    with open(txt_file, "w", encoding="utf-8") as f:
+        f.write(text)
+
+    slide_expr = f"min(1,(t-{start:.2f})/{fade_in:.2f})"
     y_expr = f"{base_y}+{slide_px}-{slide_px}*{slide_expr}"
 
-    # Fade alpha: ramps up over fade_in, ramps down over fade_out
     alpha_expr = (
-        f"if(lt(t-{start:.2f}\\,{fade_in:.2f})\\,"
-        f"(t-{start:.2f})/{fade_in:.2f}\\,"
-        f"if(gt(t\\,{end:.2f}-{fade_out:.2f})\\,"
-        f"({end:.2f}-t)/{fade_out:.2f}\\,"
+        f"if(lt(t-{start:.2f},{fade_in:.2f}),"
+        f"(t-{start:.2f})/{fade_in:.2f},"
+        f"if(gt(t,{end:.2f}-{fade_out:.2f}),"
+        f"({end:.2f}-t)/{fade_out:.2f},"
         f"1))"
     )
 
-    enable = f"between(t\\,{start:.2f}\\,{end:.2f})"
+    enable = f"between(t,{start:.2f},{end:.2f})"
+
+    font_esc = FONT_PATH.replace("\\", "/")
+    txt_esc = txt_file.replace("\\", "/")
 
     return (
-        f"drawtext=fontfile='{FONT_PATH}'"
-        f":text='{text}'"
+        f"drawtext=fontfile='{font_esc}'"
+        f":textfile='{txt_esc}'"
         f":fontsize={size}"
         f":fontcolor={color}"
         f":alpha='{alpha_expr}'"
         f":box=1:boxcolor={bg_color}:boxborderw=8"
-        f":x={base_x}:y={y_expr}"
+        f":x='{base_x}':y='{y_expr}'"
         f":enable='{enable}'"
     )
 
@@ -101,17 +95,25 @@ def apply_text_overlays(input_path: str, overlays: list, output_path: str):
         shutil.copy2(input_path, output_path)
         return
 
-    vf = ",".join(_build_drawtext(o) for o in overlays)
+    import tempfile
+    import shutil as _shutil
 
-    subprocess.run(
-        [FFMPEG, "-y", "-i", input_path,
-         "-vf", vf,
-         *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p",
-         "-c:a", "copy",
-         "-movflags", "+faststart",
-         output_path],
-        check=True, timeout=3600,
-    )
+    text_dir = tempfile.mkdtemp(prefix="faa_txt_")
+    try:
+        filters = [_build_drawtext(o, text_dir, i) for i, o in enumerate(overlays)]
+        vf = ",".join(filters)
+
+        subprocess.run(
+            [FFMPEG, "-y", "-i", input_path,
+             "-vf", vf,
+             *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p",
+             "-c:a", "copy",
+             "-movflags", "+faststart",
+             output_path],
+            check=True, timeout=3600,
+        )
+    finally:
+        _shutil.rmtree(text_dir, ignore_errors=True)
 
 
 def generate_stat_overlays(script: str, audio_duration: float) -> list:
