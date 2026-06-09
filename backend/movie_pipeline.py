@@ -380,6 +380,44 @@ VISUAL_THRESHOLD = 0.7
 MAX_VISUAL_RETRIES = 3
 
 
+def _extract_global_context(segments: list, movie_name: str) -> str:
+    """
+    Аналізує всі сегменти скрипту і будує глобальний контекст:
+    - Які персонажі згадуються найчастіше
+    - Основна тема відео
+    Повертає короткий рядок для вставки в промпт валідації.
+    """
+    all_movie_clips = get_movie_clips(movie_name)
+    known_characters = set()
+    for c in all_movie_clips:
+        for char in c.get("characters", []):
+            known_characters.add(char.lower())
+
+    full_text = " ".join(seg.get("text", "") for seg in segments).lower()
+
+    char_counts = {}
+    for char in known_characters:
+        count = full_text.count(char)
+        if count > 0:
+            char_counts[char] = count
+
+    top_chars = sorted(char_counts.items(), key=lambda x: -x[1])[:5]
+    main_char = top_chars[0][0].title() if top_chars else ""
+    other_chars = [c.title() for c, _ in top_chars[1:4]]
+
+    context_parts = [f"Movie: {movie_name}."]
+    if main_char:
+        context_parts.append(f"MAIN character: {main_char} (appears most in narration).")
+    if other_chars:
+        context_parts.append(f"Other characters: {', '.join(other_chars)}.")
+    context_parts.append(
+        f"IMPORTANT: Strongly prefer clips showing {main_char or 'the main character'}. "
+        f"A clip with the correct character scores much higher than one with matching mood but wrong character."
+    )
+
+    return " ".join(context_parts)
+
+
 def _select_clips_for_segments(segments: list, movie_name: str,
                                 audio_dur: float,
                                 global_used_ids: set = None) -> list:
@@ -425,13 +463,26 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         with _api_lock:
             _api_counts[counter] += n
 
+    # ── Global context (characters + theme) ──
+    global_context = _extract_global_context(segments, movie_name)
+    print(f"[movie_pipeline] Global context: {global_context}", flush=True)
+
     # ── Phase 1 + 2: text validation (parallel) ──
-    # Build segment data: for each segment collect initial 5 candidates
+    # Build segment data with wider window (prev + current + next)
     seg_info = []
     for seg_idx, seg in enumerate(segments):
-        chunk = seg.get("text", "")
         seg_dur = max(2.0, seg["end"] - seg["start"])
-        seg_info.append({"idx": seg_idx, "dur": seg_dur, "text": chunk})
+
+        # Wider window: prev + current + next segments
+        parts = []
+        if seg_idx > 0:
+            parts.append(segments[seg_idx - 1].get("text", ""))
+        parts.append(seg.get("text", ""))
+        if seg_idx < len(segments) - 1:
+            parts.append(segments[seg_idx + 1].get("text", ""))
+        wide_text = " ".join(p for p in parts if p)
+
+        seg_info.append({"idx": seg_idx, "dur": seg_dur, "text": wide_text})
 
     def _get_candidates(chunk: str, exclude_ids: set, count: int = 5) -> list:
         candidates = search_clips(
@@ -454,11 +505,13 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         for si in seg_indices:
             pool = candidates_map[si]
             chunk = seg_info[si]["text"]
+            context_chunk = f"{global_context}\n\nCurrent narration: {chunk}"
             items = [{
                 "clip_path": c.get("file", ""),
-                "section_text": chunk,
+                "section_text": context_chunk,
                 "description": c.get("description", os.path.basename(c.get("file", ""))),
                 "tags": c.get("tags", []),
+                "characters": c.get("characters", []),
             } for c in pool]
             try:
                 scores = _validate_movie_clips_text_pioneer_batch(items, api_key)
@@ -516,6 +569,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     def _visual_verify_segment(si: int, key: str):
         """Try up to MAX_VISUAL_RETRIES rounds to find a clip with visual score >= threshold."""
         chunk = seg_info[si]["text"]
+        context_chunk = f"{global_context}\n\nCurrent narration: {chunk}"
         seg_dur = seg_info[si]["dur"]
 
         all_tried = []  # (clip, text_score, visual_score)
@@ -531,9 +585,10 @@ def _select_clips_for_segments(segments: list, movie_name: str,
                     break
                 items = [{
                     "clip_path": c.get("file", ""),
-                    "section_text": chunk,
+                    "section_text": context_chunk,
                     "description": c.get("description", os.path.basename(c.get("file", ""))),
                     "tags": c.get("tags", []),
+                    "characters": c.get("characters", []),
                 } for c in new_candidates]
                 try:
                     scores = _validate_movie_clips_text_pioneer_batch(items, key)
@@ -549,7 +604,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
                     continue
                 tried_ids.add(cid)
 
-                visual_score = _validate_clip_visual_pioneer(clip["file"], chunk, key)
+                visual_score = _validate_clip_visual_pioneer(clip["file"], context_chunk, key)
                 _inc("visual")
                 all_tried.append((clip, txt_score, visual_score))
 

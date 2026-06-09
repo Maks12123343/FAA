@@ -625,37 +625,39 @@ def _validate_movie_clips_text_pioneer_batch(items: list, api_key: str) -> list:
     retries  = int(settings.get("pioneer_retries", 2) or 2)
 
     # Optimized prompt: if all items share same section_text, include it once
-    unique_sections = set(item["section_text"][:200] for item in items)
+    unique_sections = set(item["section_text"][:500] for item in items)
     if len(unique_sections) == 1:
-        section_text = items[0]["section_text"][:200]
+        section_text = items[0]["section_text"][:500]
         prompt_parts = [
-            f'Script narration: "{section_text}"\n\n'
-            f"Score how well each of {len(items)} movie clips matches this narration.\n"
+            f'{section_text}\n\n'
+            f"Score how well each of {len(items)} movie clips matches the narration above.\n"
         ]
         for idx, item in enumerate(items):
             tags_str = ", ".join(item.get("tags", [])[:10]) or "none"
+            chars_str = ", ".join(item.get("characters", [])[:5]) or ""
+            char_info = f" [Characters: {chars_str}]" if chars_str else ""
             prompt_parts.append(
-                f"CLIP {idx + 1}: {item['description'][:150]} [{tags_str}]\n"
+                f"CLIP {idx + 1}: {item['description'][:150]} [{tags_str}]{char_info}\n"
             )
     else:
         prompt_parts = [f"Score how well each of {len(items)} movie clips matches its script segment.\n"]
         for idx, item in enumerate(items):
             tags_str = ", ".join(item.get("tags", [])[:10]) or "none"
+            chars_str = ", ".join(item.get("characters", [])[:5]) or ""
+            char_info = f" [Characters: {chars_str}]" if chars_str else ""
             prompt_parts.append(
                 f"CLIP {idx + 1}:\n"
                 f"  Description: {item['description'][:150]}\n"
-                f"  Tags: {tags_str}\n"
-                f"  Script: \"{item['section_text'][:200]}\"\n"
+                f"  Tags: {tags_str}{char_info}\n"
+                f"  Script: \"{item['section_text'][:500]}\"\n"
             )
     prompt_parts.append(
         f"\nRate how well each clip visually illustrates the narration.\n"
-        f"Consider: mood, action, characters, setting.\n"
-        f"IMPORTANT: Score 0.0 for ANY of these:\n"
-        f"- Credits/end credits (author names, directed by, produced by, cast list)\n"
-        f"- Title cards, text-only screens, intertitles\n"
-        f"- Black/blank screens, studio logos\n"
-        f"- Static frames with only text and no action\n"
-        f"Only score > 0 for clips showing actual visual ACTION (characters, scenes, environments).\n"
+        f"Scoring priority (most important first):\n"
+        f"1. CHARACTER MATCH — clip shows the character mentioned in narration (highest priority)\n"
+        f"2. Scene/action relevance — what's happening matches the narration\n"
+        f"3. Mood/emotion match\n"
+        f"Score 0.0 for: credits, title cards, text screens, black/blank frames, logos.\n"
         f"Reply ONLY with a JSON array of {len(items)} objects:\n"
         f'[{{"score": 0.0}}, {{"score": 0.8}}, ...] where 0.0=no match, 1.0=perfect match.'
     )
@@ -742,14 +744,13 @@ def _validate_clip_visual_pioneer(clip_path: str, section_text: str, api_key: st
         "type": "text",
         "text": (
             f'These are 3 frames (start/middle/end) from a video clip.\n'
-            f'Script narration this clip should illustrate: "{section_text[:300]}"\n\n'
-            f'Rate how well this clip VISUALLY matches the narration.\n'
-            f'IMPORTANT - Score 0.0 for ANY of these:\n'
-            f'- Credits/end credits (names, "directed by", cast lists)\n'
-            f'- Title cards, text-only screens, intertitles\n'
-            f'- Black/blank screens, studio logos\n'
-            f'- Static frames with only text and no real action\n'
-            f'Only score > 0 for clips with actual visual content (characters, scenes, environments, action).\n'
+            f'{section_text[:500]}\n\n'
+            f'Rate how well this clip VISUALLY matches the narration above.\n'
+            f'Scoring priority (most important first):\n'
+            f'1. CHARACTER MATCH — does the clip show the character mentioned? (highest priority)\n'
+            f'2. Scene/action relevance — does what happens match the narration?\n'
+            f'3. Mood/emotion match\n\n'
+            f'Score 0.0 for: credits, title cards, text screens, black frames, logos, static text.\n'
             f'JSON only: {{"score": 0.0}} where 0.0=reject, 1.0=perfect match.'
         ),
     })
