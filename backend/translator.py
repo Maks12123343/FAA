@@ -40,16 +40,20 @@ def translate_sections(section_texts: list, language: str, project_dir: str = No
                     cached = json.load(f)
                 fp = hashlib.md5("\n".join(section_texts[:5]).encode()).hexdigest()[:12]
                 if cached.get("fp") == fp and len(cached.get("texts", [])) == len(section_texts):
+                    print(f"[translator] Loaded from cache ({len(section_texts)} sections)", flush=True)
                     if emit:
                         emit("translate", f"English translations loaded from cache ({len(section_texts)} sections)")
                     return cached["texts"]
             except Exception:
                 pass
 
+    print(f"[translator] Translating {len(section_texts)} sections from '{language}' to English...", flush=True)
     if emit:
         emit("translate", f"Translating {len(section_texts)} sections to English for clip matching...")
 
     translated = _batch_translate(section_texts, language, emit=emit)
+
+    print(f"[translator] Done. Example: '{section_texts[0][:60]}' → '{translated[0][:60]}'", flush=True)
 
     # Save cache
     if project_dir:
