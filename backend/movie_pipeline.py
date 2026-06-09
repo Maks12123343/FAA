@@ -23,7 +23,6 @@ from backend.rewriter import rewrite_all
 from backend.text_renderer import apply_text_overlays
 from backend.movie_library import (
     search_clips, get_movie_clips,
-    validate_clips_batch,
     _uniqualize_movie_clip, make_uniq_params,
     VALIDATION_THRESHOLD,
 )
@@ -356,14 +355,14 @@ def _select_clips_for_segments(segments: list, movie_name: str,
                                 audio_dur: float,
                                 global_used_ids: set = None) -> list:
     """
-    Для кожного Whisper-сегменту (2-5s):
-    1. Знаходить 3-5 кандидатів (keyword scoring)
-    2. Валідує паралельно через Pioneer ключі (Vertex як fallback)
-    3. Обирає найкращий (score >= 0.75; fallback — найвищий score)
+    Для кожного сегменту:
+    1. Знаходить 5 кандидатів (keyword scoring)
+    2. Всі 5 йдуть в 1 запит до Pioneer → Gemini оцінює і повертає scores
+    3. Обирається кліп з найвищим score
 
-    Всі Pioneer ключі працюють паралельно — секції розподіляються round-robin.
+    4 Pioneer ключі працюють паралельно — секції розподіляються round-robin.
+    1 секція = 1 API запит (5 кліпів за раз).
 
-    global_used_ids — множина ID кліпів вже використаних в ПОПЕРЕДНІХ відео батчу.
     Повертає: [{"file": path, "duration": seg_dur}, ...]
     """
     import threading
@@ -372,8 +371,8 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     used_ids = global_used_ids if global_used_ids is not None else set()
     all_movie_clips = get_movie_clips(movie_name)
 
-    # ── Phase 1: збираємо кандидатів для кожного сегменту ──
-    seg_data = []  # [(seg_idx, seg_dur, chunk, pool)]
+    # ── Phase 1: збираємо 5 кандидатів для кожного сегменту ──
+    seg_data = []
     for seg_idx, seg in enumerate(segments):
         chunk   = seg.get("text", "")
         seg_dur = max(2.0, seg["end"] - seg["start"])
@@ -408,25 +407,24 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     if not seg_data:
         return []
 
-    # ── Phase 2: паралельна валідація через Pioneer ключі ──
+    # ── Phase 2: паралельна валідація — 5 кліпів = 1 запит, 4 ключі паралельно ──
     settings = config.load_settings()
     pioneer_keys = settings.get("pioneer_api_keys", [])
 
     if not pioneer_keys:
         print("[movie_pipeline] WARNING: no Pioneer keys, skipping validation", flush=True)
-        selected = []
-        for seg_idx, seg_dur, chunk, pool in seg_data:
-            selected.append({"file": pool[0]["file"], "duration": seg_dur, "id": pool[0].get("id", pool[0]["file"])})
-        return selected
+        return [
+            {"file": pool[0]["file"], "duration": seg_dur, "id": pool[0].get("id", pool[0]["file"])}
+            for _, seg_dur, _, pool in seg_data
+        ]
 
     scores_by_seg = {}
     scores_lock = threading.Lock()
 
     def _validate_section(seg_idx: int, chunk: str, pool: list, api_key: str):
-        """Validate one section's clips via Pioneer, fallback to Vertex."""
-        first_pool = pool[:3]
+        """5 кліпів → 1 запит → scores."""
         items = []
-        for c in first_pool:
+        for c in pool:
             meta = _get_clip_meta(c.get("file", ""))
             items.append({
                 "clip_path": c.get("file", ""),
@@ -434,46 +432,18 @@ def _select_clips_for_segments(segments: list, movie_name: str,
                 "description": meta.get("description", os.path.basename(c.get("file", ""))),
                 "tags": meta.get("tags", []),
             })
-
         try:
             scores = _validate_movie_clips_text_pioneer_batch(items, api_key)
             scores = [round(min(max(float(s), 0.0), 1.0), 4) for s in scores]
         except Exception as e:
-            print(f"[movie_pipeline] Pioneer error seg {seg_idx}: {e}, trying Vertex...", flush=True)
-            try:
-                clip_paths = [c["file"] for c in first_pool]
-                scores = validate_clips_batch(clip_paths, chunk)
-            except Exception:
-                scores = [0.0] * len(first_pool)
-
-        scored = list(zip(first_pool, scores))
-
-        # If best < threshold and we have more candidates, validate extras
-        best_score = max((s for _, s in scored), default=0.0)
-        if best_score < 0.75 and len(pool) > 3:
-            extra_pool = pool[3:5]
-            extra_items = []
-            for c in extra_pool:
-                meta = _get_clip_meta(c.get("file", ""))
-                extra_items.append({
-                    "clip_path": c.get("file", ""),
-                    "section_text": chunk,
-                    "description": meta.get("description", os.path.basename(c.get("file", ""))),
-                    "tags": meta.get("tags", []),
-                })
-            try:
-                extra_scores = _validate_movie_clips_text_pioneer_batch(extra_items, api_key)
-                extra_scores = [round(min(max(float(s), 0.0), 1.0), 4) for s in extra_scores]
-            except Exception:
-                extra_scores = [0.0] * len(extra_pool)
-            scored.extend(zip(extra_pool, extra_scores))
+            print(f"[movie_pipeline] Pioneer error seg {seg_idx}: {e}", flush=True)
+            scores = [0.0] * len(pool)
 
         with scores_lock:
-            scores_by_seg[seg_idx] = scored
+            scores_by_seg[seg_idx] = list(zip(pool, scores))
 
-    # Розподіляємо секції між Pioneer ключами round-robin
     n_workers = len(pioneer_keys)
-    print(f"[movie_pipeline] Validating {len(seg_data)} sections with {n_workers} Pioneer workers", flush=True)
+    print(f"[movie_pipeline] Validating {len(seg_data)} segments × 5 clips, {n_workers} parallel workers", flush=True)
 
     with ThreadPoolExecutor(max_workers=n_workers) as pool_exec:
         futures = []
@@ -487,7 +457,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
             except Exception as e:
                 print(f"[movie_pipeline] Validation worker error: {e}", flush=True)
 
-    # ── Phase 3: обираємо найкращий кліп для кожного сегменту ──
+    # ── Phase 3: обираємо кліп з найвищим score ──
     selected = []
     used_ids_final = global_used_ids.copy() if global_used_ids else set()
 
@@ -496,32 +466,20 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         if not scored_pool:
             continue
 
-        best_validated       = None
-        best_validated_score = -1.0
-        best_overall         = scored_pool[0][0]
-        best_overall_score   = scored_pool[0][1]
+        scored_sorted = sorted(scored_pool, key=lambda x: -x[1])
 
-        for clip, score in scored_pool:
-            if score > best_overall_score:
-                best_overall_score = score
-                best_overall       = clip
-            if score >= 0.75 and score > best_validated_score:
-                best_validated_score = score
-                best_validated       = clip
+        chosen = None
+        for clip, score in scored_sorted:
+            cid = clip.get("id", clip["file"])
+            if cid not in used_ids_final:
+                chosen = clip
+                break
 
-        best_clip = best_validated if best_validated is not None else best_overall
+        if not chosen:
+            chosen = scored_sorted[0][0]
 
-        file_path = best_clip["file"]
-        clip_id   = best_clip.get("id", file_path)
-
-        if clip_id in used_ids_final:
-            for clip, score in sorted(scored_pool, key=lambda x: -x[1]):
-                cid = clip.get("id", clip["file"])
-                if cid not in used_ids_final:
-                    file_path = clip["file"]
-                    clip_id = cid
-                    break
-
+        file_path = chosen["file"]
+        clip_id   = chosen.get("id", file_path)
         selected.append({"file": file_path, "duration": seg_dur, "id": clip_id})
         used_ids_final.add(clip_id)
 
