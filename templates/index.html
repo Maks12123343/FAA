@@ -82,9 +82,15 @@
       <p style="color:#f87171">No voice profiles configured. Add voice IDs in Settings.</p>
       {% endif %}
     </div>
-    <button class="btn btn-success" id="produceBtn" onclick="startProduce()" style="margin-top:16px">
-      Start Production
-    </button>
+    <div style="margin-top:12px;display:flex;align-items:center;gap:16px">
+      <button class="btn btn-success" id="produceBtn" onclick="startProduce()">
+        Start Production
+      </button>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:#aaa">
+        <input type="checkbox" id="testMode" style="width:16px;height:16px">
+        Test mode (~5 min video)
+      </label>
+    </div>
   </div>
 
 </div>
@@ -270,9 +276,11 @@ function startProduce() {
   document.getElementById('progressCard').style.display = 'block';
   log(`Starting production for ${langs.length} language(s)...`);
 
+  const testMode = document.getElementById('testMode').checked;
   const payload = {
     prepare_id:   currentPrepareId,
     languages:    langs,
+    test_mode:    testMode,
   };
   if (movie_name) payload.movie_name = movie_name;
   if (youtube_urls.length) payload.youtube_urls = youtube_urls;

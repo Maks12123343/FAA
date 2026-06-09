@@ -225,6 +225,7 @@ def api_produce():
     youtube_urls = data.get("youtube_urls", [])
     languages   = data.get("languages", [])
     movie_name  = data.get("movie_name", "").strip()
+    test_mode   = bool(data.get("test_mode", False))
 
     if not prepare_id or not languages:
         return jsonify({"error": "prepare_id and languages required"}), 400
@@ -276,6 +277,7 @@ def api_produce():
                             movie_name = _movie,
                             language   = lang,
                             emit=_emit,
+                            test_mode=test_mode,
                         )
                         socketio.emit("produce_done", result)
                     except Exception as e:

@@ -962,12 +962,13 @@ def prepare(source_url: str, emit=None) -> dict:
 
 
 def produce(prepare_id: str, movie_name: str, language: str, emit=None,
-            global_used_ids: set = None) -> dict:
+            global_used_ids: set = None, test_mode: bool = False) -> dict:
     """
     Фаза 2: рірайт → TTS → підбір кліпів + validation → текстові оверлеї → монтаж.
 
     global_used_ids — множина clip ID вже використаних в попередніх відео батчу.
     Передається ззовні щоб гарантувати різноманітність відеоряду між відео.
+    test_mode — обрізає скрипт до ~5 хвилин для швидкого тесту.
     """
     _t0 = time.time()
 
@@ -1059,6 +1060,16 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
                       f, ensure_ascii=False, indent=2)
         log("rewrite", f"Script done: {len(script)} chars, {len(script.split())} words")
 
+    # ── Test mode: trim script to ~5 minutes (~750 words) ──────────────────
+    if test_mode:
+        words = script.split()
+        if len(words) > 750:
+            script = " ".join(words[:750])
+            last_dot = script.rfind(".")
+            if last_dot > len(script) // 2:
+                script = script[:last_dot + 1]
+            log("test", f"TEST MODE: trimmed script to {len(script.split())} words (~5 min)")
+
     # ── TTS ───────────────────────────────────────────────────────────────────
     audio_path = os.path.join(proj_dir, "voiceover.mp3")
     if not os.path.exists(audio_path):
@@ -1071,8 +1082,10 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
     audio_dur = _get_duration(audio_path)
     log("tts", f"Audio duration: {audio_dur:.1f}s")
 
-    # Перевірка мінімальної тривалості
-    if audio_dur < MIN_AUDIO_DURATION:
+    # Перевірка мінімальної тривалості (skip in test mode)
+    if test_mode and audio_dur < MIN_AUDIO_DURATION:
+        pass  # test mode allows shorter audio
+    elif audio_dur < MIN_AUDIO_DURATION:
         raise RuntimeError(
             f"Voiceover too short: {audio_dur:.1f}s (min {MIN_AUDIO_DURATION}s). "
             "Script may be too short or TTS failed."
