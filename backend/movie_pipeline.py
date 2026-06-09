@@ -26,7 +26,7 @@ from backend.movie_library import (
     _uniqualize_movie_clip, make_uniq_params,
     VALIDATION_THRESHOLD,
 )
-from backend.clip_matcher import _validate_movie_clips_text_pioneer_batch, _get_clip_meta
+from backend.clip_matcher import _validate_movie_clips_text_pioneer_batch
 
 WORDS_PER_SECTION  = 35
 MIN_AUDIO_DURATION = 60.0   # секунд — менше цього вважається помилкою TTS
@@ -425,12 +425,11 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         """5 кліпів → 1 запит → scores."""
         items = []
         for c in pool:
-            meta = _get_clip_meta(c.get("file", ""))
             items.append({
                 "clip_path": c.get("file", ""),
                 "section_text": chunk,
-                "description": meta.get("description", os.path.basename(c.get("file", ""))),
-                "tags": meta.get("tags", []),
+                "description": c.get("description", os.path.basename(c.get("file", ""))),
+                "tags": c.get("tags", []),
             })
         try:
             scores = _validate_movie_clips_text_pioneer_batch(items, api_key)

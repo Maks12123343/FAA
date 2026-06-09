@@ -624,19 +624,33 @@ def _validate_movie_clips_text_pioneer_batch(items: list, api_key: str) -> list:
     timeout  = int(settings.get("pioneer_timeout", 180) or 180)
     retries  = int(settings.get("pioneer_retries", 2) or 2)
 
-    prompt_parts = [f"Score how well each of {len(items)} movie clips matches its script segment.\n"]
-    for idx, item in enumerate(items):
-        tags_str = ", ".join(item.get("tags", [])[:10]) or "none"
-        prompt_parts.append(
-            f"CLIP {idx + 1}:\n"
-            f"  Description: {item['description'][:300]}\n"
-            f"  Tags: {tags_str}\n"
-            f"  Script segment: \"{item['section_text'][:200]}\"\n"
-        )
+    # Optimized prompt: if all items share same section_text, include it once
+    unique_sections = set(item["section_text"][:200] for item in items)
+    if len(unique_sections) == 1:
+        section_text = items[0]["section_text"][:200]
+        prompt_parts = [
+            f'Script narration: "{section_text}"\n\n'
+            f"Score how well each of {len(items)} movie clips matches this narration.\n"
+        ]
+        for idx, item in enumerate(items):
+            tags_str = ", ".join(item.get("tags", [])[:10]) or "none"
+            prompt_parts.append(
+                f"CLIP {idx + 1}: {item['description'][:150]} [{tags_str}]\n"
+            )
+    else:
+        prompt_parts = [f"Score how well each of {len(items)} movie clips matches its script segment.\n"]
+        for idx, item in enumerate(items):
+            tags_str = ", ".join(item.get("tags", [])[:10]) or "none"
+            prompt_parts.append(
+                f"CLIP {idx + 1}:\n"
+                f"  Description: {item['description'][:150]}\n"
+                f"  Tags: {tags_str}\n"
+                f"  Script: \"{item['section_text'][:200]}\"\n"
+            )
     prompt_parts.append(
-        f"\nFor each clip, rate how well it visually illustrates its script segment.\n"
-        f"Consider: mood, action, characters, setting, visual theme.\n"
-        f"Reply ONLY with a JSON array of exactly {len(items)} objects:\n"
+        f"\nRate how well each clip visually illustrates the narration.\n"
+        f"Consider: mood, action, characters, setting.\n"
+        f"Reply ONLY with a JSON array of {len(items)} objects:\n"
         f'[{{"score": 0.0}}, {{"score": 0.8}}, ...] where 0.0=no match, 1.0=perfect match.'
     )
 
@@ -667,7 +681,14 @@ def _validate_movie_clips_text_pioneer_batch(items: list, api_key: str) -> list:
                 text = _re.sub(r"\s*```$", "", text)
                 m = _re.search(r"\[.*\]", text, _re.DOTALL)
                 raw = json.loads(m.group() if m else text)
-                scores = [float(r.get("score", 0.0)) if isinstance(r, dict) else 0.0 for r in raw]
+                scores = []
+                for r in raw:
+                    if isinstance(r, dict):
+                        scores.append(float(r.get("score", 0.0)))
+                    elif isinstance(r, (int, float)):
+                        scores.append(float(r))
+                    else:
+                        scores.append(0.0)
                 if len(scores) < len(items):
                     scores.extend([0.0] * (len(items) - len(scores)))
                 return scores[:len(items)]
