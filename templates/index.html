@@ -18,6 +18,7 @@
     <input type="text" id="sourceUrl" placeholder="https://www.youtube.com/watch?v=..." style="width:100%;background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px;color:#fff;font-size:13px;margin-top:4px">
   </div>
   <button class="btn btn-primary" id="prepareBtn" onclick="startPrepare()">Find Top Video & Transcribe</button>
+  <button class="btn" onclick="resetJob()" style="background:#7f1d1d;color:#fca5a5;border:1px solid #991b1b;margin-left:8px;font-size:12px">Reset Stuck Job</button>
 
   <div style="margin-top:20px;padding-top:16px;border-top:1px solid #222">
     <label style="color:#aaa;font-size:13px">Resume existing Prepare ID <span style="color:#555">(skip re-download — paste ID from a previous run)</span></label>
@@ -99,6 +100,37 @@ let currentPrepareId = null;
 let currentPipelineType = 'standard';
 let currentMovieName = '';
 let _producing = false;
+let _pollTimer = null;
+let _lastLogCount = 0;
+let _socketAlive = false;
+
+socket.on('connect', () => { _socketAlive = true; });
+socket.on('disconnect', () => { _socketAlive = false; });
+
+function _startPolling() {
+  _stopPolling();
+  _pollTimer = setInterval(async () => {
+    try {
+      const r = await fetch('/api/status');
+      const d = await r.json();
+      if (!d.job_running) {
+        _stopPolling();
+        return;
+      }
+      if (d.last_msg && !_socketAlive) {
+        const el = document.getElementById('progressLog');
+        const lines = el.querySelectorAll('.log-line');
+        const lastText = lines.length ? lines[lines.length-1].textContent : '';
+        if (lastText !== d.last_msg) {
+          log(d.last_msg);
+        }
+      }
+    } catch(e) {}
+  }, 3000);
+}
+function _stopPolling() {
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+}
 
 function log(msg, cls='') {
   const card = document.getElementById('progressCard');
@@ -176,7 +208,7 @@ function startPrepare() {
   document.getElementById('phase2Card').style.display = 'none';
   document.getElementById('progressLog').innerHTML = '';
   document.getElementById('progressCard').style.display = 'block';
-  log('Scanning channels...');
+  log('Starting prepare...');
 
   const sourceUrl = document.getElementById('sourceUrl').value.trim();
   fetch('/api/prepare', {
@@ -187,10 +219,24 @@ function startPrepare() {
     if (d.error) {
       log('ERROR: ' + d.error, 'error');
       document.getElementById('prepareBtn').disabled = false;
+    } else {
+      log('Job started, waiting for progress...');
+      _startPolling();
     }
   }).catch(e => {
     log('ERROR: ' + e, 'error');
     document.getElementById('prepareBtn').disabled = false;
+  });
+}
+
+function resetJob() {
+  if (!confirm('Reset stuck job? This will unlock the system.')) return;
+  fetch('/api/job_reset', {method:'POST'}).then(r => r.json()).then(d => {
+    if (d.ok) {
+      log('Job reset OK. You can try again.', 'done');
+      document.getElementById('prepareBtn').disabled = false;
+      _stopPolling();
+    }
   });
 }
 
@@ -248,7 +294,7 @@ function startProduce() {
   });
 }
 
-socket.on('progress', data => log(`[${data.step}] ${data.message}`));
+socket.on('progress', data => { _socketAlive = true; log(`[${data.step}] ${data.message}`); });
 
 function escHtml(s) {
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -256,6 +302,7 @@ function escHtml(s) {
 function safeUrl(u) { return /^https?:\/\//.test(u) ? u : '#'; }
 
 socket.on('prepare_done', data => {
+  _stopPolling();
   currentPrepareId = data.prepare_id;
   currentPipelineType = data.pipeline_type || 'standard';
   document.getElementById('prepareBtn').disabled = false;
@@ -322,6 +369,7 @@ socket.on('all_done', () => {
 });
 
 socket.on('error', data => {
+  _stopPolling();
   log('ERROR: ' + data.message, 'error');
   document.getElementById('prepareBtn').disabled = false;
   if (!_producing) {
@@ -331,5 +379,15 @@ socket.on('error', data => {
 
 // Initialize on page load
 onNicheChange();
+
+// Check if a job is stuck on page load
+fetch('/api/status').then(r=>r.json()).then(d=>{
+  if(d.job_running){
+    log('A job is running: ' + (d.last_msg||'(no status)'));
+    log('If stuck, click Reset below.');
+    document.getElementById('prepareBtn').disabled = true;
+    _startPolling();
+  }
+});
 </script>
 {% endblock %}

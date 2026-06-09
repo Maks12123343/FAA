@@ -21,7 +21,10 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FAA_SECRET_KEY") or os.urandom(32).hex()
 
 _cors_env = os.environ.get("FAA_CORS_ORIGIN", "")
-_cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_env else ["http://localhost:5050", "http://127.0.0.1:5050"]
+if _cors_env.strip() == "*":
+    _cors_origins = "*"
+else:
+    _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_env else ["http://localhost:5050", "http://127.0.0.1:5050"]
 socketio = SocketIO(app, cors_allowed_origins=_cors_origins, async_mode="eventlet")
 
 # ── Basic auth ────────────────────────────────────────────────────────────────
@@ -51,6 +54,8 @@ def _require_auth():
 # ── Job concurrency limit (max 1 active generation) ──────────────────────────
 _job_lock = threading.Lock()
 _job_active = False
+_job_last_msg = ""
+_job_started_at = 0.0
 
 _ID_RE = re.compile(r'^[a-z0-9_\-]{1,64}$')
 
@@ -158,9 +163,14 @@ def api_prepare():
         _job_active = True
 
     def run():
-        global _job_active
+        global _job_active, _job_last_msg, _job_started_at
+
+        _job_started_at = time.time()
+        _job_last_msg = "Starting..."
 
         def _emit(step, msg):
+            global _job_last_msg
+            _job_last_msg = f"[{step}] {msg}"
             socketio.emit("progress", {"step": step, "message": msg})
             eventlet.sleep(0)
 
@@ -238,9 +248,14 @@ def api_produce():
         _job_active = True
 
     def run():
-        global _job_active
+        global _job_active, _job_last_msg, _job_started_at
+
+        _job_started_at = time.time()
+        _job_last_msg = "Starting production..."
 
         def _emit(step, msg):
+            global _job_last_msg
+            _job_last_msg = f"[{step}] {msg}"
             socketio.emit("progress", {"step": step, "message": msg})
             eventlet.sleep(0)
 
@@ -882,7 +897,21 @@ def cleanup_old_projects():
 
 @app.route("/api/status")
 def api_status():
-    return jsonify({"job_running": _job_active})
+    return jsonify({
+        "job_running": _job_active,
+        "last_msg": _job_last_msg,
+        "started_at": _job_started_at,
+    })
+
+
+@app.route("/api/job_reset", methods=["POST"])
+def api_job_reset():
+    global _job_active, _job_last_msg, _job_started_at
+    with _job_lock:
+        _job_active = False
+        _job_last_msg = ""
+        _job_started_at = 0.0
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
