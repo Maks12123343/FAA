@@ -231,7 +231,7 @@ def _nvenc_available() -> bool:
                 try:
                     r2 = __import__("subprocess").run(
                         [FFMPEG, "-y", "-f", "lavfi",
-                         "-i", "color=black:size=64x64:duration=0.1",
+                         "-i", "color=black:size=256x256:duration=0.1",
                          "-c:v", "h264_nvenc", "-frames:v", "1", tmp_path],
                         capture_output=True, timeout=15,
                     )
