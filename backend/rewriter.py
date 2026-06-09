@@ -6,8 +6,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
 
-REWRITE_PROMPT_FILE  = os.path.join(config.DATA_DIR, "rewrite_prompt.txt")
-METADATA_PROMPT_FILE = os.path.join(config.DATA_DIR, "metadata_prompt.txt")
+REWRITE_PROMPT_FILE      = os.path.join(config.DATA_DIR, "rewrite_prompt.txt")
+REWRITE_PROMPT_TEST_FILE = os.path.join(config.DATA_DIR, "rewrite_prompt_test.txt")
+METADATA_PROMPT_FILE     = os.path.join(config.DATA_DIR, "metadata_prompt.txt")
 
 
 def _load_prompt(path: str, language: str) -> str:
@@ -38,8 +39,9 @@ def _extract_code_block(text: str) -> str:
 
 
 def _rewrite_script(transcript: str, language: str, video_title: str,
-                    feedback: str = "") -> str:
-    system   = _load_prompt(REWRITE_PROMPT_FILE, language)
+                    feedback: str = "", test_mode: bool = False) -> str:
+    prompt_file = REWRITE_PROMPT_TEST_FILE if test_mode else REWRITE_PROMPT_FILE
+    system = _load_prompt(prompt_file, language)
     user_msg = f"Target language: {language}\nOriginal video title: {video_title}\n"
     if feedback:
         user_msg += (
@@ -293,35 +295,41 @@ def rewrite_all(
     source_title: str,
     source_description: str = "",
     source_tags: list = None,
+    test_mode: bool = False,
 ) -> dict:
     """
     Call 1: rewrite script (rewrite_prompt.txt) з quality check і retry.
     Call 2: rewrite metadata (metadata_prompt.txt) using SOURCE video's metadata.
     Returns: {script, title, titles, description, tags}
+    test_mode: uses short prompt (~750 words), skips expand + quality check.
     """
     script   = ""
     feedback = ""
 
-    for attempt in range(MAX_REWRITE_ATTEMPTS):
-        print(
-            f"[rewriter] Rewrite attempt {attempt + 1}/{MAX_REWRITE_ATTEMPTS}"
-            + (f" (feedback: {feedback[:80]}...)" if feedback else ""),
-            flush=True,
-        )
-        script = _rewrite_script(transcript, language, source_title, feedback=feedback)
-        script = _expand_script(script, language, source_title)
-
-        passed, feedback = _quality_check_script(script, transcript, language)
-        if passed:
-            print(f"[rewriter] Quality check PASSED on attempt {attempt + 1}", flush=True)
-            break
-        else:
+    if test_mode:
+        print("[rewriter] TEST MODE: using short prompt (~750 words, no expand/quality check)", flush=True)
+        script = _rewrite_script(transcript, language, source_title, test_mode=True)
+    else:
+        for attempt in range(MAX_REWRITE_ATTEMPTS):
             print(
-                f"[rewriter] Quality check FAILED on attempt {attempt + 1}: {feedback[:120]}",
+                f"[rewriter] Rewrite attempt {attempt + 1}/{MAX_REWRITE_ATTEMPTS}"
+                + (f" (feedback: {feedback[:80]}...)" if feedback else ""),
                 flush=True,
             )
-            if attempt == MAX_REWRITE_ATTEMPTS - 1:
-                print("[rewriter] WARNING: all attempts failed quality check, using last result", flush=True)
+            script = _rewrite_script(transcript, language, source_title, feedback=feedback)
+            script = _expand_script(script, language, source_title)
+
+            passed, feedback = _quality_check_script(script, transcript, language)
+            if passed:
+                print(f"[rewriter] Quality check PASSED on attempt {attempt + 1}", flush=True)
+                break
+            else:
+                print(
+                    f"[rewriter] Quality check FAILED on attempt {attempt + 1}: {feedback[:120]}",
+                    flush=True,
+                )
+                if attempt == MAX_REWRITE_ATTEMPTS - 1:
+                    print("[rewriter] WARNING: all attempts failed quality check, using last result", flush=True)
 
     meta = _rewrite_metadata(
         language           = language,

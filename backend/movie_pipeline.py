@@ -1033,18 +1033,22 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
 
     # ── Рірайт ────────────────────────────────────────────────────────────────
     script_path = os.path.join(proj_dir, "script.txt")
-    if os.path.exists(script_path):
+    if os.path.exists(script_path) and not test_mode:
         with open(script_path, encoding="utf-8") as f:
             script = f.read()
         log("rewrite", f"Script cached ({len(script)} chars)")
     else:
-        log("rewrite", "Rewriting script (with quality check)...")
+        if test_mode:
+            log("rewrite", "TEST MODE: rewriting short script (~750 words)...")
+        else:
+            log("rewrite", "Rewriting script (with quality check)...")
         result = rewrite_all(
             transcript          = transcript,
             language            = language,
             source_title        = source_title,
             source_description  = state.get("source_description", ""),
             source_tags         = state.get("source_tags", []),
+            test_mode           = test_mode,
         )
         script = result["script"]
         if len(script.split()) < 100:
@@ -1052,15 +1056,16 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
                 f"Script too short ({len(script.split())} words). "
                 "Rewriter may have failed — check Claude API key and prompt."
             )
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(script)
+        if not test_mode:
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write(script)
         meta_path = os.path.join(proj_dir, "metadata.json")
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump({k: v for k, v in result.items() if k != "script"},
                       f, ensure_ascii=False, indent=2)
         log("rewrite", f"Script done: {len(script)} chars, {len(script.split())} words")
 
-    # ── Test mode: trim script to ~5 minutes (~750 words) ──────────────────
+    # ── Test mode: skip trim (rewriter already wrote short) ──────────────────
     if test_mode:
         words = script.split()
         if len(words) > 750:
