@@ -307,29 +307,30 @@ def rewrite_all(
     feedback = ""
 
     if test_mode:
-        print("[rewriter] TEST MODE: using short prompt (~750 words)", flush=True)
-
-    for attempt in range(MAX_REWRITE_ATTEMPTS):
-        print(
-            f"[rewriter] Rewrite attempt {attempt + 1}/{MAX_REWRITE_ATTEMPTS}"
-            + (f" (feedback: {feedback[:80]}...)" if feedback else ""),
-            flush=True,
-        )
-        script = _rewrite_script(transcript, language, source_title, feedback=feedback, test_mode=test_mode)
-        if not test_mode:
-            script = _expand_script(script, language, source_title)
-
-        passed, feedback = _quality_check_script(script, transcript, language, test_mode=test_mode)
-        if passed:
-            print(f"[rewriter] Quality check PASSED on attempt {attempt + 1}", flush=True)
-            break
-        else:
+        print("[rewriter] TEST MODE: using short prompt (~750 words), skipping quality check", flush=True)
+        script = _rewrite_script(transcript, language, source_title, test_mode=True)
+        print(f"[rewriter] TEST MODE: script done ({len(script)} chars)", flush=True)
+    else:
+        for attempt in range(MAX_REWRITE_ATTEMPTS):
             print(
-                f"[rewriter] Quality check FAILED on attempt {attempt + 1}: {feedback[:120]}",
+                f"[rewriter] Rewrite attempt {attempt + 1}/{MAX_REWRITE_ATTEMPTS}"
+                + (f" (feedback: {feedback[:80]}...)" if feedback else ""),
                 flush=True,
             )
-            if attempt == MAX_REWRITE_ATTEMPTS - 1:
-                print("[rewriter] WARNING: all attempts failed quality check, using last result", flush=True)
+            script = _rewrite_script(transcript, language, source_title, feedback=feedback, test_mode=False)
+            script = _expand_script(script, language, source_title)
+
+            passed, feedback = _quality_check_script(script, transcript, language, test_mode=False)
+            if passed:
+                print(f"[rewriter] Quality check PASSED on attempt {attempt + 1}", flush=True)
+                break
+            else:
+                print(
+                    f"[rewriter] Quality check FAILED on attempt {attempt + 1}: {feedback[:120]}",
+                    flush=True,
+                )
+                if attempt == MAX_REWRITE_ATTEMPTS - 1:
+                    print("[rewriter] WARNING: all attempts failed quality check, using last result", flush=True)
 
     meta = _rewrite_metadata(
         language           = language,
@@ -359,3 +360,4 @@ def generate_title(script: str, language: str, original_title: str) -> str:
 
 def generate_metadata(script: str, language: str, title: str) -> dict:
     return {"description": "", "tags": []}
+# end of module
