@@ -493,8 +493,30 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         wide_text = " ".join(p for p in parts if p)
         seg_info.append({"idx": seg_idx, "dur": seg_dur, "text": wide_text})
 
-    # ── Phase 1: Embeddings → топ-8 кандидатів (миттєво) ──
-    print(f"[movie_pipeline] Phase 1: semantic ranking {len(seg_info)} segments × top-8...", flush=True)
+    # ── Character detection for boosting ──
+    all_movie_clips_full = get_movie_clips(movie_name)
+    known_characters = set()
+    for c in all_movie_clips_full:
+        for char in c.get("characters", []):
+            known_characters.add(char.lower())
+
+    def _detect_characters(text: str) -> set:
+        """Detect which known characters are mentioned in segment text."""
+        text_lower = text.lower()
+        found = set()
+        for char in known_characters:
+            if len(char) <= 2:
+                if re.search(r'\b' + re.escape(char) + r'\b', text_lower):
+                    found.add(char)
+            else:
+                if char in text_lower:
+                    found.add(char)
+        return found
+
+    CHARACTER_BOOST = 0.25
+
+    # ── Phase 1: Embeddings → топ-8 кандидатів з character boost (миттєво) ──
+    print(f"[movie_pipeline] Phase 1: semantic ranking {len(seg_info)} segments × top-8 (with character boost)...", flush=True)
 
     local_used = set(used_ids)
     candidates_map = {}
@@ -503,8 +525,17 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         seg_vec = _emb.embed_text(info["text"])
         ranked = [c for c in avail if c.get("embedding")]
         if seg_vec and ranked:
-            ranked.sort(key=lambda c: _emb.cosine(seg_vec, c["embedding"]), reverse=True)
-            candidates_map[si] = ranked[:8]
+            seg_chars = _detect_characters(info["text"])
+            scored = []
+            for c in ranked:
+                sim = _emb.cosine(seg_vec, c["embedding"])
+                if seg_chars:
+                    clip_chars = set(ch.lower() for ch in c.get("characters", []))
+                    if seg_chars & clip_chars:
+                        sim += CHARACTER_BOOST
+                scored.append((sim, c))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            candidates_map[si] = [c for _, c in scored[:8]]
         else:
             candidates_map[si] = avail[:8]
 
