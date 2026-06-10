@@ -428,17 +428,18 @@ def _select_clips_for_segments(segments: list, movie_name: str,
                                 audio_dur: float,
                                 global_used_ids: set = None) -> list:
     """
-    Двоетапна валідація для кожного сегменту:
-    1. Keyword scoring → 5 кандидатів
-    2. Текстова валідація Pioneer (5 кліпів = 1 запит) → сортує по score
-    3. Візуальна верифікація переможця (3 кадри → Pioneer) → якщо score < 0.7,
-       бере наступні 5 кліпів і повторює (макс 3 ітерації)
+    Оптимізований підбір кліпів:
+    1. Embeddings (Vertex) → топ-8 кандидатів за сенсом (миттєво, локальна математика)
+    2. Pioneer text batch (1 запит на сегмент) → оцінює всі 8 → бере топ-2
+    3. Pioneer visual (2 запити на сегмент) → перевіряє кадри топ-2 → бере кращий
 
     4 Pioneer ключі працюють паралельно.
+    Кліп використаний = зникає з пулу (без повторів).
     Повертає: [{"file": path, "duration": seg_dur}, ...]
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from backend import embeddings as _emb
 
     used_ids = global_used_ids if global_used_ids is not None else set()
     all_movie_clips = get_movie_clips(movie_name)
@@ -449,13 +450,11 @@ def _select_clips_for_segments(segments: list, movie_name: str,
 
     if not pioneer_keys:
         print("[movie_pipeline] WARNING: no Pioneer keys — using semantic ranking only (no validation)", flush=True)
-        from backend import embeddings as _emb
         result = []
         local_used = set(used_ids)
         for seg in segments:
             seg_dur = max(2.0, seg["end"] - seg["start"])
             avail = [c for c in valid_clips if c.get("id") not in local_used] or valid_clips
-            # Підбір за СЕНСОМ замість першого-ліпшого кліпа
             seg_vec = _emb.embed_text(seg.get("text", ""))
             ranked = [c for c in avail if c.get("embedding")]
             if seg_vec and ranked:
@@ -470,7 +469,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     n_workers = len(pioneer_keys)
 
     # API call counters (thread-safe)
-    _api_counts = {"text": 0, "visual": 0, "text_retry": 0}
+    _api_counts = {"text": 0, "visual": 0}
     _api_lock = threading.Lock()
 
     def _inc(counter: str, n: int = 1):
@@ -481,13 +480,10 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     global_context = _extract_global_context(segments, movie_name)
     print(f"[movie_pipeline] Global context: {global_context}", flush=True)
 
-    # ── Phase 1 + 2: text validation (parallel) ──
-    # Build segment data with wider window (prev + current + next)
+    # ── Build segment info with wider window ──
     seg_info = []
     for seg_idx, seg in enumerate(segments):
         seg_dur = max(2.0, seg["end"] - seg["start"])
-
-        # Wider window: prev + current + next segments
         parts = []
         if seg_idx > 0:
             parts.append(segments[seg_idx - 1].get("text", ""))
@@ -495,40 +491,36 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         if seg_idx < len(segments) - 1:
             parts.append(segments[seg_idx + 1].get("text", ""))
         wide_text = " ".join(p for p in parts if p)
-
         seg_info.append({"idx": seg_idx, "dur": seg_dur, "text": wide_text})
 
-    def _semantic_fallback(chunk: str, exclude_ids: set, count: int) -> list:
-        """
-        Коли search_clips нічого не повернув — взяти найближчі за СЕНСОМ кліпи
-        (без порога близькості), а не випадкові. Якщо вектори недоступні — лише
-        тоді детермінований fallback по порядку (не shuffle), щоб уникнути рандому.
-        """
-        from backend import embeddings as _emb
-        avail = [c for c in valid_clips if c.get("id") not in exclude_ids] or valid_clips
-        seg_vec = _emb.embed_text(chunk)
+    # ── Phase 1: Embeddings → топ-8 кандидатів (миттєво) ──
+    print(f"[movie_pipeline] Phase 1: semantic ranking {len(seg_info)} segments × top-8...", flush=True)
+
+    local_used = set(used_ids)
+    candidates_map = {}
+    for si, info in enumerate(seg_info):
+        avail = [c for c in valid_clips if c.get("id") not in local_used] or valid_clips
+        seg_vec = _emb.embed_text(info["text"])
         ranked = [c for c in avail if c.get("embedding")]
         if seg_vec and ranked:
             ranked.sort(key=lambda c: _emb.cosine(seg_vec, c["embedding"]), reverse=True)
-            return ranked[:count]
-        # Вектори недоступні — беремо по порядку (детерміновано, без рандому)
-        return avail[:count]
+            candidates_map[si] = ranked[:8]
+        else:
+            candidates_map[si] = avail[:8]
 
-    def _get_candidates(chunk: str, exclude_ids: set, count: int = 5) -> list:
-        candidates = search_clips(
-            chunk, movie_name=movie_name,
-            used_ids=exclude_ids, top_n=count,
-            gemini_validate=False,
-        )
-        if not candidates:
-            candidates = _semantic_fallback(chunk, exclude_ids, count)
-        return [c for c in candidates if os.path.exists(c.get("file", ""))][:count]
+    # ── Phase 2: Pioneer text batch (1 запит = 8 кліпів на сегмент) ──
+    print(f"[movie_pipeline] Phase 2: text-validating {len(seg_info)} segments × 8 clips, {n_workers} workers...", flush=True)
 
-    def _text_validate_batch(seg_indices: list, candidates_map: dict, api_key: str) -> dict:
-        """Text-validate candidates for multiple segments using one key."""
+    text_scores = {}
+    text_lock = threading.Lock()
+
+    def _text_validate_worker(seg_indices: list, api_key: str):
         results = {}
         for si in seg_indices:
             pool = candidates_map[si]
+            if not pool:
+                results[si] = []
+                continue
             chunk = seg_info[si]["text"]
             context_chunk = f"{global_context}\n\nCurrent narration: {chunk}"
             items = [{
@@ -548,28 +540,17 @@ def _select_clips_for_segments(segments: list, movie_name: str,
             results[si] = sorted(zip(pool, scores), key=lambda x: -x[1])
         return results
 
-    # Initial candidates
-    candidates_map = {}
-    for si in range(len(seg_info)):
-        candidates_map[si] = _get_candidates(seg_info[si]["text"], used_ids)
-
-    # Text validation - distribute across workers
     seg_indices = list(range(len(seg_info)))
     chunks_per_worker = [[] for _ in range(n_workers)]
     for i, si in enumerate(seg_indices):
         chunks_per_worker[i % n_workers].append(si)
-
-    print(f"[movie_pipeline] Phase 1: text-validating {len(seg_info)} segments × 5 clips, {n_workers} workers", flush=True)
-
-    text_scores = {}
-    text_lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=n_workers) as pool_exec:
         futures = []
         for w_idx, worker_segs in enumerate(chunks_per_worker):
             if worker_segs:
                 futures.append(pool_exec.submit(
-                    _text_validate_batch, worker_segs, candidates_map, pioneer_keys[w_idx]
+                    _text_validate_worker, worker_segs, pioneer_keys[w_idx]
                 ))
         for f in as_completed(futures):
             try:
@@ -579,73 +560,41 @@ def _select_clips_for_segments(segments: list, movie_name: str,
             except Exception as e:
                 print(f"[movie_pipeline] Text validation worker error: {e}", flush=True)
 
-    # ── Phase 3: visual verification + retry ──
-    print(f"[movie_pipeline] Phase 2: visual verification of winners...", flush=True)
+    # ── Phase 3: Visual verification of top-2 per segment ──
+    print(f"[movie_pipeline] Phase 3: visual verification of top-2 per segment...", flush=True)
 
-    selected = []
-    used_ids_final = global_used_ids.copy() if global_used_ids else set()
-    visual_passed = 0
-    visual_retried = 0
-
-    # Process segments in parallel for visual verification
     seg_results = {}
     seg_results_lock = threading.Lock()
 
     def _visual_verify_segment(si: int, key: str):
-        """Try up to MAX_VISUAL_RETRIES rounds to find a clip with visual score >= threshold."""
         chunk = seg_info[si]["text"]
         context_chunk = f"{global_context}\n\nCurrent narration: {chunk}"
         seg_dur = seg_info[si]["dur"]
+        scored = text_scores.get(si, [])
 
-        all_tried = []  # (clip, text_score, visual_score)
-        tried_ids = set()
+        if not scored:
+            fallback = candidates_map.get(si, [None])[0]
+            return si, fallback, seg_dur
 
-        for attempt in range(MAX_VISUAL_RETRIES):
-            scored = text_scores.get(si, [])
+        # Візуально перевірити топ-2 з текстової валідації
+        top2 = scored[:2]
+        best_clip = None
+        best_visual = -1.0
 
-            if attempt > 0:
-                exclude = used_ids_final | tried_ids
-                new_candidates = _get_candidates(chunk, exclude, count=5)
-                if not new_candidates:
-                    break
-                items = [{
-                    "clip_path": c.get("file", ""),
-                    "section_text": context_chunk,
-                    "description": c.get("description", os.path.basename(c.get("file", ""))),
-                    "tags": c.get("tags", []),
-                    "characters": c.get("characters", []),
-                } for c in new_candidates]
-                try:
-                    scores = _validate_movie_clips_text_pioneer_batch(items, key)
-                    scores = [round(min(max(float(s), 0.0), 1.0), 4) for s in scores]
-                    _inc("text_retry")
-                except Exception:
-                    scores = [0.0] * len(new_candidates)
-                scored = sorted(zip(new_candidates, scores), key=lambda x: -x[1])
-
-            for clip, txt_score in scored:
-                cid = clip.get("id", clip["file"])
-                if cid in tried_ids:
-                    continue
-                tried_ids.add(cid)
-
+        for clip, txt_score in top2:
+            try:
                 visual_score = _validate_clip_visual_pioneer(clip["file"], context_chunk, key)
                 _inc("visual")
-                all_tried.append((clip, txt_score, visual_score))
+            except Exception:
+                visual_score = 0.0
+            if visual_score > best_visual:
+                best_visual = visual_score
+                best_clip = clip
 
-                if visual_score >= VISUAL_THRESHOLD:
-                    return si, clip, seg_dur, True
-                break  # only visually verify top-1 per round, then retry with new batch
+        if best_clip is None:
+            best_clip = scored[0][0]
 
-        # No clip passed threshold — pick best visual score from all tried
-        if all_tried:
-            best = max(all_tried, key=lambda x: x[2])
-            return si, best[0], seg_dur, False
-        # Absolute fallback
-        fallback = candidates_map.get(si, [None])[0]
-        if fallback:
-            return si, fallback, seg_dur, False
-        return si, None, seg_dur, False
+        return si, best_clip, seg_dur
 
     with ThreadPoolExecutor(max_workers=n_workers) as pool_exec:
         futures = []
@@ -655,35 +604,39 @@ def _select_clips_for_segments(segments: list, movie_name: str,
 
         for f in as_completed(futures):
             try:
-                si, clip, seg_dur, passed = f.result()
+                si, clip, seg_dur = f.result()
                 with seg_results_lock:
-                    seg_results[si] = (clip, seg_dur, passed)
-                    if passed:
-                        visual_passed += 1
-                    else:
-                        visual_retried += 1
+                    seg_results[si] = (clip, seg_dur)
             except Exception as e:
                 print(f"[movie_pipeline] Visual verify error: {e}", flush=True)
 
-    # Build final selection in order
+    # Build final selection in order (no repeats)
+    selected = []
+    used_ids_final = set(used_ids)
     for si in range(len(seg_info)):
-        clip, seg_dur, _ = seg_results.get(si, (None, seg_info[si]["dur"], False))
+        clip, seg_dur = seg_results.get(si, (None, seg_info[si]["dur"]))
         if clip is None:
             continue
         cid = clip.get("id", clip["file"])
+        if cid in used_ids_final:
+            # Кліп вже використаний — бери наступний з candidates
+            for alt_clip, _ in text_scores.get(si, [])[1:]:
+                alt_id = alt_clip.get("id", alt_clip["file"])
+                if alt_id not in used_ids_final:
+                    clip = alt_clip
+                    cid = alt_id
+                    break
         selected.append({"file": clip["file"], "duration": seg_dur, "id": cid})
         used_ids_final.add(cid)
 
-    total_api = _api_counts["text"] + _api_counts["visual"] + _api_counts["text_retry"]
+    total_api = _api_counts["text"] + _api_counts["visual"]
     print(
-        f"[movie_pipeline] Selected {len(selected)} clips for {audio_dur:.1f}s audio "
-        f"(visual: {visual_passed} passed, {visual_retried} used best-effort)",
+        f"[movie_pipeline] Selected {len(selected)} clips for {audio_dur:.1f}s audio",
         flush=True,
     )
     print(
         f"[movie_pipeline] API calls: {total_api} total "
-        f"(text: {_api_counts['text']}, visual: {_api_counts['visual']}, "
-        f"text_retry: {_api_counts['text_retry']})",
+        f"(text: {_api_counts['text']}, visual: {_api_counts['visual']})",
         flush=True,
     )
     return selected
