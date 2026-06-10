@@ -98,6 +98,10 @@
       {% endfor %}
     </select>
   </div>
+  <div class="field">
+    <label>Main character (optional)</label>
+    <input type="text" id="main-character" placeholder="e.g. Tigress, Po — prioritizes clips with this character">
+  </div>
 
   <div style="display:flex;gap:12px;align-items:center;">
     <button class="btn btn-primary" id="btn-prepare" onclick="doPrepare()">Step 1: Transcribe</button>
@@ -219,6 +223,7 @@ async function doProduce() {
   if (!prepareId) { alert('Run Step 1 first'); return; }
   const movie = document.getElementById('movie-select').value;
   const lang  = document.getElementById('lang-select').value;
+  const mainChar = document.getElementById('main-character').value.trim();
   if (!movie) { alert('Select a movie'); return; }
 
   document.getElementById('btn-produce').disabled = true;
@@ -227,7 +232,7 @@ async function doProduce() {
   const r = await fetch('/api/movies/produce', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({prepare_id: prepareId, movie_name: movie, languages: [lang]}),
+    body: JSON.stringify({prepare_id: prepareId, movie_name: movie, languages: [lang], main_character: mainChar}),
   });
   const d = await r.json();
   if (d.error) {

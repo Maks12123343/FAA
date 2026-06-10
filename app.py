@@ -225,6 +225,7 @@ def api_produce():
     youtube_urls = data.get("youtube_urls", [])
     languages   = data.get("languages", [])
     movie_name  = data.get("movie_name", "").strip()
+    main_character = data.get("main_character", "").strip()
     test_mode   = bool(data.get("test_mode", False))
 
     if not prepare_id or not languages:
@@ -278,6 +279,7 @@ def api_produce():
                             language   = lang,
                             emit=_emit,
                             test_mode=test_mode,
+                            main_character=main_character,
                         )
                         socketio.emit("produce_done", result)
                     except Exception as e:
@@ -932,3 +934,5 @@ if __name__ == "__main__":
     host = os.environ.get("FAA_HOST", "127.0.0.1")
     port = int(os.environ.get("FAA_PORT", "5050"))
     socketio.run(app, host=host, port=port, debug=False)
+
+# end of app.py

@@ -426,7 +426,8 @@ def _extract_global_context(segments: list, movie_name: str) -> str:
 
 def _select_clips_for_segments(segments: list, movie_name: str,
                                 audio_dur: float,
-                                global_used_ids: set = None) -> list:
+                                global_used_ids: set = None,
+                                main_character: str = "") -> list:
     """
     Оптимізований підбір кліпів:
     1. Embeddings (Vertex) → топ-8 кандидатів за сенсом (миттєво, локальна математика)
@@ -513,7 +514,43 @@ def _select_clips_for_segments(segments: list, movie_name: str,
                     found.add(char)
         return found
 
-    CHARACTER_BOOST = 0.25
+    CHARACTER_BOOST = 0.25       # буст за згаданого в сегменті персонажа
+    HERO_BOOST = 0.30            # буст за головного героя відео (м'який пріоритет)
+    WRONG_HERO_PENALTY = 0.45    # штраф, якщо в кадрі ЧУЖИЙ головний персонаж
+
+    # ── Головний герой відео (м'який пріоритет по всьому відео) ──
+    hero = (main_character or "").strip().lower()
+    hero_known = hero in known_characters if hero else False
+    if hero and not hero_known:
+        # Спробувати знайти часткове співпадіння (напр. "tigress" ⊂ "master tigress")
+        for kc in known_characters:
+            if hero in kc or kc in hero:
+                hero = kc
+                hero_known = True
+                break
+    if hero:
+        if hero_known:
+            print(f"[movie_pipeline] Main character: '{hero}' — soft priority active", flush=True)
+        else:
+            print(f"[movie_pipeline] Main character '{hero}' not found in clip metadata — no hero priority", flush=True)
+            hero = ""
+
+    def _hero_adjust(clip) -> float:
+        """
+        М'який пріоритет головного героя:
+        +HERO_BOOST якщо герой у кадрі;
+        -WRONG_HERO_PENALTY якщо в кадрі Є персонажі, але героя серед них немає
+                            (тобто кадр явно про когось іншого — напр. жаба);
+        0 якщо в кадрі взагалі немає впізнаних персонажів (фон/оточення/емоції — ок).
+        """
+        if not hero:
+            return 0.0
+        clip_chars = set(ch.lower() for ch in clip.get("characters", []))
+        if not clip_chars:
+            return 0.0  # кадр без персонажів — нейтрально, лишаємо для різноманітності
+        if hero in clip_chars:
+            return HERO_BOOST
+        return -WRONG_HERO_PENALTY  # у кадрі хтось інший, героя немає → штраф
 
     # ── Phase 1: Embeddings → топ-8 кандидатів з character boost (миттєво) ──
     print(f"[movie_pipeline] Phase 1: semantic ranking {len(seg_info)} segments × top-8 (with character boost)...", flush=True)
@@ -529,10 +566,21 @@ def _select_clips_for_segments(segments: list, movie_name: str,
             scored = []
             for c in ranked:
                 sim = _emb.cosine(seg_vec, c["embedding"])
+                clip_chars = set(ch.lower() for ch in c.get("characters", []))
                 if seg_chars:
-                    clip_chars = set(ch.lower() for ch in c.get("characters", []))
+                    # У тексті ПРЯМО названо персонажа → пріоритет ЙОМУ.
+                    # Герой відео тут НЕ застосовується (щоб сцена про Тай Лунга
+                    # показувала Тай Лунга, а не героя відео).
                     if seg_chars & clip_chars:
                         sim += CHARACTER_BOOST
+                    elif clip_chars and hero and hero in clip_chars and not (seg_chars & clip_chars):
+                        # кадр героя відео, але говориться про іншого — легкий штраф,
+                        # щоб не підмінювати названого персонажа героєм
+                        sim -= CHARACTER_BOOST
+                else:
+                    # Імені в тексті немає (займенники/загальне) → м'який пріоритет героя,
+                    # щоб не лізли випадкові персонажі (жаби тощо).
+                    sim += _hero_adjust(c)
                 scored.append((sim, c))
             scored.sort(key=lambda x: x[0], reverse=True)
             candidates_map[si] = [c for _, c in scored[:8]]
@@ -971,7 +1019,8 @@ def prepare(source_url: str, emit=None) -> dict:
 
 
 def produce(prepare_id: str, movie_name: str, language: str, emit=None,
-            global_used_ids: set = None, test_mode: bool = False) -> dict:
+            global_used_ids: set = None, test_mode: bool = False,
+            main_character: str = "") -> dict:
     """
     Фаза 2: рірайт → TTS → підбір кліпів + validation → текстові оверлеї → монтаж.
 
@@ -1139,6 +1188,7 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
         clip_data = _select_clips_for_segments(
             segments_en, movie_name, audio_dur,
             global_used_ids=global_used_ids,
+            main_character=main_character,
         )
         if not clip_data:
             raise RuntimeError(f"No clips found for movie '{movie_name}'. Is it indexed?")
@@ -1449,3 +1499,5 @@ def produce_batch(prepare_id: str, movie_name: str, language: str,
     ok_count = sum(1 for r in results if r.get("status") == "ok")
     log(f"Batch done: {ok_count}/{count} videos successful")
     return results
+
+# end of module
