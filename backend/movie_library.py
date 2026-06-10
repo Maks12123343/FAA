@@ -25,6 +25,11 @@ CLIP_MAX           = 5.0
 BATCH_SIZE         = 8      # кліпів за один Gemini запит
 VALIDATION_THRESHOLD = 0.85  # Gemini validation score (як в FAA)
 
+# Семантичний пошук: мінімальна косинусна близькість, нижче якої кліп
+# вважається нерелевантним кандидатом. Використовується тільки для відсіву
+# відвертого мотлоху — фінально вирішує Pioneer-валідація.
+SEMANTIC_MIN_SIM = 0.20
+
 
 def _is_gemini_auth_error(err) -> bool:
     text = str(err).lower()
@@ -545,6 +550,46 @@ def make_uniq_params() -> dict:
     }
 
 
+# ── Семантичні вектори ───────────────────────────────────────────────────────
+
+def _attach_embeddings(clips: list, emit=None) -> int:
+    """
+    Дорахувати semantic embedding для кліпів, у яких його ще немає.
+    Вектор будується з текстового опису (description+tags+characters+emotion+
+    scene_type+themes), які Gemini вже згенерував — відео не відкривається.
+    Записує вектор у clip["embedding"] in-place.
+    Повертає кількість дорахованих векторів. Якщо embeddings недоступні —
+    мовчки повертає 0 (кліпи лишаються без векторів, пошук впаде на keyword).
+    """
+    from backend import embeddings as _emb
+
+    need = [c for c in clips if not c.get("embedding")]
+    if not need:
+        return 0
+
+    texts = [_emb.clip_embed_text(c) for c in need]
+    if emit:
+        emit("movie", f"Computing semantic vectors for {len(need)} clips...")
+    try:
+        vectors = _emb.embed_texts(texts, emit=emit)
+    except Exception as e:
+        print(f"[movie_library] Embedding computation failed: {e}", flush=True)
+        vectors = None
+
+    if not vectors:
+        print("[movie_library] No embeddings produced — clips left without vectors "
+              "(search will use keyword fallback)", flush=True)
+        return 0
+
+    count = 0
+    for c, v in zip(need, vectors):
+        if v:
+            c["embedding"] = v
+            count += 1
+    print(f"[movie_library] Attached embeddings to {count}/{len(need)} clips", flush=True)
+    return count
+
+
 # ── Публічний API ──────────────────────────────────────────────────────────────
 
 def process_movie(movie_path: str, movie_name: str, emit=None) -> dict:
@@ -583,6 +628,9 @@ def process_movie(movie_path: str, movie_name: str, emit=None) -> dict:
     good = [a for a in analyzed
             if not a.get("is_blurry") and not a.get("is_static")]
     log(f"Analysis done: {len(good)}/{len(analyzed)} clips passed quality check")
+
+    # Дорахувати семантичні вектори (для семантичного підбору кліпів)
+    _attach_embeddings(good, emit=emit)
 
     index = {
         "movie_name": movie_name,
@@ -668,6 +716,9 @@ def process_movie_folder(folder_path: str, movie_name: str, emit=None) -> dict:
         good = [a for a in analyzed
                 if not a.get("is_blurry") and not a.get("is_static")]
         log(f"{len(good)}/{len(analyzed)} clips passed quality check for {src_key}")
+
+        # Дорахувати семантичні вектори новим кліпам перед збереженням
+        _attach_embeddings(good, emit=emit)
 
         all_good_clips.extend(good)
         total_dur += dur
@@ -812,12 +863,62 @@ def _score_clip(clip: dict, segment_text: str) -> float:
     return score
 
 
+def _has_embeddings(clips: list) -> bool:
+    """
+    True якщо семантичний пошук доцільний — тобто векторами покрита БІЛЬШІСТЬ
+    кліпів. При частковому бекфілі (вектори лише в частини кліпів) повертаємо
+    False, щоб не загубити кліпи без векторів — тоді працює keyword по всіх.
+    """
+    if not clips:
+        return False
+    with_emb = sum(1 for c in clips if c.get("embedding"))
+    return with_emb >= len(clips) * 0.8
+
+
+def _semantic_rank(segment_text: str, clips: list, used_ids: set, top_n: int) -> list:
+    """
+    Ранжувати кліпи за косинусною близькістю їхнього вектора до вектора сегмента.
+    Кліпи-кредити/титри відсіюються (як і в keyword-режимі).
+    Повертає список clip dict (найрелевантніші першими), без рандому.
+    Якщо вектор сегмента порахувати не вдалось — повертає None (→ keyword fallback).
+    """
+    from backend import embeddings as _emb
+
+    seg_vec = _emb.embed_text(segment_text)
+    if not seg_vec:
+        return None
+
+    scored = []
+    for clip in clips:
+        if clip.get("id") in used_ids:
+            continue
+        if not os.path.exists(clip.get("file", "")):
+            continue
+        emb = clip.get("embedding")
+        if not emb:
+            continue
+        # Відсів кредитів/титрів/текстових екранів (та сама логіка, що в _score_clip)
+        if _score_clip(clip, segment_text) < 0:
+            continue
+        sim = _emb.cosine(seg_vec, emb)
+        if sim >= SEMANTIC_MIN_SIM:
+            scored.append((sim, clip))
+
+    if not scored:
+        return []
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [c for _, c in scored[:top_n]]
+
+
 def search_clips(segment_text: str, movie_name: str = None,
                  used_ids: set = None, top_n: int = 15,
                  gemini_validate: bool = False) -> list:
     """
     Знайти кліпи що підходять до тексту сегменту нарації.
-    Крок 1: keyword scoring (швидко).
+
+    Крок 1: семантичний пошук за embedding-векторами (за СЕНСОМ, не за словами).
+            Якщо вектори відсутні або недоступні — fallback на keyword scoring.
     Крок 2: Gemini validation 0.85 (якщо gemini_validate=True).
     Fallback: якщо нічого не пройшло валідацію — повертає top-5 без валідації.
     """
@@ -830,32 +931,40 @@ def search_clips(segment_text: str, movie_name: str = None,
 
     used_ids = used_ids or set()
 
-    candidates = []
-    for clip in all_clips:
-        if clip.get("id") in used_ids:
-            continue
-        if not os.path.exists(clip.get("file", "")):
-            continue
-        s = _score_clip(clip, segment_text)
-        if s > 0:
-            candidates.append((s, clip))
+    # ── Крок 1: семантичний пошук (пріоритетний) ──
+    top = None
+    if _has_embeddings(all_clips):
+        semantic = _semantic_rank(segment_text, all_clips, used_ids, top_n)
+        if semantic is not None:
+            top = semantic
 
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    top = candidates[:top_n]
+    # ── Fallback: keyword scoring (якщо немає векторів або їх не порахувати) ──
+    if top is None:
+        candidates = []
+        for clip in all_clips:
+            if clip.get("id") in used_ids:
+                continue
+            if not os.path.exists(clip.get("file", "")):
+                continue
+            s = _score_clip(clip, segment_text)
+            if s > 0:
+                candidates.append((s, clip))
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        top = [c for _, c in candidates[:top_n]]
 
     if not gemini_validate or not top:
-        return [c for _, c in top]
+        return top
 
     # Gemini validation: оцінюємо топ-10, фільтруємо >= 0.85
     validated = []
-    for kw_score, clip in top[:10]:
+    for clip in top[:10]:
         gem_score = validate_clip(clip["file"], segment_text)
         if gem_score >= VALIDATION_THRESHOLD:
-            validated.append((kw_score * gem_score, clip))
+            validated.append((gem_score, clip))
 
     if validated:
         validated.sort(key=lambda x: x[0], reverse=True)
         return [c for _, c in validated]
 
     # Fallback — повертаємо top-5 без валідації
-    return [c for _, c in top[:5]]
+    return top[:5]

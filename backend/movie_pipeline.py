@@ -448,14 +448,22 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     pioneer_keys = settings.get("pioneer_api_keys", [])
 
     if not pioneer_keys:
-        print("[movie_pipeline] WARNING: no Pioneer keys, skipping validation", flush=True)
+        print("[movie_pipeline] WARNING: no Pioneer keys — using semantic ranking only (no validation)", flush=True)
+        from backend import embeddings as _emb
         result = []
+        local_used = set(used_ids)
         for seg in segments:
             seg_dur = max(2.0, seg["end"] - seg["start"])
-            avail = [c for c in valid_clips if c.get("id") not in used_ids]
-            if not avail:
-                avail = valid_clips
-            c = avail[0] if avail else all_movie_clips[0]
+            avail = [c for c in valid_clips if c.get("id") not in local_used] or valid_clips
+            # Підбір за СЕНСОМ замість першого-ліпшого кліпа
+            seg_vec = _emb.embed_text(seg.get("text", ""))
+            ranked = [c for c in avail if c.get("embedding")]
+            if seg_vec and ranked:
+                ranked.sort(key=lambda c: _emb.cosine(seg_vec, c["embedding"]), reverse=True)
+                c = ranked[0]
+            else:
+                c = avail[0] if avail else all_movie_clips[0]
+            local_used.add(c.get("id"))
             result.append({"file": c["file"], "duration": seg_dur, "id": c.get("id", c["file"])})
         return result
 
@@ -490,6 +498,22 @@ def _select_clips_for_segments(segments: list, movie_name: str,
 
         seg_info.append({"idx": seg_idx, "dur": seg_dur, "text": wide_text})
 
+    def _semantic_fallback(chunk: str, exclude_ids: set, count: int) -> list:
+        """
+        Коли search_clips нічого не повернув — взяти найближчі за СЕНСОМ кліпи
+        (без порога близькості), а не випадкові. Якщо вектори недоступні — лише
+        тоді детермінований fallback по порядку (не shuffle), щоб уникнути рандому.
+        """
+        from backend import embeddings as _emb
+        avail = [c for c in valid_clips if c.get("id") not in exclude_ids] or valid_clips
+        seg_vec = _emb.embed_text(chunk)
+        ranked = [c for c in avail if c.get("embedding")]
+        if seg_vec and ranked:
+            ranked.sort(key=lambda c: _emb.cosine(seg_vec, c["embedding"]), reverse=True)
+            return ranked[:count]
+        # Вектори недоступні — беремо по порядку (детерміновано, без рандому)
+        return avail[:count]
+
     def _get_candidates(chunk: str, exclude_ids: set, count: int = 5) -> list:
         candidates = search_clips(
             chunk, movie_name=movie_name,
@@ -497,12 +521,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
             gemini_validate=False,
         )
         if not candidates:
-            avail = [c for c in valid_clips if c.get("id") not in exclude_ids]
-            random.shuffle(avail)
-            candidates = avail[:count]
-        if not candidates:
-            random.shuffle(valid_clips)
-            candidates = valid_clips[:count]
+            candidates = _semantic_fallback(chunk, exclude_ids, count)
         return [c for c in candidates if os.path.exists(c.get("file", ""))][:count]
 
     def _text_validate_batch(seg_indices: list, candidates_map: dict, api_key: str) -> dict:
