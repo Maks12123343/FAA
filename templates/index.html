@@ -67,6 +67,10 @@
         <option value="">Loading movies...</option>
       </select>
     </div>
+    <div class="field" style="margin-top:12px">
+      <label>Main character <span style="color:#555">(optional — prioritizes clips with this character)</span></label>
+      <input type="text" id="mainCharacter" placeholder="e.g. Tigress, Po, Lightning McQueen" style="width:100%;background:#111;border:1px solid #333;border-radius:6px;padding:8px 10px;color:#fff;font-size:13px;margin-top:4px">
+    </div>
   </div>
 
   <div class="card">
@@ -283,6 +287,8 @@ function startProduce() {
     test_mode:    testMode,
   };
   if (movie_name) payload.movie_name = movie_name;
+  const mainCharEl = document.getElementById('mainCharacter');
+  if (mainCharEl && mainCharEl.value.trim()) payload.main_character = mainCharEl.value.trim();
   if (youtube_urls.length) payload.youtube_urls = youtube_urls;
 
   fetch('/api/produce', {
