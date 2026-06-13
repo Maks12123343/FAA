@@ -61,7 +61,7 @@ def generate(text: str, language: str, output_path: str) -> str:
         time.sleep(POLL_INTERVAL)
         waited += POLL_INTERVAL
 
-        sr = requests.get(f"{base_url}/tasks/{task_id}/status", headers=headers, timeout=15)
+        sr = requests.get(f"{base_url}/tasks/{task_id}/status", headers=headers, timeout=30)
         sr.raise_for_status()
         status = sr.json().get("status", "")
         print(f"[tts] Status: {status}", flush=True)
@@ -75,7 +75,7 @@ def generate(text: str, language: str, output_path: str) -> str:
         raise RuntimeError(f"TTS task {task_id} timed out after {MAX_WAIT}s (last status: {status})")
 
     # Download result
-    dr = requests.get(f"{base_url}/tasks/{task_id}/result", headers=headers, timeout=60, stream=True)
+    dr = requests.get(f"{base_url}/tasks/{task_id}/result", headers=headers, timeout=300, stream=True)
     dr.raise_for_status()
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)

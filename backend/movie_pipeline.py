@@ -652,7 +652,8 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         scored = text_scores.get(si, [])
 
         if not scored:
-            fallback = candidates_map.get(si, [None])[0]
+            cands = candidates_map.get(si, [])
+            fallback = cands[0] if cands else None
             return si, fallback, seg_dur
 
         # Візуально перевірити топ-2 з текстової валідації
