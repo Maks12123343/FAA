@@ -68,7 +68,8 @@ def call_pioneer(system: str, messages: list, timeout: int = 180, max_retries: i
 
             except _req.exceptions.HTTPError as e:
                 status = e.response.status_code if e.response else 0
-                last_err = f"HTTP {status} on key {key_idx+1}: {e}"
+                # ✅ Don't include response body — may contain sensitive data
+                last_err = f"HTTP {status} on key {key_idx+1}"
                 print(f"[api_client] {last_err}", flush=True)
                 # Don't retry 4xx errors (bad request, auth)
                 if status in (400, 401, 403, 404):
@@ -81,7 +82,8 @@ def call_pioneer(system: str, messages: list, timeout: int = 180, max_retries: i
                     break  # Try next key
 
             except Exception as e:
-                last_err = f"{type(e).__name__}: {e} on key {key_idx+1}, attempt {attempt+1}"
+                # ✅ Don't include exception message — may contain API keys or sensitive data
+                last_err = f"{type(e).__name__} on key {key_idx+1}, attempt {attempt+1}"
                 print(f"[api_client] {last_err}", flush=True)
                 if attempt < max_retries - 1:
                     wait = 5 * (attempt + 1)

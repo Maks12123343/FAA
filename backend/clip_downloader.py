@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 import threading
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
@@ -11,6 +12,56 @@ import config
 FFMPEG  = config.FFMPEG
 FFPROBE = config.FFPROBE
 COOKIES_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
+
+
+def _validate_youtube_url(url: str) -> str:
+    """
+    Validate and normalize YouTube URL.
+    Protects against command injection and accepts multiple URL formats.
+    Returns normalized URL.
+    Raises ValueError if invalid.
+    """
+    if not url or not isinstance(url, str):
+        raise ValueError("URL must be a non-empty string")
+
+    url = url.strip()
+
+    # Parse URL
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception as e:
+        raise ValueError(f"Invalid URL format: {e}")
+
+    # Check domain is YouTube
+    domain = parsed.netloc.lower()
+    if domain not in ("youtube.com", "www.youtube.com", "youtu.be", "www.youtu.be", "m.youtube.com"):
+        raise ValueError(f"Only YouTube URLs allowed, got domain: {domain}")
+
+    # Extract video ID
+    video_id = None
+
+    # Format: youtu.be/VIDEO_ID
+    if "youtu.be" in domain:
+        video_id = parsed.path.lstrip("/").split("?")[0]
+
+    # Format: youtube.com/watch?v=VIDEO_ID
+    elif "youtube.com" in domain and "watch" in parsed.path:
+        params = urllib.parse.parse_qs(parsed.query)
+        video_id = params.get("v", [None])[0]
+
+    # Format: youtube.com/embed/VIDEO_ID or similar
+    elif "youtube.com" in domain and "/embed/" in parsed.path:
+        video_id = parsed.path.split("/embed/")[1].split("?")[0]
+
+    if not video_id:
+        raise ValueError("Could not extract video ID from URL")
+
+    # Validate video ID format (11 chars, alphanumeric + - _)
+    if not re.match(r'^[a-zA-Z0-9_-]{11}$', video_id):
+        raise ValueError(f"Invalid video ID format: {video_id}")
+
+    # Return normalized URL
+    return f"https://www.youtube.com/watch?v={video_id}"
 
 
 def _cookies_arg(tmp_dir: str) -> list:
