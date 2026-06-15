@@ -240,11 +240,19 @@ def _plan_text_overlays(segments_with_times: list, emit=None) -> list:
     )
 
     try:
-        text, _ = api_client.call_pioneer(
-            system="You are a creative video editor planning text overlays.",
-            messages=[{"role": "user", "content": prompt}],
-            timeout=120,
-        )
+        try:
+            text, _ = api_client.call_pioneer(
+                system="You are a creative video editor planning text overlays.",
+                messages=[{"role": "user", "content": prompt}],
+                timeout=120,
+                use_rewrite_model=False,
+            )
+        except Exception:
+            text, _ = api_client.call_gigacoder(
+                system="You are a creative video editor planning text overlays.",
+                messages=[{"role": "user", "content": prompt}],
+                timeout=120,
+            )
         text = re.sub(r"^```(?:json)?\s*", "", text.strip())
         text = re.sub(r"\s*```$", "", text)
         m    = re.search(r"\[.*\]", text, re.DOTALL)

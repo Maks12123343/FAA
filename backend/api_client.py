@@ -152,3 +152,52 @@ def call_gigacoder_opus(system: str, messages: list, timeout: int = 180, max_ret
                 time.sleep(5)
 
     raise RuntimeError(f"GigaCoder Opus failed: {last_err}")
+
+
+def call_gigacoder(system: str, messages: list, timeout: int = 180, max_retries: int = 2,
+                   emit=None, step_label: str = "api") -> tuple:
+    """Call GigaCoder GPT-5.4-mini. Returns (text, stop_reason). Raises on failure."""
+    import requests as _req
+    settings = config.load_settings()
+
+    api_keys = settings.get("gigacoder_api_keys", [])
+    if isinstance(api_keys, str):
+        api_keys = [k.strip() for k in api_keys.split(",") if k.strip()]
+    if not api_keys:
+        raise RuntimeError("No gigacoder_api_keys configured")
+
+    api_url = settings.get("gigacoder_api_url", "https://www.gigacoder.org/api/v1/chat/completions")
+    model = settings.get("gigacoder_model", "gpt-5.4-mini")
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "system", "content": system}] + messages,
+        "stream": False,
+    }
+
+    last_err = None
+    for api_key in api_keys:
+        for attempt in range(max_retries):
+            try:
+                resp = _req.post(
+                    api_url,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {api_key}",
+                    },
+                    json=payload,
+                    timeout=timeout,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                text = data["choices"][0]["message"]["content"].strip()
+                finish = data["choices"][0]["finish_reason"]
+                stop_reason = "max_tokens" if finish == "length" else finish
+                return text, stop_reason
+            except Exception as e:
+                last_err = f"{type(e).__name__} key {api_keys.index(api_key)+1} attempt {attempt+1}"
+                print(f"[api_client] GigaCoder: {last_err}", flush=True)
+                if attempt < max_retries - 1:
+                    time.sleep(3)
+
+    raise RuntimeError(f"GigaCoder GPT failed: {last_err}")

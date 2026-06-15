@@ -128,6 +128,35 @@ def _batch_translate(texts: list, source_lang: str, emit=None) -> list:
             if result_texts:
                 break
 
+        # Fallback to GigaCoder if Pioneer failed
+        if not result_texts:
+            gc_keys = settings.get("gigacoder_api_keys", [])
+            gc_url = settings.get("gigacoder_api_url", "https://www.gigacoder.org/api/v1/chat/completions")
+            gc_model = settings.get("gigacoder_model", "gpt-5.4-mini")
+            gc_payload = json.dumps({
+                "model": gc_model,
+                "messages": [
+                    {"role": "system", "content": "You are a translator. Translate accurately and concisely. Keep numbering format: '1. translation'"},
+                    {"role": "user", "content": prompt},
+                ],
+                "stream": False,
+            }).encode("utf-8")
+            for gc_key in gc_keys:
+                try:
+                    req = urllib.request.Request(
+                        gc_url, data=gc_payload,
+                        headers={"Content-Type": "application/json", "Authorization": f"Bearer {gc_key}"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=120) as resp:
+                        body = json.loads(resp.read().decode("utf-8"))
+                    raw_text = body["choices"][0]["message"]["content"]
+                    result_texts = _parse_numbered(raw_text, len(batch))
+                    if result_texts:
+                        break
+                except Exception as e:
+                    print(f"[translator] GigaCoder fallback error: {e}", flush=True)
+
         if result_texts and len(result_texts) == len(batch):
             all_translated.extend(result_texts)
         else:
