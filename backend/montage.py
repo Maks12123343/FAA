@@ -67,7 +67,7 @@ def _prepare_clip(clip_path: str, out_path: str, width: int = 1920, height: int 
         r = subprocess.run(
             [FFMPEG, "-y", "-i", clip_path,
              "-vf", vf,
-             *config.get_video_encoder_args("medium", crf=18), "-pix_fmt", "yuv420p", "-an",
+             *config.get_video_encoder_args("ultrafast"), "-pix_fmt", "yuv420p", "-an",
              "-t", str(max_duration), out_path],
             capture_output=True, timeout=60,
         )
@@ -126,7 +126,7 @@ def _concat_clip_list(clip_paths: list, output: str):
     try:
         r = subprocess.run(
             [FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", list_file,
-             *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p", "-an", output],
+             *config.get_video_encoder_args("ultrafast"), "-pix_fmt", "yuv420p", "-an", output],
             capture_output=True, timeout=3600,
         )
         if r.returncode != 0:
@@ -192,7 +192,7 @@ def _xfade_join(segment_files: list, output: str, fade_dur: float = 0.35):
         [FFMPEG, "-y"] + inputs +
         ["-filter_complex", filter_complex,
          "-map", "[vout]",
-         *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p", "-an", output],
+         *config.get_video_encoder_args("ultrafast"), "-pix_fmt", "yuv420p", "-an", output],
         capture_output=True, timeout=3600,
     )
     if r.returncode != 0:
@@ -393,7 +393,7 @@ def _uniqualize_clip(input_path: str, output_path: str, params: dict):
         r = subprocess.run(
             [FFMPEG, "-y", "-i", input_path,
              "-vf", vf,
-             *config.get_video_encoder_args("medium", crf=18), "-pix_fmt", "yuv420p", "-an",
+             *config.get_video_encoder_args("ultrafast"), "-pix_fmt", "yuv420p", "-an",
              output_path],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
         )

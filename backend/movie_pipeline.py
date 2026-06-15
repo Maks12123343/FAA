@@ -733,7 +733,7 @@ def _concat_clip_list(clip_paths: list, output: str):
     try:
         subprocess.run(
             [config.FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", list_file,
-             *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p", "-an", output],
+             *config.get_video_encoder_args("ultrafast"), "-pix_fmt", "yuv420p", "-an", output],
             capture_output=True, timeout=3600,
             check=True,
         )
@@ -805,7 +805,7 @@ def _xfade_join(segment_files: list, output: str, fade_dur: float = 0.35,
         [config.FFMPEG, "-y"] + inputs +
         ["-filter_complex", ";".join(filters),
          "-map", "[vout]",
-         *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p", "-an", output],
+         *config.get_video_encoder_args("ultrafast"), "-pix_fmt", "yuv420p", "-an", output],
         capture_output=True, timeout=3600,
     )
     if r.returncode != 0:
@@ -818,7 +818,7 @@ def _loop_video_to_duration(video_path: str, target_dur: float, output: str):
         [config.FFMPEG, "-y",
          "-stream_loop", "-1", "-i", video_path,
          "-t", f"{target_dur:.3f}",
-         *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p", "-an", output],
+         *config.get_video_encoder_args("ultrafast"), "-pix_fmt", "yuv420p", "-an", output],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600,
     )
 
