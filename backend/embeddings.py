@@ -163,8 +163,19 @@ def _vertex_embed_all(texts: list, emit=None) -> list:
     out = []
     batches = [texts[i:i + _VERTEX_BATCH] for i in range(0, len(texts), _VERTEX_BATCH)]
     for bi, batch in enumerate(batches):
-        resp = client.models.embed_content(model=model, contents=batch)
-        # genai returns resp.embeddings: list with .values
+        last_err = None
+        for attempt in range(4):
+            try:
+                resp = client.models.embed_content(model=model, contents=batch)
+                break
+            except Exception as e:
+                last_err = e
+                wait = 3 * (attempt + 1)
+                print(f"[embeddings] Vertex batch {bi+1} attempt {attempt+1} failed: {e}, retry in {wait}s", flush=True)
+                import time as _time
+                _time.sleep(wait)
+        else:
+            raise RuntimeError(f"Vertex embeddings failed after 4 attempts: {last_err}")
         embs = getattr(resp, "embeddings", None) or []
         vectors = [list(getattr(e, "values", e)) for e in embs]
         if len(vectors) != len(batch):
