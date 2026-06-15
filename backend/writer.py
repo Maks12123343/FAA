@@ -5,7 +5,6 @@ Approval flow: generate → user reviews/edits → approve → produce.
 
 import json
 import os
-import platform
 import re
 import sys
 import time
@@ -101,19 +100,12 @@ must be STRICTLY between 490 and 500 characters. Adjust tag count/length to fit 
 from backend import api_client
 
 def _call_claude(system: str, messages: list, timeout: int = 180) -> tuple:
-    """Windows: GigaCoder primary, Pioneer fallback. Linux: Pioneer primary, GigaCoder fallback."""
-    if platform.system() == "Windows":
-        try:
-            return api_client.call_gigacoder(system, messages, timeout=timeout)
-        except Exception as e:
-            print(f"[writer] GigaCoder failed ({e}), falling back to Pioneer", flush=True)
-            return api_client.call_pioneer(system, messages, timeout=timeout, use_rewrite_model=False)
-    else:
-        try:
-            return api_client.call_pioneer(system, messages, timeout=timeout, use_rewrite_model=False)
-        except Exception as e:
-            print(f"[writer] Pioneer failed ({e}), falling back to GigaCoder", flush=True)
-            return api_client.call_gigacoder(system, messages, timeout=timeout)
+    """Call Pioneer first, GigaCoder GPT as fallback."""
+    try:
+        return api_client.call_pioneer(system, messages, timeout=timeout, use_rewrite_model=False)
+    except Exception as e:
+        print(f"[writer] Pioneer failed ({e}), falling back to GigaCoder", flush=True)
+        return api_client.call_gigacoder(system, messages, timeout=timeout)
 
 
 def _extract_code_block(text: str) -> str:

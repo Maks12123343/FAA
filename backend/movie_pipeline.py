@@ -5,7 +5,6 @@ Movie Pipeline — виробництво cartoon-psychology відео на о�
 import hashlib
 import json
 import os
-import platform
 import random
 import re
 import shutil
@@ -241,18 +240,19 @@ def _plan_text_overlays(segments_with_times: list, emit=None) -> list:
     )
 
     try:
-        _sys = "You are a creative video editor planning text overlays."
-        _msgs = [{"role": "user", "content": prompt}]
-        if platform.system() == "Windows":
-            try:
-                text, _ = api_client.call_gigacoder(system=_sys, messages=_msgs, timeout=120)
-            except Exception:
-                text, _ = api_client.call_pioneer(system=_sys, messages=_msgs, timeout=120, use_rewrite_model=False)
-        else:
-            try:
-                text, _ = api_client.call_pioneer(system=_sys, messages=_msgs, timeout=120, use_rewrite_model=False)
-            except Exception:
-                text, _ = api_client.call_gigacoder(system=_sys, messages=_msgs, timeout=120)
+        try:
+            text, _ = api_client.call_pioneer(
+                system="You are a creative video editor planning text overlays.",
+                messages=[{"role": "user", "content": prompt}],
+                timeout=120,
+                use_rewrite_model=False,
+            )
+        except Exception:
+            text, _ = api_client.call_gigacoder(
+                system="You are a creative video editor planning text overlays.",
+                messages=[{"role": "user", "content": prompt}],
+                timeout=120,
+            )
         text = re.sub(r"^```(?:json)?\s*", "", text.strip())
         text = re.sub(r"\s*```$", "", text)
         m    = re.search(r"\[.*\]", text, re.DOTALL)
@@ -479,11 +479,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         return result
 
     gc_keys = _gigacoder_keys()
-    _gc_primary = platform.system() == "Windows"
-    if _gc_primary:
-        all_keys = gc_keys + pioneer_keys  # Windows: GigaCoder primary, Pioneer fallback
-    else:
-        all_keys = pioneer_keys + gc_keys  # Linux: Pioneer primary, GigaCoder fallback
+    all_keys = pioneer_keys + gc_keys  # Pioneer first, GigaCoder as fallback workers
     n_workers = max(len(all_keys), 1)
 
     # API call counters (thread-safe)
@@ -649,7 +645,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         for w_idx, worker_segs in enumerate(chunks_per_worker):
             if worker_segs:
                 key = all_keys[w_idx]
-                is_gc = w_idx < len(gc_keys) if _gc_primary else w_idx >= len(pioneer_keys)
+                is_gc = w_idx >= len(pioneer_keys)
                 futures.append(pool_exec.submit(
                     _text_validate_worker, worker_segs, key, is_gc
                 ))
@@ -705,9 +701,8 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     with ThreadPoolExecutor(max_workers=n_workers) as pool_exec:
         futures = []
         for si in range(len(seg_info)):
-            w_idx = si % n_workers
-            key = all_keys[w_idx]
-            is_gc = w_idx < len(gc_keys) if _gc_primary else w_idx >= len(pioneer_keys)
+            key = all_keys[si % n_workers]
+            is_gc = (si % n_workers) >= len(pioneer_keys)
             futures.append(pool_exec.submit(_visual_verify_segment, si, key, is_gc))
 
         for f in as_completed(futures):
