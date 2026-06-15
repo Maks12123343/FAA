@@ -25,8 +25,12 @@ from backend import api_client
 
 
 def _call_claude(system: str, messages: list, timeout: int = 180) -> tuple:
-    """Call Pioneer API with automatic key rotation and retry."""
-    return api_client.call_pioneer(system, messages, timeout=timeout)
+    """Call GigaCoder Opus first, Pioneer as fallback."""
+    try:
+        return api_client.call_gigacoder_opus(system, messages, timeout=timeout)
+    except Exception as e:
+        print(f"[rewriter] GigaCoder Opus failed ({e}), falling back to Pioneer", flush=True)
+        return api_client.call_pioneer(system, messages, timeout=timeout)
 
 
 # ── Script rewrite ────────────────────────────────────────────────────────────

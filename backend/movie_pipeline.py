@@ -471,7 +471,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         return result
 
     gc_keys = _gigacoder_keys()
-    all_keys = gc_keys + pioneer_keys
+    all_keys = pioneer_keys + gc_keys
     n_workers = max(len(all_keys), 1)
 
     # API call counters (thread-safe)
@@ -637,7 +637,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         for w_idx, worker_segs in enumerate(chunks_per_worker):
             if worker_segs:
                 key = all_keys[w_idx]
-                is_gc = w_idx < len(gc_keys)
+                is_gc = w_idx >= len(pioneer_keys)
                 futures.append(pool_exec.submit(
                     _text_validate_worker, worker_segs, key, is_gc
                 ))
@@ -694,7 +694,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         futures = []
         for si in range(len(seg_info)):
             key = all_keys[si % n_workers]
-            is_gc = (si % n_workers) < len(gc_keys)
+            is_gc = (si % n_workers) >= len(pioneer_keys)
             futures.append(pool_exec.submit(_visual_verify_segment, si, key, is_gc))
 
         for f in as_completed(futures):
