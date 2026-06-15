@@ -1,6 +1,7 @@
 """Batch translate section texts to English for clip matching."""
 import json
 import os
+import platform
 import re
 import sys
 import time
@@ -72,18 +73,24 @@ _BATCH_SIZE = 30
 
 
 def _batch_translate(texts: list, source_lang: str, emit=None) -> list:
-    """Translate texts in batches using Pioneer API."""
+    """Translate texts in batches. Windows: GigaCoder primary, Pioneer fallback. Linux: reversed."""
     import urllib.request
 
     settings = config.load_settings()
-    api_keys = settings.get("pioneer_api_keys", [])
-    if isinstance(api_keys, str):
-        api_keys = [k.strip() for k in api_keys.split(",") if k.strip()]
-    api_url = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
-    model = settings.get("pioneer_model", "gemini-3.5-flash")
+    pioneer_keys = settings.get("pioneer_api_keys", [])
+    if isinstance(pioneer_keys, str):
+        pioneer_keys = [k.strip() for k in pioneer_keys.split(",") if k.strip()]
+    pioneer_url = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
+    pioneer_model = settings.get("pioneer_model", "gemini-3.5-flash")
 
-    if not api_keys:
-        print("[translator] No Pioneer API keys — falling back to no translation", flush=True)
+    gc_keys = settings.get("gigacoder_api_keys", [])
+    gc_url = settings.get("gigacoder_api_url", "https://www.gigacoder.org/api/v1/chat/completions")
+    gc_model = settings.get("gigacoder_model", "gpt-5.4-mini")
+
+    _gc_primary = platform.system() == "Windows"
+
+    if not pioneer_keys and not gc_keys:
+        print("[translator] No API keys — falling back to no translation", flush=True)
         return texts
 
     all_translated = []
@@ -97,65 +104,61 @@ def _batch_translate(texts: list, source_lang: str, emit=None) -> list:
             f"{numbered}"
         )
 
-        payload = json.dumps({
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You are a translator. Translate accurately and concisely. Keep numbering format: '1. translation'"},
-                {"role": "user", "content": prompt},
-            ],
-            "stream": False,
-        }).encode("utf-8")
+        sys_msg = "You are a translator. Translate accurately and concisely. Keep numbering format: '1. translation'"
 
-        result_texts = None
-        for key in api_keys:
-            for attempt in range(3):
-                try:
-                    req = urllib.request.Request(
-                        api_url,
-                        data=payload,
-                        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-                        method="POST",
-                    )
-                    with urllib.request.urlopen(req, timeout=120) as resp:
-                        body = json.loads(resp.read().decode("utf-8"))
-                    raw_text = body["choices"][0]["message"]["content"]
-                    result_texts = _parse_numbered(raw_text, len(batch))
-                    break
-                except Exception as e:
-                    print(f"[translator] Batch {batch_idx+1} attempt {attempt+1} error: {e}", flush=True)
-                    if attempt < 2:
-                        time.sleep(5 * (attempt + 1))
-            if result_texts:
-                break
+        def _try_pioneer():
+            payload = json.dumps({
+                "model": pioneer_model,
+                "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}],
+                "stream": False,
+            }).encode("utf-8")
+            for key in pioneer_keys:
+                for attempt in range(3):
+                    try:
+                        req = urllib.request.Request(
+                            pioneer_url, data=payload,
+                            headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(req, timeout=120) as resp:
+                            body = json.loads(resp.read().decode("utf-8"))
+                        raw_text = body["choices"][0]["message"]["content"]
+                        result = _parse_numbered(raw_text, len(batch))
+                        if result:
+                            return result
+                    except Exception as e:
+                        print(f"[translator] Pioneer batch {batch_idx+1} attempt {attempt+1} error: {e}", flush=True)
+                        if attempt < 2:
+                            time.sleep(5 * (attempt + 1))
+            return None
 
-        # Fallback to GigaCoder if Pioneer failed
-        if not result_texts:
-            gc_keys = settings.get("gigacoder_api_keys", [])
-            gc_url = settings.get("gigacoder_api_url", "https://www.gigacoder.org/api/v1/chat/completions")
-            gc_model = settings.get("gigacoder_model", "gpt-5.4-mini")
-            gc_payload = json.dumps({
+        def _try_gigacoder():
+            payload = json.dumps({
                 "model": gc_model,
-                "messages": [
-                    {"role": "system", "content": "You are a translator. Translate accurately and concisely. Keep numbering format: '1. translation'"},
-                    {"role": "user", "content": prompt},
-                ],
+                "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}],
                 "stream": False,
             }).encode("utf-8")
             for gc_key in gc_keys:
                 try:
                     req = urllib.request.Request(
-                        gc_url, data=gc_payload,
+                        gc_url, data=payload,
                         headers={"Content-Type": "application/json", "Authorization": f"Bearer {gc_key}"},
                         method="POST",
                     )
                     with urllib.request.urlopen(req, timeout=120) as resp:
                         body = json.loads(resp.read().decode("utf-8"))
                     raw_text = body["choices"][0]["message"]["content"]
-                    result_texts = _parse_numbered(raw_text, len(batch))
-                    if result_texts:
-                        break
+                    result = _parse_numbered(raw_text, len(batch))
+                    if result:
+                        return result
                 except Exception as e:
-                    print(f"[translator] GigaCoder fallback error: {e}", flush=True)
+                    print(f"[translator] GigaCoder batch {batch_idx+1} error: {e}", flush=True)
+            return None
+
+        if _gc_primary:
+            result_texts = _try_gigacoder() or _try_pioneer()
+        else:
+            result_texts = _try_pioneer() or _try_gigacoder()
 
         if result_texts and len(result_texts) == len(batch):
             all_translated.extend(result_texts)

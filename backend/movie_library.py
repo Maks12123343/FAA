@@ -353,12 +353,19 @@ def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
     lock        = threading.Lock()
     results     = []
     worker_errors = []
-    client, model = _gemini()
+    _use_gigacoder_primary = platform.system() == "Windows"
+    if not _use_gigacoder_primary:
+        client, model = _gemini()
+    else:
+        client, model = None, None
 
     def _process_batch(batch):
         for attempt in range(3):
             try:
-                analyses = _analyze_batch(batch, movie_name, client, model)
+                if _use_gigacoder_primary:
+                    analyses = _analyze_batch_gigacoder(batch, movie_name)
+                else:
+                    analyses = _analyze_batch(batch, movie_name, client, model)
                 for item, analysis in zip(batch, analyses):
                     clip = item["clip"]
                     analysis["id"]   = clip["id"]
@@ -372,15 +379,21 @@ def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
                 return
             except Exception as e:
                 err = str(e).lower()
-                if _is_gemini_auth_error(e):
+                if not _use_gigacoder_primary and _is_gemini_auth_error(e):
                     raise RuntimeError(f"[movie_library] Gemini auth/config error: {e}") from e
-                is_rate = "429" in str(e) or "quota" in err or "resource_exhausted" in err
+                is_rate = "429" in str(e) or "quota" in err or "resource_exhausted" in err or "403" in str(e)
                 if is_rate and attempt < 2:
                     time.sleep(15 * (attempt + 1))
                 else:
-                    print(f"[movie_library] Gemini batch error, trying GigaCoder: {e}", flush=True)
+                    # Try the other backend as fallback
+                    fallback_name = "Vertex Gemini" if _use_gigacoder_primary else "GigaCoder"
+                    print(f"[movie_library] Primary failed, trying {fallback_name}: {e}", flush=True)
                     try:
-                        analyses = _analyze_batch_gigacoder(batch, movie_name)
+                        if _use_gigacoder_primary:
+                            _fb_client, _fb_model = _gemini()
+                            analyses = _analyze_batch(batch, movie_name, _fb_client, _fb_model)
+                        else:
+                            analyses = _analyze_batch_gigacoder(batch, movie_name)
                         for item, analysis in zip(batch, analyses):
                             clip = item["clip"]
                             analysis["id"]   = clip["id"]

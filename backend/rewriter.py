@@ -1,5 +1,6 @@
 import json
 import os
+import platform
 import re
 import sys
 
@@ -25,12 +26,19 @@ from backend import api_client
 
 
 def _call_claude(system: str, messages: list, timeout: int = 180) -> tuple:
-    """Call Pioneer Opus first, GigaCoder Opus as fallback."""
-    try:
-        return api_client.call_pioneer(system, messages, timeout=timeout)
-    except Exception as e:
-        print(f"[rewriter] Pioneer failed ({e}), falling back to GigaCoder Opus", flush=True)
-        return api_client.call_gigacoder_opus(system, messages, timeout=timeout)
+    """Windows: GigaCoder Opus primary, Pioneer fallback. Linux: Pioneer primary, GigaCoder fallback."""
+    if platform.system() == "Windows":
+        try:
+            return api_client.call_gigacoder_opus(system, messages, timeout=timeout)
+        except Exception as e:
+            print(f"[rewriter] GigaCoder Opus failed ({e}), falling back to Pioneer", flush=True)
+            return api_client.call_pioneer(system, messages, timeout=timeout)
+    else:
+        try:
+            return api_client.call_pioneer(system, messages, timeout=timeout)
+        except Exception as e:
+            print(f"[rewriter] Pioneer failed ({e}), falling back to GigaCoder Opus", flush=True)
+            return api_client.call_gigacoder_opus(system, messages, timeout=timeout)
 
 
 # ── Script rewrite ────────────────────────────────────────────────────────────
