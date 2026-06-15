@@ -1,0 +1,14 @@
+{
+  "name": "Travel Documentaries",
+  "description": "Travel documentaries, geography, nature, cities, countries",
+  "pipeline_type": "standard",
+  "montage_style": "standard",
+  "clip_selection": "random",
+  "skip_validation": true,
+  "watermark_crop": true,
+  "crop_top_pct": 0,
+  "crop_bottom_pct": 0,
+  "channels": [],
+  "search_keywords": [],
+  "stock_tags": []
+}

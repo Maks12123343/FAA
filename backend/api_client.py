@@ -9,8 +9,12 @@ import config
 
 
 def call_pioneer(system: str, messages: list, timeout: int = 180, max_retries: int = 3,
-                 emit=None, step_label: str = "api") -> tuple:
+                 emit=None, step_label: str = "api", use_rewrite_model: bool = True) -> tuple:
     """Call Pioneer.ai with automatic key rotation and retry.
+
+    use_rewrite_model=True (default): uses pioneer_rewrite_key + pioneer_rewrite_model (Opus)
+                                      with fallback to regular pioneer_api_keys.
+    use_rewrite_model=False: uses regular pioneer_api_keys + pioneer_model.
 
     Returns: (text, stop_reason)
     Raises: RuntimeError if all keys fail.
@@ -18,13 +22,22 @@ def call_pioneer(system: str, messages: list, timeout: int = 180, max_retries: i
     import requests as _req
     settings = config.load_settings()
 
-    api_keys = settings.get("pioneer_api_keys", [])
-    if isinstance(api_keys, str):
-        api_keys = [k.strip() for k in api_keys.split(",") if k.strip()]
+    # Build key list: rewrite key first (if available and requested), then regular keys
+    rewrite_key = settings.get("pioneer_rewrite_key", "").strip()
+    regular_keys = settings.get("pioneer_api_keys", [])
+    if isinstance(regular_keys, str):
+        regular_keys = [k.strip() for k in regular_keys.split(",") if k.strip()]
+
+    if use_rewrite_model and rewrite_key:
+        api_keys = [rewrite_key] + regular_keys
+        model = settings.get("pioneer_rewrite_model", "claude-opus-4-8")
+    else:
+        api_keys = regular_keys
+        model = settings.get("pioneer_model", "gemini-3.5-flash")
+
     if not api_keys:
         raise RuntimeError("No pioneer_api_keys configured in Settings.")
 
-    model   = settings.get("pioneer_model", "gemini-3.5-flash")
     api_url = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
 
     payload = {

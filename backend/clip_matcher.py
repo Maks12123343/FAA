@@ -493,9 +493,9 @@ def _validation_cache_path(clip_path: str, section_text: str) -> str:
 
 def validate_clip_for_section(clip_path: str, section_text: str) -> float:
     """
-    Ask Gemini to score how well a clip matches a script section.
-    Returns float 0.0-1.0. Result cached to disk — same clip+section never calls Gemini twice
-    even across different languages or produce() runs.
+    Score how well a clip matches a script section (visual, with frames).
+    Priority: GPT-5.4-mini (GigaCoder) > Pioneer > Gemini.
+    Result cached to disk — same clip+section never calls API twice.
     """
     cache_path = _validation_cache_path(clip_path, section_text)
     if os.path.exists(cache_path):
@@ -505,6 +505,31 @@ def validate_clip_for_section(clip_path: str, section_text: str) -> float:
         except Exception:
             pass
 
+    # Try GigaCoder GPT first (visual)
+    gc_keys = _gigacoder_keys()
+    if gc_keys:
+        score = _validate_clip_visual_gigacoder(clip_path, section_text, gc_keys[0])
+        if score >= 0.0:  # -1.0 means failure
+            try:
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    json.dump({"score": score}, f)
+            except Exception:
+                pass
+            return score
+
+    # Fallback: Pioneer (visual)
+    pio_keys = _pioneer_keys()
+    if pio_keys:
+        score = _validate_clip_visual_pioneer(clip_path, section_text, pio_keys[0])
+        if score > 0.0:
+            try:
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    json.dump({"score": score}, f)
+            except Exception:
+                pass
+            return score
+
+    # Last fallback: Gemini (Vertex)
     from google.genai import types
 
     parts = []
@@ -533,7 +558,6 @@ def validate_clip_for_section(clip_path: str, section_text: str) -> float:
         data = json.loads(m.group() if m else text)
         score = float(data.get("score", 0.0))
     except Exception as e:
-        err = str(e).lower()
         if _is_gemini_auth_error(e):
             raise RuntimeError(f"[clip_matcher] Gemini auth/config error: {e}") from e
         score = 0.0
@@ -602,6 +626,204 @@ def _pioneer_keys() -> list:
     if isinstance(keys, str):
         keys = [k.strip() for k in keys.split(",") if k.strip()]
     return [k for k in keys if k]
+
+
+# ── GigaCoder GPT-5.4-mini (primary validation backend) ──────────────────────
+
+def _gigacoder_keys() -> list:
+    settings = config.load_settings()
+    keys = settings.get("gigacoder_api_keys", [])
+    if isinstance(keys, str):
+        keys = [k.strip() for k in keys.split(",") if k.strip()]
+    return [k for k in keys if k]
+
+
+def _gigacoder_request(payload: dict, api_key: str, timeout: int = 120) -> dict:
+    """Send a request to GigaCoder OpenAI-compatible endpoint. Returns parsed response body."""
+    import urllib.request
+
+    settings = config.load_settings()
+    api_url = settings.get("gigacoder_api_url", "https://www.gigacoder.org/api/v1/chat/completions")
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        api_url,
+        data=data,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _validate_movie_clips_text_gigacoder_batch(items: list, api_key: str) -> list:
+    """
+    Text-only GPT-5.4-mini validation for movie library clips via GigaCoder.
+    Same contract as _validate_movie_clips_text_pioneer_batch().
+    Priority: GPT-5.4-mini (GigaCoder) > Pioneer (fallback).
+    """
+    import re as _re
+    import time as _time
+
+    if not items:
+        return []
+
+    settings = config.load_settings()
+    model = settings.get("gigacoder_model", "gpt-5.4-mini")
+    timeout = int(settings.get("gigacoder_timeout", 120) or 120)
+
+    unique_sections = set(item["section_text"][:500] for item in items)
+    if len(unique_sections) == 1:
+        section_text = items[0]["section_text"][:500]
+        prompt_parts = [
+            f'{section_text}\n\n'
+            f"Score how well each of {len(items)} movie clips matches the narration above.\n"
+        ]
+        for idx, item in enumerate(items):
+            tags_str = ", ".join(item.get("tags", [])[:10]) or "none"
+            chars_str = ", ".join(item.get("characters", [])[:5]) or ""
+            char_info = f" [Characters: {chars_str}]" if chars_str else ""
+            prompt_parts.append(
+                f"CLIP {idx + 1}: {item['description'][:150]} [{tags_str}]{char_info}\n"
+            )
+    else:
+        prompt_parts = [f"Score how well each of {len(items)} movie clips matches its script segment.\n"]
+        for idx, item in enumerate(items):
+            tags_str = ", ".join(item.get("tags", [])[:10]) or "none"
+            chars_str = ", ".join(item.get("characters", [])[:5]) or ""
+            char_info = f" [Characters: {chars_str}]" if chars_str else ""
+            prompt_parts.append(
+                f"CLIP {idx + 1}:\n"
+                f"  Description: {item['description'][:150]}\n"
+                f"  Tags: {tags_str}{char_info}\n"
+                f"  Script: \"{item['section_text'][:500]}\"\n"
+            )
+    prompt_parts.append(
+        f"\nRate how well each clip visually illustrates the narration.\n"
+        f"Scoring priority (most important first):\n"
+        f"1. CHARACTER MATCH — clip shows the character mentioned in narration (highest priority)\n"
+        f"2. Scene/action relevance — what's happening matches the narration\n"
+        f"3. Mood/emotion match\n"
+        f"Score 0.0 for: credits, title cards, text screens, black/blank frames, logos.\n"
+        f"Reply ONLY with a JSON array of {len(items)} objects:\n"
+        f'[{{"score": 0.0}}, {{"score": 0.8}}, ...] where 0.0=no match, 1.0=perfect match.'
+    )
+
+    payload = {
+        "model": model,
+        "max_tokens": 200,
+        "messages": [
+            {"role": "system", "content": "You are a clip-matching scoring assistant. Reply only with valid JSON."},
+            {"role": "user", "content": "\n".join(prompt_parts)},
+        ],
+    }
+
+    keys_to_try = [api_key] + [k for k in _gigacoder_keys() if k != api_key]
+    last_error = None
+
+    for key in keys_to_try:
+        for attempt in range(2):
+            try:
+                body = _gigacoder_request(payload, key, timeout)
+                text = body["choices"][0]["message"]["content"]
+                text = _re.sub(r"^```(?:json)?\s*", "", text.strip())
+                text = _re.sub(r"\s*```$", "", text)
+                m = _re.search(r"\[.*\]", text, _re.DOTALL)
+                raw = json.loads(m.group() if m else text)
+                scores = []
+                for r in raw:
+                    if isinstance(r, dict):
+                        scores.append(float(r.get("score", 0.0)))
+                    elif isinstance(r, (int, float)):
+                        scores.append(float(r))
+                    else:
+                        scores.append(0.0)
+                if len(scores) < len(items):
+                    scores.extend([0.0] * (len(items) - len(scores)))
+                return scores[:len(items)]
+            except Exception as e:
+                last_error = e
+                print(
+                    f"[clip_matcher] GigaCoder validation error (key ...{key[-12:]}, "
+                    f"attempt {attempt+1}/2): {e}",
+                    flush=True,
+                )
+                if attempt < 1:
+                    _time.sleep(3)
+                    continue
+                break
+
+    raise RuntimeError(f"[clip_matcher] GigaCoder text batch failed (all keys): {last_error}") from last_error
+
+
+def _validate_clip_visual_gigacoder(clip_path: str, section_text: str, api_key: str) -> float:
+    """
+    Visual validation via GPT-5.4-mini (GigaCoder): extract 3 frames, send as base64.
+    Returns score 0.0-1.0. Falls through to Pioneer/Gemini on failure.
+    """
+    import base64
+    import time as _time
+
+    frames = []
+    for ratio in [0.0, 0.5, 1.0]:
+        fb = _frame_bytes(clip_path, ratio)
+        if fb:
+            frames.append(base64.b64encode(fb).decode("ascii"))
+
+    if not frames:
+        return 0.0
+
+    settings = config.load_settings()
+    model = settings.get("gigacoder_model", "gpt-5.4-mini")
+    timeout = int(settings.get("gigacoder_timeout", 120) or 120)
+
+    content_parts = []
+    content_parts.append({
+        "type": "text",
+        "text": (
+            f'These are 3 frames (start/middle/end) from a video clip.\n'
+            f'{section_text[:500]}\n\n'
+            f'Rate how well this clip VISUALLY matches the narration above.\n'
+            f'Scoring priority (most important first):\n'
+            f'1. CHARACTER MATCH — does the clip show the character mentioned? (highest priority)\n'
+            f'2. Scene/action relevance — does what happens match the narration?\n'
+            f'3. Mood/emotion match\n\n'
+            f'Score 0.0 for: credits, title cards, text screens, black frames, logos, static text.\n'
+            f'JSON only: {{"score": 0.0}} where 0.0=reject, 1.0=perfect match.'
+        ),
+    })
+    for b64 in frames:
+        content_parts.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+        })
+
+    payload = {
+        "model": model,
+        "max_tokens": 50,
+        "messages": [
+            {"role": "system", "content": "You are a clip-matching scoring assistant. Reply only with valid JSON."},
+            {"role": "user", "content": content_parts},
+        ],
+    }
+
+    keys_to_try = [api_key] + [k for k in _gigacoder_keys() if k != api_key]
+    for key in keys_to_try:
+        for attempt in range(2):
+            try:
+                body = _gigacoder_request(payload, key, timeout)
+                text = body["choices"][0]["message"]["content"]
+                text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+                text = re.sub(r"\s*```$", "", text)
+                m = re.search(r"\{.*\}", text, re.DOTALL)
+                data = json.loads(m.group() if m else text)
+                return round(min(max(float(data.get("score", 0.0)), 0.0), 1.0), 4)
+            except Exception as e:
+                if attempt < 1:
+                    _time.sleep(3)
+                    continue
+                break
+    return -1.0  # signal failure so caller can try fallback
 
 
 def _validate_movie_clips_text_pioneer_batch(items: list, api_key: str) -> list:
@@ -918,10 +1140,15 @@ def batch_validate_candidates(
     # Per section: validate top-3 first; if none ≥ 0.75, validate clips 4-5 too; take best.
     if movie_library_mode:
         MOVIE_THRESHOLD = 0.75
-        vertex_client, vertex_model = _gemini()
-        backends = [{"kind": "vertex", "name": "Vertex", "client": vertex_client, "model": vertex_model}]
+        # Priority: GigaCoder GPT > Pioneer (fallback)
+        backends = []
+        for i, key in enumerate(_gigacoder_keys(), start=1):
+            backends.append({"kind": "gigacoder", "name": f"GPT-{i}", "api_key": key})
         for i, key in enumerate(_pioneer_keys()[:3], start=1):
             backends.append({"kind": "pioneer", "name": f"Pioneer-{i}", "api_key": key})
+        if not backends:
+            vertex_client, vertex_model = _gemini()
+            backends.append({"kind": "vertex", "name": "Vertex", "client": vertex_client, "model": vertex_model})
 
         sections = list(enumerate(zip(section_candidates, section_texts)))
         assigned = [[] for _ in backends]
@@ -945,19 +1172,41 @@ def batch_validate_candidates(
             return items
 
         def _score_items(items: list, backend: dict) -> list:
+            if backend["kind"] == "gigacoder":
+                try:
+                    return _validate_movie_clips_text_gigacoder_batch(items, backend["api_key"])
+                except Exception as e:
+                    print(
+                        f"[clip_matcher] {backend['name']} failed ({e}); trying Pioneer/Vertex fallback",
+                        flush=True,
+                    )
+                    # Fallback: try Pioneer keys
+                    for pk in _pioneer_keys()[:2]:
+                        try:
+                            return _validate_movie_clips_text_pioneer_batch(items, pk)
+                        except Exception:
+                            continue
+                    # Last resort: Vertex Gemini
+                    try:
+                        vc, vm = _gemini()
+                        return _validate_movie_clips_text_batch(items, vc, vm)
+                    except Exception as fallback_error:
+                        print(f"[clip_matcher] All fallbacks failed: {fallback_error}; skipping batch", flush=True)
+                        return []
             if backend["kind"] == "pioneer":
                 try:
                     return _validate_movie_clips_text_pioneer_batch(items, backend["api_key"])
                 except Exception as e:
                     print(
-                        f"[clip_matcher] {backend['name']} failed ({e}); falling back to Vertex text validation for this batch",
+                        f"[clip_matcher] {backend['name']} failed ({e}); trying Vertex fallback",
                         flush=True,
                     )
                     try:
-                        return _validate_movie_clips_text_batch(items, vertex_client, vertex_model)
+                        vc, vm = _gemini()
+                        return _validate_movie_clips_text_batch(items, vc, vm)
                     except Exception as fallback_error:
                         print(
-                            f"[clip_matcher] Vertex fallback also failed for {backend['name']} batch: {fallback_error}; skipping batch",
+                            f"[clip_matcher] Vertex fallback also failed: {fallback_error}; skipping batch",
                             flush=True,
                         )
                         return []
@@ -1104,13 +1353,47 @@ def batch_validate_candidates(
     items = [it for it in items if it["frames"]]
 
     batches       = [items[i:i + _VALIDATION_BATCH_SIZE] for i in range(0, len(items), _VALIDATION_BATCH_SIZE)]
-    client, model = _gemini()
     lock          = threading.Lock()
     new_scores:   dict = {}
     done          = [0]
     worker_errors = []
 
+    # Try GigaCoder GPT visual batch first; Gemini as fallback
+    gc_keys = _gigacoder_keys()
+    _use_gpt_visual = bool(gc_keys)
+
+    def _gpt_visual_batch(batch, key):
+        """Validate batch via GPT-5.4-mini visual (one item at a time, GPT doesn't batch images)."""
+        scores = []
+        for item in batch:
+            s = _validate_clip_visual_gigacoder(item["clip_path"], item["section_text"], key)
+            scores.append(s if s >= 0.0 else 0.0)
+        return scores
+
     def _process_batch(batch):
+        # Primary: GPT-5.4-mini visual
+        if _use_gpt_visual:
+            try:
+                key = gc_keys[done[0] % len(gc_keys)] if gc_keys else gc_keys[0]
+                scores = _gpt_visual_batch(batch, key)
+                for item, score in zip(batch, scores):
+                    cache_path = _validation_cache_path(item["clip_path"], item["section_text"])
+                    try:
+                        with open(cache_path, "w", encoding="utf-8") as f:
+                            json.dump({"score": score}, f)
+                    except Exception:
+                        pass
+                    with lock:
+                        new_scores[(item["sec_idx"], item["clip_path"])] = score
+                        done[0] += 1
+                        if emit and done[0] % 16 == 0:
+                            emit("media", f"Validated {done[0]}/{len(items)} (GPT)...")
+                return
+            except Exception as e:
+                print(f"[clip_matcher] GPT visual batch failed ({e}); falling back to Gemini", flush=True)
+
+        # Fallback: Gemini batch visual
+        client, model = _gemini()
         for attempt in range(3):
             try:
                 scores = _validate_batch_chunk(batch, client, model)
@@ -1125,7 +1408,7 @@ def batch_validate_candidates(
                         new_scores[(item["sec_idx"], item["clip_path"])] = score
                         done[0] += 1
                         if emit and done[0] % 16 == 0:
-                            emit("media", f"Validated {done[0]}/{len(items)}...")
+                            emit("media", f"Validated {done[0]}/{len(items)} (Gemini)...")
                 return
             except Exception as e:
                 err = str(e)

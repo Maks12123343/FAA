@@ -541,6 +541,17 @@ def create_niche():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     path = os.path.join(config.NICHES_DIR, f"{name}.json")
+
+    # If file exists and only crop fields sent — update in place
+    if os.path.exists(path) and "crop_top_pct" in data and "name" not in data:
+        with open(path, encoding="utf-8") as f:
+            existing = json.load(f)
+        existing["crop_top_pct"] = data.get("crop_top_pct", 0)
+        existing["crop_bottom_pct"] = data.get("crop_bottom_pct", 0)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+        return jsonify({"ok": True})
+
     niche = {
         "name": data.get("name", name),
         "description": data.get("description", ""),

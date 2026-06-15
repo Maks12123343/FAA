@@ -43,8 +43,8 @@ else:
     # Stocks/movies: local copy preferred (faster), rclone mount as fallback
     _local_stocks = os.path.join(os.path.dirname(__file__), "stocks")
     _local_movies = os.path.join(os.path.dirname(__file__), "movies")
-    _mount_stocks = "/mnt/gdrive/FAA/stocks"
-    _mount_movies = "/mnt/gdrive/FAA/movies"
+    _mount_stocks = "/mnt/gdrive/stocks"
+    _mount_movies = "/mnt/gdrive/movies"
     _DEFAULT_STOCKS_DIR = _local_stocks if os.path.isdir(_local_stocks) else _mount_stocks
     _DEFAULT_MOVIES_DIR = _local_movies if os.path.isdir(_local_movies) else _mount_movies
 

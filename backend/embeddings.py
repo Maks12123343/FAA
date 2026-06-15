@@ -234,17 +234,8 @@ def embed_text(text: str, emit=None) -> list:
 
 
 def _backend_order() -> list:
-    """Preferred backend probe order, honoring a previously discovered working backend."""
-    with _BACKEND_LOCK:
-        known = _BACKEND_CACHE["kind"]
-    if known == "pioneer":
-        return ["pioneer", "vertex"]
-    if known == "vertex":
-        return ["vertex", "pioneer"]
-    if known == "none":
-        # Re-probe from scratch (settings may have been fixed since).
-        return ["pioneer", "vertex"]
-    return ["pioneer", "vertex"]
+    """Vertex only — embeddings are exclusively handled by Vertex AI."""
+    return ["vertex"]
 
 
 def _set_backend(kind: str):

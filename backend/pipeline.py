@@ -407,10 +407,8 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
     # -- Pick clips -----------------------------------------------------------
     log("media", "Building clip list...")
 
-    # Analyze clips with Gemini (one-time, cached per clip as .analysis.json)
-    with _cand_lock:
-        log("media", "Analyzing clips with Gemini (cached results reused)...")
-        analyzed_index = analyze_all_clips(clips_index, emit=emit)
+    # Check if this niche uses random clip selection (skip all validation)
+    _skip_validation = _niche_data.get("skip_validation", False)
 
     # Rechunk Whisper segments first — we match clips per Whisper chunk (1:1)
     log("media", f"Rechunking {len(whisper_segments)} Whisper segments (style={montage_style})...")
@@ -423,41 +421,6 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
     else:
         log("media", "WARNING: rechunk produced 0 chunks — Whisper may have failed")
 
-    # Translate chunk texts to English for clip matching (tags/descriptions are English)
-    chunk_texts_en = translate_sections(chunk_texts, language, project_dir=project_dir, emit=emit)
-
-    # Build validated candidate pool — per language/project (cached in project_dir)
-    val_path     = os.path.join(project_dir, "validated_candidates.json")
-    cur_settings = config.load_settings()
-    fingerprint  = _val_fingerprint(chunk_texts_en, clips_index, cur_settings)
-
-    validated_candidates = None
-    if os.path.exists(val_path):
-        try:
-            with open(val_path, encoding="utf-8") as f:
-                cached = json.load(f)
-            if cached.get("fp") == fingerprint:
-                validated_candidates = [[(item[0], item[1]) for item in sec] for sec in cached["data"]]
-                log("media", f"Validated candidates loaded from cache ({len(validated_candidates)} chunks)")
-            else:
-                log("media", "Validated candidates cache outdated, rebuilding...")
-                os.remove(val_path)
-        except Exception:
-            os.remove(val_path)
-
-    if validated_candidates is None:
-        # Match per Whisper chunk — 1 chunk → top_n candidates
-        _top_n = 5 if _from_movie_library else 10
-        log("media", f"Matching clips per chunk (top_n={_top_n}, movie_library={_from_movie_library}, chunks={len(chunk_texts_en)})...")
-        raw_candidates = match_clips_multi(chunk_texts_en, analyzed_index, top_n=_top_n, emit=emit)
-        validated_candidates = batch_validate_candidates(
-            raw_candidates, chunk_texts_en, cur_settings, emit=emit,
-            movie_library_mode=_from_movie_library,
-        )
-        with open(val_path, "w", encoding="utf-8") as f:
-            json.dump({"fp": fingerprint, "data": validated_candidates}, f, ensure_ascii=False)
-        log("media", f"Validation done: {len(validated_candidates)} chunks")
-
     # Load global used clips tracker (cross-video uniqueness)
     global_used = _load_global_used(prepare_dir)
     log("media", f"Global used clips loaded: {len(global_used)} clips tracked so far")
@@ -466,25 +429,76 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
     session_blocked = _load_session_blocked(prepare_dir)
     log("media", f"Session blocked clips: {len(session_blocked)} clips unavailable this session")
 
-    # Pre-warm stock validation — skip entirely for movie_library mode (only movie clips used)
-    if not _from_movie_library:
-        log("media", "Pre-validating stock clips in batch mode...")
-        from backend.stocks_library import prewarm_stock_validation
-        stock_contexts = _build_stock_contexts(chunks_prebuilt, title)
-        synthetic_segs = [{"text": ctx} for ctx in stock_contexts]
-        prewarm_stock_validation(synthetic_segs, config.load_settings(), emit=emit)
+    if _skip_validation:
+        # ── Random clip selection (no Gemini/Pioneer/translation) ────────────
+        log("media", "Random clip selection mode (skip_validation=true)")
+        clips = _assemble_clips_random(
+            yt_pool, chunks_prebuilt, audio_dur, global_used,
+            session_blocked=session_blocked,
+            niche_data=_niche_data,
+        )
     else:
-        log("media", "movie_library mode — skipping stock pre-warm (only movie clips will be used)")
-        stock_contexts = []
+        # ── Full validation pipeline (Gemini + Pioneer) ─────────────────────
+        # Analyze clips with Gemini (one-time, cached per clip as .analysis.json)
+        with _cand_lock:
+            log("media", "Analyzing clips with Gemini (cached results reused)...")
+            analyzed_index = analyze_all_clips(clips_index, emit=emit)
 
-    clips = _assemble_clips_from_candidates(
-        validated_candidates, whisper_segments, yt_pool, audio_dur, global_used,
-        video_title=title,
-        precomputed_chunks=chunks_prebuilt,
-        precomputed_stock_contexts=stock_contexts,
-        session_blocked=session_blocked,
-        movie_library_mode=_from_movie_library,
-    )
+        # Translate chunk texts to English for clip matching (tags/descriptions are English)
+        chunk_texts_en = translate_sections(chunk_texts, language, project_dir=project_dir, emit=emit)
+
+        # Build validated candidate pool — per language/project (cached in project_dir)
+        val_path     = os.path.join(project_dir, "validated_candidates.json")
+        cur_settings = config.load_settings()
+        fingerprint  = _val_fingerprint(chunk_texts_en, clips_index, cur_settings)
+
+        validated_candidates = None
+        if os.path.exists(val_path):
+            try:
+                with open(val_path, encoding="utf-8") as f:
+                    cached = json.load(f)
+                if cached.get("fp") == fingerprint:
+                    validated_candidates = [[(item[0], item[1]) for item in sec] for sec in cached["data"]]
+                    log("media", f"Validated candidates loaded from cache ({len(validated_candidates)} chunks)")
+                else:
+                    log("media", "Validated candidates cache outdated, rebuilding...")
+                    os.remove(val_path)
+            except Exception:
+                os.remove(val_path)
+
+        if validated_candidates is None:
+            # Match per Whisper chunk — 1 chunk → top_n candidates
+            _top_n = 5 if _from_movie_library else 10
+            log("media", f"Matching clips per chunk (top_n={_top_n}, movie_library={_from_movie_library}, chunks={len(chunk_texts_en)})...")
+            raw_candidates = match_clips_multi(chunk_texts_en, analyzed_index, top_n=_top_n, emit=emit)
+            validated_candidates = batch_validate_candidates(
+                raw_candidates, chunk_texts_en, cur_settings, emit=emit,
+                movie_library_mode=_from_movie_library,
+            )
+            with open(val_path, "w", encoding="utf-8") as f:
+                json.dump({"fp": fingerprint, "data": validated_candidates}, f, ensure_ascii=False)
+            log("media", f"Validation done: {len(validated_candidates)} chunks")
+
+        # Pre-warm stock validation — skip entirely for movie_library mode (only movie clips used)
+        if not _from_movie_library:
+            log("media", "Pre-validating stock clips in batch mode...")
+            from backend.stocks_library import prewarm_stock_validation
+            stock_contexts = _build_stock_contexts(chunks_prebuilt, title)
+            synthetic_segs = [{"text": ctx} for ctx in stock_contexts]
+            prewarm_stock_validation(synthetic_segs, config.load_settings(), emit=emit)
+        else:
+            log("media", "movie_library mode — skipping stock pre-warm (only movie clips will be used)")
+            stock_contexts = []
+
+        clips = _assemble_clips_from_candidates(
+            validated_candidates, whisper_segments, yt_pool, audio_dur, global_used,
+            video_title=title,
+            precomputed_chunks=chunks_prebuilt,
+            precomputed_stock_contexts=stock_contexts,
+            session_blocked=session_blocked,
+            movie_library_mode=_from_movie_library,
+        )
+
     log("media", f"Total clips assembled: {len(clips)}")
     if not clips:
         raise RuntimeError(
@@ -919,6 +933,102 @@ def _assemble_clips_from_candidates(
             flush=True,
         )
 
+    return all_clips
+
+
+def _assemble_clips_random(
+    pool: list,
+    chunks: list,
+    audio_dur: float,
+    global_used: dict,
+    session_blocked: set = None,
+    niche_data: dict = None,
+) -> list:
+    """
+    Random clip assignment: shuffle pool, assign one clip per chunk.
+    No repeats within a single video. Between languages — repeats allowed.
+    Supports watermark_crop from niche config.
+    """
+    import subprocess as _sp
+
+    niche_data = niche_data or {}
+    crop_top = float(niche_data.get("crop_top_pct", 0))
+    crop_bottom = float(niche_data.get("crop_bottom_pct", 0))
+    do_crop = (crop_top > 0 or crop_bottom > 0)
+
+    available = [p for p in pool if os.path.exists(p)]
+    if not available:
+        print("[pipeline:random] ERROR: no clips available in pool", flush=True)
+        return []
+    random.shuffle(available)
+
+    all_clips = []
+    used_in_video = set()
+    pool_idx = 0
+
+    for chunk in chunks:
+        chunk_end = min(chunk["end"], audio_dur)
+        chunk_dur = chunk_end - chunk["start"]
+        if chunk_dur <= 0.1:
+            continue
+
+        clip_path = None
+        start_idx = pool_idx
+        while True:
+            if pool_idx >= len(available):
+                pool_idx = 0
+            candidate = available[pool_idx]
+            pool_idx += 1
+            if candidate not in used_in_video:
+                clip_path = candidate
+                break
+            if pool_idx == start_idx:
+                break
+
+        if not clip_path:
+            print(f"[pipeline:random] WARNING: pool exhausted, reusing clips", flush=True)
+            clip_path = random.choice(available)
+
+        real_dur = _get_duration(clip_path)
+        if real_dur < 0.5:
+            clip_path = random.choice(available)
+            real_dur = _get_duration(clip_path)
+
+        use_dur = min(real_dur, chunk_dur)
+        used_in_video.add(clip_path)
+        global_used[clip_path] = global_used.get(clip_path, 0) + 1
+
+        # Watermark crop: crop top/bottom % then scale back to 1920x1080
+        if do_crop:
+            cropped_path = clip_path + f".crop{int(crop_top)}_{int(crop_bottom)}.mp4"
+            if not os.path.exists(cropped_path):
+                h = 1080
+                crop_y = int(h * crop_top / 100)
+                crop_h = int(h * (1 - crop_top / 100 - crop_bottom / 100))
+                vf = f"crop=1920:{crop_h}:0:{crop_y},scale=1920:1080"
+                try:
+                    _sp.run(
+                        [config.FFMPEG, "-y", "-i", clip_path,
+                         "-vf", vf,
+                         *config.get_video_encoder_args("ultrafast"),
+                         "-an", "-t", str(use_dur), cropped_path],
+                        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, timeout=30,
+                    )
+                except Exception:
+                    cropped_path = clip_path
+            if os.path.exists(cropped_path) and os.path.getsize(cropped_path) > 1000:
+                clip_path = cropped_path
+
+        all_clips.append((clip_path, use_dur))
+
+    # Session blocking
+    if session_blocked is not None:
+        for i, (cp, _) in enumerate(all_clips):
+            if (i + 1) % 3 == 0:
+                session_blocked.add(cp)
+
+    print(f"[pipeline:random] Assembled {len(all_clips)} clips from pool of {len(available)} "
+          f"(unique in video: {len(used_in_video)})", flush=True)
     return all_clips
 
 

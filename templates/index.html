@@ -53,6 +53,21 @@
       <span style="color:#6b7280"><em>Optional — leave empty to use clips already in the Library for this niche.</em></span>
     </p>
     <textarea id="ytUrls" rows="10" placeholder="https://www.youtube.com/watch?v=...&#10;https://www.youtube.com/watch?v=...&#10;(optional — leave empty to use Library clips)" style="width:100%;background:#111;border:1px solid #333;border-radius:6px;padding:10px;color:#fff;font-size:13px;resize:vertical"></textarea>
+
+    <!-- Watermark crop (shown only for niches with watermark_crop=true) -->
+    <div id="cropBlock" style="display:none;margin-top:16px;padding-top:12px;border-top:1px solid #222">
+      <label style="color:#aaa;font-size:13px;font-weight:600">Watermark Crop (% to trim, then scale back to 1920x1080)</label>
+      <div style="display:flex;gap:16px;margin-top:8px">
+        <div>
+          <label style="color:#666;font-size:12px">Top %</label>
+          <input type="number" id="cropTop" value="0" min="0" max="25" step="1" style="width:70px;background:#111;border:1px solid #333;border-radius:6px;padding:6px 8px;color:#fff;font-size:13px">
+        </div>
+        <div>
+          <label style="color:#666;font-size:12px">Bottom %</label>
+          <input type="number" id="cropBottom" value="0" min="0" max="25" step="1" style="width:70px;background:#111;border:1px solid #333;border-radius:6px;padding:6px 8px;color:#fff;font-size:13px">
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Movie pipeline: Select movie -->
@@ -193,10 +208,21 @@ async function onNicheChange() {
       document.getElementById('standardClipBlock').style.display = '';
       document.getElementById('movieClipBlock').style.display = 'none';
     }
+
+    // Show/hide watermark crop fields
+    const cropBlock = document.getElementById('cropBlock');
+    if (data.watermark_crop) {
+      cropBlock.style.display = '';
+      document.getElementById('cropTop').value = data.crop_top_pct || 0;
+      document.getElementById('cropBottom').value = data.crop_bottom_pct || 0;
+    } else {
+      cropBlock.style.display = 'none';
+    }
   } catch (e) {
     // fallback to standard
     document.getElementById('standardClipBlock').style.display = '';
     document.getElementById('movieClipBlock').style.display = 'none';
+    document.getElementById('cropBlock').style.display = 'none';
   }
 }
 
@@ -250,7 +276,7 @@ function resetJob() {
   });
 }
 
-function startProduce() {
+async function startProduce() {
   const langs = [...document.querySelectorAll('#langCheckboxes input:checked')]
     .map(el => el.value);
 
@@ -272,6 +298,19 @@ function startProduce() {
   } else {
     youtube_urls = document.getElementById('ytUrls').value
       .split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
+  }
+
+  // Save crop values to niche config if visible
+  const cropBlock = document.getElementById('cropBlock');
+  if (cropBlock && cropBlock.style.display !== 'none') {
+    const cropTop = parseInt(document.getElementById('cropTop').value) || 0;
+    const cropBottom = parseInt(document.getElementById('cropBottom').value) || 0;
+    const niche = document.getElementById('niche').value;
+    await fetch('/api/niche', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: niche, crop_top_pct: cropTop, crop_bottom_pct: cropBottom})
+    });
   }
 
   _producing = true;
