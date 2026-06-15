@@ -471,7 +471,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         return result
 
     gc_keys = _gigacoder_keys()
-    all_keys = pioneer_keys + gc_keys
+    all_keys = pioneer_keys + gc_keys  # Pioneer first, GigaCoder as fallback workers
     n_workers = max(len(all_keys), 1)
 
     # API call counters (thread-safe)
