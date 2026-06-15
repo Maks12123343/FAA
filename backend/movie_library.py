@@ -225,6 +225,68 @@ def _analyze_batch(items: list, movie_name: str, client, model: str) -> list:
     return results
 
 
+def _analyze_batch_gigacoder(items: list, movie_name: str) -> list:
+    """Fallback: analyze clips via GigaCoder GPT-5.4-mini (multimodal)."""
+    import base64
+    import urllib.request
+
+    settings = config.load_settings()
+    gc_keys = settings.get("gigacoder_api_keys", [])
+    gc_url = settings.get("gigacoder_api_url", "https://www.gigacoder.org/api/v1/chat/completions")
+    gc_model = settings.get("gigacoder_model", "gpt-5.4-mini")
+    if not gc_keys:
+        raise RuntimeError("No gigacoder_api_keys for fallback")
+
+    content_parts = []
+    for i, item in enumerate(items):
+        content_parts.append({"type": "text", "text": f"CLIP {i + 1}:"})
+        for fb in item["frames"]:
+            b64 = base64.b64encode(fb).decode("ascii")
+            content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+
+    content_parts.append({"type": "text", "text": _BATCH_PROMPT.format(n=len(items), movie_name=movie_name)})
+
+    payload = json.dumps({
+        "model": gc_model,
+        "messages": [{"role": "user", "content": content_parts}],
+        "max_tokens": 4096,
+    }).encode("utf-8")
+
+    last_err = None
+    for key in gc_keys:
+        try:
+            req = urllib.request.Request(
+                gc_url, data=payload,
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            text = body["choices"][0]["message"]["content"]
+            text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+            text = re.sub(r"\s*```$", "", text)
+            m = re.search(r"\[.*\]", text, re.DOTALL)
+            raw = json.loads(m.group() if m else text)
+            results = []
+            for i, item in enumerate(items):
+                a = raw[i] if i < len(raw) and isinstance(raw[i], dict) else {}
+                a.setdefault("characters", [])
+                a.setdefault("emotion", "neutral")
+                a.setdefault("scene_type", "quiet_moment")
+                a.setdefault("themes", [])
+                a.setdefault("description", "")
+                a.setdefault("tags", [])
+                a.setdefault("is_blurry", False)
+                a.setdefault("is_static", False)
+                results.append(a)
+            return results
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise RuntimeError(f"GigaCoder analyze fallback failed: {last_err}")
+
+
 def _analysis_cached(clip_path: str) -> dict | None:
     ap = clip_path + ".analysis.json"
     if not os.path.exists(ap):
@@ -316,7 +378,22 @@ def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
                 if is_rate and attempt < 2:
                     time.sleep(15 * (attempt + 1))
                 else:
-                    print(f"[movie_library] Batch error: {e}", flush=True)
+                    print(f"[movie_library] Gemini batch error, trying GigaCoder: {e}", flush=True)
+                    try:
+                        analyses = _analyze_batch_gigacoder(batch, movie_name)
+                        for item, analysis in zip(batch, analyses):
+                            clip = item["clip"]
+                            analysis["id"]   = clip["id"]
+                            analysis["file"] = clip["file"]
+                            _save_analysis(clip["file"], analysis)
+                            with lock:
+                                done[0] += 1
+                                results.append(analysis)
+                            if emit:
+                                emit("movie", f"Analyzed {done[0]}/{len(items)} clips...")
+                        return
+                    except Exception as gc_e:
+                        print(f"[movie_library] GigaCoder fallback also failed: {gc_e}", flush=True)
                     for item in batch:
                         clip = item["clip"]
                         fallback = {
