@@ -29,6 +29,9 @@ from backend.movie_library import (
 from backend.clip_matcher import (
     _validate_movie_clips_text_pioneer_batch,
     _validate_clip_visual_pioneer,
+    _validate_movie_clips_text_gigacoder_batch,
+    _validate_clip_visual_gigacoder,
+    _gigacoder_keys,
 )
 from backend.translator import translate_sections
 
@@ -467,7 +470,9 @@ def _select_clips_for_segments(segments: list, movie_name: str,
             result.append({"file": c["file"], "duration": seg_dur, "id": c.get("id", c["file"])})
         return result
 
-    n_workers = len(pioneer_keys)
+    gc_keys = _gigacoder_keys()
+    all_keys = gc_keys + pioneer_keys
+    n_workers = max(len(all_keys), 1)
 
     # API call counters (thread-safe)
     _api_counts = {"text": 0, "visual": 0}
@@ -593,7 +598,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     text_scores = {}
     text_lock = threading.Lock()
 
-    def _text_validate_worker(seg_indices: list, api_key: str):
+    def _text_validate_worker(seg_indices: list, api_key: str, is_gigacoder: bool = False):
         results = {}
         for si in seg_indices:
             pool = candidates_map[si]
@@ -610,11 +615,14 @@ def _select_clips_for_segments(segments: list, movie_name: str,
                 "characters": c.get("characters", []),
             } for c in pool]
             try:
-                scores = _validate_movie_clips_text_pioneer_batch(items, api_key)
+                if is_gigacoder:
+                    scores = _validate_movie_clips_text_gigacoder_batch(items, api_key)
+                else:
+                    scores = _validate_movie_clips_text_pioneer_batch(items, api_key)
                 scores = [round(min(max(float(s), 0.0), 1.0), 4) for s in scores]
                 _inc("text")
             except Exception as e:
-                print(f"[movie_pipeline] Pioneer text error seg {si}: {e}", flush=True)
+                print(f"[movie_pipeline] text error seg {si}: {e}", flush=True)
                 scores = [0.0] * len(pool)
             results[si] = sorted(zip(pool, scores), key=lambda x: -x[1])
         return results
@@ -628,8 +636,10 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         futures = []
         for w_idx, worker_segs in enumerate(chunks_per_worker):
             if worker_segs:
+                key = all_keys[w_idx]
+                is_gc = w_idx < len(gc_keys)
                 futures.append(pool_exec.submit(
-                    _text_validate_worker, worker_segs, pioneer_keys[w_idx]
+                    _text_validate_worker, worker_segs, key, is_gc
                 ))
         for f in as_completed(futures):
             try:
@@ -645,7 +655,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     seg_results = {}
     seg_results_lock = threading.Lock()
 
-    def _visual_verify_segment(si: int, key: str):
+    def _visual_verify_segment(si: int, key: str, is_gigacoder: bool = False):
         chunk = seg_info[si]["text"]
         context_chunk = f"{global_context}\n\nCurrent narration: {chunk}"
         seg_dur = seg_info[si]["dur"]
@@ -656,14 +666,18 @@ def _select_clips_for_segments(segments: list, movie_name: str,
             fallback = cands[0] if cands else None
             return si, fallback, seg_dur
 
-        # Візуально перевірити топ-2 з текстової валідації
         top2 = scored[:2]
         best_clip = None
         best_visual = -1.0
 
         for clip, txt_score in top2:
             try:
-                visual_score = _validate_clip_visual_pioneer(clip["file"], context_chunk, key)
+                if is_gigacoder:
+                    visual_score = _validate_clip_visual_gigacoder(clip["file"], context_chunk, key)
+                else:
+                    visual_score = _validate_clip_visual_pioneer(clip["file"], context_chunk, key)
+                if visual_score < 0:
+                    visual_score = 0.0
                 _inc("visual")
             except Exception:
                 visual_score = 0.0
@@ -679,8 +693,9 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     with ThreadPoolExecutor(max_workers=n_workers) as pool_exec:
         futures = []
         for si in range(len(seg_info)):
-            key = pioneer_keys[si % n_workers]
-            futures.append(pool_exec.submit(_visual_verify_segment, si, key))
+            key = all_keys[si % n_workers]
+            is_gc = (si % n_workers) < len(gc_keys)
+            futures.append(pool_exec.submit(_visual_verify_segment, si, key, is_gc))
 
         for f in as_completed(futures):
             try:
