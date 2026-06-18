@@ -78,58 +78,37 @@ def _rewrite_script(transcript: str, language: str, video_title: str,
     return full_script
 
 
-MIN_SCRIPT_LENGTH = 20000
+# Length is now relative to the original transcript:
+#   - minimum: 0.9x of original (script can't be shorter)
+#   - maximum: 1.4x of original (script can't be longer — prevents bloat)
+MIN_LENGTH_RATIO = 0.9
+MAX_LENGTH_RATIO = 1.4
 
-def _expand_script(script: str, language: str, video_title: str) -> str:
-    """Loop until script reaches MIN_SCRIPT_LENGTH. Each pass Claude self-checks and continues."""
-    MAX_ATTEMPTS = 3
 
-    for attempt in range(MAX_ATTEMPTS):
-        if len(script) >= MIN_SCRIPT_LENGTH:
-            break
+def _length_bounds(original_length: int) -> tuple:
+    """Return (min_chars, max_chars) for a rewrite based on the original transcript length."""
+    return int(original_length * MIN_LENGTH_RATIO), int(original_length * MAX_LENGTH_RATIO)
 
-        needed = MIN_SCRIPT_LENGTH - len(script)
-        print(f"[rewriter] Expand attempt {attempt + 1}/{MAX_ATTEMPTS}: {len(script)} chars, need {needed} more...", flush=True)
 
-        system = (
-            f"You are a professional scriptwriter reviewing your own voiceover script. "
-            f"The script is too short and may be missing depth, examples, or analysis. "
-            f"Read the current script, assess what important aspects of the topic are underdeveloped or missing, "
-            f"then write a natural continuation that fills those gaps. "
-            f"Requirements: language={language}, approximately {needed} characters, "
-            f"same style and tone as the existing script, "
-            f"voiceover rules (numbers spelled out, smooth sentences, no ads, no channel mentions). "
-            f"Return ONLY the continuation text in a code block, nothing else."
-        )
+def _trim_script(script: str, max_chars: int) -> str:
+    """
+    If script is over max_chars, cut it back at the last sentence boundary
+    that fits within the limit so we don't end mid-sentence.
+    """
+    if len(script) <= max_chars:
+        return script
 
-        user_msg = (
-            f"Video topic: {video_title}\n"
-            f"Target length: {MIN_SCRIPT_LENGTH} chars. Current: {len(script)} chars ({needed} short).\n\n"
-            f"Current script:\n\n{script}"
-        )
-
-        messages  = [{"role": "user", "content": user_msg}]
-        expansion = ""
-        part_num  = 1
-
-        while True:
-            text, stop_reason = _call_claude(system, messages)
-            expansion += ("\n\n" if expansion else "") + _extract_code_block(text)
-            if stop_reason != "max_tokens":
-                break
-            messages.append({"role": "assistant", "content": text})
-            messages.append({"role": "user", "content": "Continue."})
-            part_num += 1
-            if part_num > 3:
-                break
-
-        script = script + "\n\n" + expansion
-        print(f"[rewriter] After attempt {attempt + 1}: {len(script)} chars", flush=True)
-
-    if len(script) < MIN_SCRIPT_LENGTH:
-        print(f"[rewriter] WARNING: still short after {MAX_ATTEMPTS} attempts ({len(script)} chars)", flush=True)
-
-    return script
+    cut = script[:max_chars]
+    # Prefer the last sentence-ending punctuation followed by whitespace/newline
+    for punct in (". ", "! ", "? ", ".\n", "!\n", "?\n"):
+        idx = cut.rfind(punct)
+        if idx >= max_chars * 0.6:  # don't cut too aggressively
+            return cut[:idx + 1].rstrip()
+    # Fallback: cut at last whitespace
+    idx = cut.rfind(" ")
+    if idx >= max_chars * 0.6:
+        return cut[:idx].rstrip()
+    return cut.rstrip()
 
 
 # ── Quality check ─────────────────────────────────────────────────────────────
@@ -143,6 +122,7 @@ def _quality_check_script(script: str, transcript: str, language: str, test_mode
     orig_len   = len(transcript)
     script_len = len(script)
     pct        = round(script_len / orig_len * 100) if orig_len else 0
+    min_chars, max_chars = _length_bounds(orig_len)
 
     system = (
         "You are a strict quality control editor for voiceover scripts. "
@@ -160,15 +140,16 @@ def _quality_check_script(script: str, transcript: str, language: str, test_mode
         f"REWRITTEN SCRIPT ({script_len} chars, {pct}% of original):\n{script_preview}\n\n"
         f"{'...[truncated]' if script_len > 4000 else ''}\n\n"
         f"Evaluate the rewritten script on these criteria:\n"
-        f"1. LENGTH: Is it at least 90% of the original? "
-        f"(original={orig_len} chars, rewritten={script_len} chars = {pct}%)\n"
+        f"1. LENGTH: Must be between 90% and 140% of the original. "
+        f"(original={orig_len} chars, rewritten={script_len} chars = {pct}%, "
+        f"allowed range: {min_chars}-{max_chars} chars)\n"
         f"2. COMPLETENESS: Are all key events, facts, and narrative beats preserved?\n"
         f"3. VOICEOVER QUALITY: Does it sound natural when read aloud? "
         f"No heavy sentences, no awkward phrasing?\n"
         f"4. NO REPETITION: Is it free of unnecessary repetition or filler?\n"
         f"5. LANGUAGE: Is it correctly and fluently written in {language}?\n"
         f"6. UNIQUENESS: Is it genuinely rewritten (not just synonymized)?\n\n"
-        f"Scoring: 1-10. PASSED if score >= 7 AND length >= 90% of original.\n\n"
+        f"Scoring: 1-10. PASSED if score >= 7 AND length is between 90% and 140% of original.\n\n"
         f"Reply with JSON only, no markdown:\n"
         f'{{\"score\": 8, \"passed\": true, \"issues\": [\"issue1\", \"issue2\"], '
         f'\"feedback\": \"Specific actionable feedback for improvement\"}}'
@@ -186,17 +167,25 @@ def _quality_check_script(script: str, transcript: str, language: str, test_mode
         feedback = data.get("feedback", "")
         issues   = data.get("issues", [])
 
-        # Додаткова перевірка довжини незалежно від Claude (skip in test mode)
-        if not test_mode and script_len < orig_len * 0.90:
-            passed   = False
-            feedback = (
-                f"Script is too short: {script_len} chars ({pct}% of original {orig_len} chars). "
-                f"Must be at least 90%. " + feedback
-            )
+        # Незалежна перевірка довжини (skip in test mode)
+        if not test_mode:
+            if script_len < min_chars:
+                passed   = False
+                feedback = (
+                    f"Script is too short: {script_len} chars ({pct}% of original {orig_len} chars). "
+                    f"Must be at least {min_chars} chars (90% of original). " + feedback
+                )
+            elif script_len > max_chars:
+                passed   = False
+                feedback = (
+                    f"Script is too long: {script_len} chars ({pct}% of original {orig_len} chars). "
+                    f"Must be at most {max_chars} chars (140% of original). "
+                    f"Rewrite more concisely while preserving all key events. " + feedback
+                )
 
         print(
             f"[rewriter] Quality check: score={score:.1f}/10, passed={passed}, "
-            f"length={pct}%, issues={issues}",
+            f"length={pct}% (range {min_chars}-{max_chars}), issues={issues}",
             flush=True,
         )
         return passed, feedback
@@ -309,12 +298,19 @@ def rewrite_all(
     """
     script   = ""
     feedback = ""
+    orig_len = len(transcript)
+    min_chars, max_chars = _length_bounds(orig_len)
 
     if test_mode:
         print("[rewriter] TEST MODE: using short prompt (~750 words), skipping quality check", flush=True)
         script = _rewrite_script(transcript, language, source_title, test_mode=True)
         print(f"[rewriter] TEST MODE: script done ({len(script)} chars)", flush=True)
     else:
+        print(
+            f"[rewriter] Length target: {min_chars}-{max_chars} chars "
+            f"(original={orig_len}, range 0.9x-1.4x)",
+            flush=True,
+        )
         for attempt in range(MAX_REWRITE_ATTEMPTS):
             print(
                 f"[rewriter] Rewrite attempt {attempt + 1}/{MAX_REWRITE_ATTEMPTS}"
@@ -322,7 +318,16 @@ def rewrite_all(
                 flush=True,
             )
             script = _rewrite_script(transcript, language, source_title, feedback=feedback, test_mode=False)
-            script = _expand_script(script, language, source_title)
+
+            # Hard cap on length: if model overshot 1.4x, trim at sentence boundary
+            if len(script) > max_chars:
+                old_len = len(script)
+                script  = _trim_script(script, max_chars)
+                print(
+                    f"[rewriter] Script trimmed from {old_len} to {len(script)} chars "
+                    f"(max allowed: {max_chars})",
+                    flush=True,
+                )
 
             passed, feedback = _quality_check_script(script, transcript, language, test_mode=False)
             if passed:

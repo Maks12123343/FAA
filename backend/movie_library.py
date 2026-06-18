@@ -22,20 +22,49 @@ FFPROBE = config.FFPROBE
 SCENE_THRESHOLD    = 0.35
 CLIP_MIN           = 2.0
 CLIP_MAX           = 5.0
-BATCH_SIZE         = 8      # кліпів за один Gemini запит
-VALIDATION_THRESHOLD = 0.85  # Gemini validation score (як в FAA)
+BATCH_SIZE         = 1      # ОДИН кліп за один запит — щоб модель не плутала кадри між кліпами
 
-# Семантичний пошук: мінімальна косинусна близькість, нижче якої кліп
-# вважається нерелевантним кандидатом. Використовується тільки для відсіву
-# відвертого мотлоху — фінально вирішує Pioneer-валідація.
-SEMANTIC_MIN_SIM = 0.20
+# Round-robin counters for API key rotation across parallel workers.
+# Each call to _next_*_key() returns the next key in sequence, so concurrent
+# batches spread load evenly instead of hammering key #0.
+_gc_key_counter   = 0
+_gc_key_lock      = threading.Lock()
+_pio_key_counter  = 0
+_pio_key_lock     = threading.Lock()
+
+
+def _next_gigacoder_key(keys: list) -> tuple:
+    """Pick a starting key index round-robin so parallel workers spread load."""
+    global _gc_key_counter
+    if not keys:
+        return 0, []
+    with _gc_key_lock:
+        start = _gc_key_counter % len(keys)
+        _gc_key_counter += 1
+    # Build a rotated key list: starting key first, then the rest as fallbacks
+    rotated = keys[start:] + keys[:start]
+    return start, rotated
+
+
+def _next_pioneer_key(keys: list) -> tuple:
+    global _pio_key_counter
+    if not keys:
+        return 0, []
+    with _pio_key_lock:
+        start = _pio_key_counter % len(keys)
+        _pio_key_counter += 1
+    rotated = keys[start:] + keys[:start]
+    return start, rotated
+
+
+VALIDATION_THRESHOLD = 0.85  # Gemini validation score (як в FAA)
 
 
 def _is_gemini_auth_error(err) -> bool:
     text = str(err).lower()
     return any(x in text for x in (
         "401", "403", "permission", "credentials",
-        "unauthenticated", "unauthorized",
+        "unauthenticated", "unauthorized", "invalid_argument",
     ))
 
 
@@ -57,10 +86,18 @@ def _index_path(movie_name: str) -> str:
 # ── FFmpeg helpers ─────────────────────────────────────────────────────────────
 
 def _get_duration(path: str) -> float:
+    # Windows + eventlet + capture_output deadlocks. Use DEVNULL pipes — the
+    # JSON output is parsed via stdout, but we still avoid the deadlock by
+    # NOT using capture_output (which spawns reader threads that don't play
+    # well with monkey-patched threading).
     try:
         r = subprocess.run(
             [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "json", path],
-            capture_output=True, text=True, timeout=120,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=120,
         )
         return float(json.loads(r.stdout)["format"]["duration"])
     except Exception:
@@ -72,37 +109,102 @@ def _cut_clip(src: str, out: str, start: float, duration: float):
         [FFMPEG, "-y", "-ss", f"{start:.3f}", "-i", src,
          "-t", f"{duration:.3f}",
          "-c", "copy", "-an", out],
-        capture_output=True, timeout=300,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=300,
     )
 
 
-def _detect_scene_timestamps(video_path: str, total_dur: float) -> list:
-    r = subprocess.run(
-        [FFMPEG, "-threads", "6", "-i", video_path,
+def _detect_scene_timestamps(video_path: str, total_dur: float, emit=None) -> list:
+    """
+    Run FFmpeg scene detection while streaming progress from stderr.
+    FFmpeg outputs lines like 'time=00:23:45.67' as it processes — we parse
+    those to show real-time progress through the file. No timeout: process
+    runs as long as it needs to.
+    """
+    proc = subprocess.Popen(
+        [FFMPEG, "-threads", "0", "-i", video_path,
          "-vf", f"select=gt(scene\\,{SCENE_THRESHOLD}),showinfo",
          "-vsync", "vfr", "-f", "null", "-"],
-        capture_output=True, text=True, timeout=600,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
     )
+
     timestamps = [0.0]
-    if r.returncode == 0:
-        for line in r.stderr.splitlines():
-            if "showinfo" in line and "pts_time:" in line:
-                m = re.search(r"pts_time:(\d+\.?\d*)", line)
+    last_emit  = 0.0
+    progress_re = re.compile(r"time=(\d+):(\d+):(\d+\.?\d*)")
+    pts_re      = re.compile(r"pts_time:(\d+\.?\d*)")
+    start_time  = time.time()
+
+    if emit:
+        emit("movie", f"Scene detection started (file is {total_dur/60:.1f} min)")
+
+    try:
+        for line in proc.stderr:
+            # Collect scene change timestamps from showinfo output
+            if "showinfo" in line:
+                m = pts_re.search(line)
                 if m:
                     t = float(m.group(1))
                     if t > 0.1:
                         timestamps.append(t)
+
+            # Stream progress from FFmpeg's time= reports
+            m = progress_re.search(line)
+            if m:
+                hh, mm, ss = m.groups()
+                cur = int(hh) * 3600 + int(mm) * 60 + float(ss)
+                if cur - last_emit >= 30 or cur >= total_dur - 1:
+                    last_emit = cur
+                    pct      = min(100, int(cur / max(1, total_dur) * 100))
+                    elapsed  = time.time() - start_time
+                    msg = (
+                        f"Scene detection: {cur/60:.1f}/{total_dur/60:.1f} min "
+                        f"({pct}%) — found {len(timestamps)-1} scenes, "
+                        f"elapsed {elapsed/60:.1f} min"
+                    )
+                    print(f"[movie_library] {msg}", flush=True)
+                    if emit:
+                        emit("movie", msg)
+
+        rc = proc.wait()
+        if rc != 0:
+            print(f"[movie_library] FFmpeg scene detect exited with code {rc}", flush=True)
+
+    except Exception as e:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise RuntimeError(f"Scene detection failed: {e}") from e
+
     timestamps.append(total_dur)
-    return sorted(set(timestamps))
+    result = sorted(set(timestamps))
+    done_msg = f"Scene detection done: {len(result)-2} scene cuts in {(time.time()-start_time)/60:.1f} min"
+    print(f"[movie_library] {done_msg}", flush=True)
+    if emit:
+        emit("movie", done_msg)
+    return result
 
 
 def _cut_by_scenes(src_path: str, out_dir: str, movie_id: str,
                    total_dur: float, emit=None) -> list:
-    scene_times = _detect_scene_timestamps(src_path, total_dur)
-    clips = []
-    idx   = 0
+    """
+    Cut the source video into clips based on detected scene changes.
+    """
+    scene_times = _detect_scene_timestamps(src_path, total_dur, emit=emit)
 
-    for i in range(len(scene_times) - 1):
+    clips      = []
+    idx        = 0
+    total_segs = len(scene_times) - 1
+    last_emit  = time.time()
+    cut_start  = time.time()
+    print(f"[movie_library] Starting clip cutting: {total_segs} segments to process", flush=True)
+
+    for i in range(total_segs):
         scene_start = scene_times[i]
         scene_end   = scene_times[i + 1]
         scene_dur   = scene_end - scene_start
@@ -139,8 +241,21 @@ def _cut_by_scenes(src_path: str, out_dir: str, movie_id: str,
                     idx += 1
                 t += chunk
 
-        if emit and (i + 1) % 20 == 0:
-            emit("movie", f"Cutting: {idx} clips so far...")
+        # Emit progress at most once every 2 seconds (and on every 25th segment)
+        now = time.time()
+        if now - last_emit >= 2.0 or (i + 1) % 25 == 0:
+            last_emit = now
+            pct       = int((i + 1) / max(1, total_segs) * 100)
+            elapsed   = now - cut_start
+            msg       = f"Cutting: {idx} clips so far ({i+1}/{total_segs} segments, {pct}%, elapsed {elapsed:.0f}s)..."
+            print(f"[movie_library] {msg}", flush=True)
+            if emit:
+                emit("movie", msg)
+
+    final_msg = f"Cutting done: {idx} clips in {(time.time()-cut_start)/60:.1f} min"
+    print(f"[movie_library] {final_msg}", flush=True)
+    if emit:
+        emit("movie", final_msg)
 
     return clips
 
@@ -160,38 +275,102 @@ def _gemini():
 
 
 def _frame_bytes(clip_path: str, ratio: float) -> bytes:
+    """
+    Extract a single JPEG frame from a clip at relative position `ratio` (0-1).
+    Caches the frame to disk next to the clip — second run reads from cache
+    instead of re-running FFmpeg.
+
+    Windows + eventlet pitfalls avoided here:
+      1. NO capture_output=True — that spawns Popen reader threads which
+         deadlock under eventlet's monkey-patched threading on Windows.
+      2. NO NamedTemporaryFile keeping a handle open while ffmpeg writes —
+         we use mkstemp + os.close before launching the subprocess so Windows
+         doesn't lock the path.
+    """
+    # Map ratio → label for the cache filename
+    if ratio <= 0.01:
+        label = "start"
+    elif ratio >= 0.99:
+        label = "end"
+    else:
+        label = "mid"
+    cache_path = clip_path + f".{label}.jpg"
+
+    # Reuse cached frame if it exists and is non-empty
+    if os.path.exists(cache_path):
+        try:
+            if os.path.getsize(cache_path) > 0:
+                with open(cache_path, "rb") as f:
+                    return f.read()
+        except Exception:
+            pass
+
     dur = _get_duration(clip_path)
     ts  = max(0.01, dur * max(0.0, min(1.0, ratio)))
-    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-    tmp.close()
-    subprocess.run(
-        [FFMPEG, "-y", "-ss", f"{ts:.3f}", "-i", clip_path,
-         "-vframes", "1", "-vf", "scale=640:-2", "-q:v", "4", tmp.name],
-        capture_output=True, timeout=120,
-    )
+
+    # Write directly to the cache_path so we keep the JPEG for next time
     data = b""
-    if os.path.exists(tmp.name):
-        with open(tmp.name, "rb") as f:
-            data = f.read()
-        os.unlink(tmp.name)
+    try:
+        subprocess.run(
+            [FFMPEG, "-y", "-ss", f"{ts:.3f}", "-i", clip_path,
+             "-vframes", "1", "-vf", "scale=1024:-2", "-q:v", "3", cache_path],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=120,
+        )
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+            with open(cache_path, "rb") as f:
+                data = f.read()
+    except Exception as e:
+        print(f"[movie_library] _frame_bytes error: {e}", flush=True)
+
     return data
 
 
 _BATCH_PROMPT = """\
-Analyze {n} video clips from the movie "{movie_name}".
-For each clip, 3 frames are shown (start/middle/end), labeled CLIP 1, CLIP 2, etc.
+You are looking at 3 frames extracted from a single short video clip (start, middle, end).
 
-For EACH clip return a JSON object with:
-- characters: list of character names visible (e.g. "Tigress", "Po", "Shifu")
+CRITICAL RULES — read carefully:
+1. Describe ONLY what is actually visible in these 3 frames. Do NOT invent characters, locations or actions.
+2. If you cannot clearly identify a character — leave the characters list EMPTY. Do NOT guess.
+3. If the frames are too dark, blurry, or contain only text/credits/logos — say so honestly and set is_blurry: true.
+4. If all 3 frames look almost identical — set is_static: true.
+5. Do NOT use the movie title to guess what is happening. Look at the actual pixels.
+
+Return a JSON object with these fields:
+- characters: list of character names you can clearly identify (or [] if uncertain)
 - emotion: one of: joy, sadness, fear, anger, determination, vulnerability, shame, guilt, pride, neutral
-- scene_type: one of: training, fight, emotional_dialogue, rejection, acceptance, flashback, celebration, isolation, comedy, action, quiet_moment, transformation, credits, title_card
+- scene_type: one of: training, fight, emotional_dialogue, rejection, acceptance, flashback, celebration, isolation, comedy, action, quiet_moment, transformation, credits, title_card, landscape, transition
 - themes: 2-4 from: [growth, trauma, impostor_syndrome, false_self, identity, rejection, acceptance, vulnerability, shame, fear, determination, healing, connection, isolation, anger, betrayal, grief, love, trust]
-- description: 1-2 sentence visual description
-- tags: 8-12 topic tags
+- description: 1-2 sentences describing EXACTLY what you see (objects, lighting, composition). Be literal.
+- tags: 5-10 concrete visual tags based on what you actually see (objects, environment, mood)
+- is_blurry: true if the frames are out of focus, too dark, or contain only text/logos
+- is_static: true if all 3 frames look nearly identical
+
+Reply with a JSON array containing EXACTLY ONE object. No markdown, no extra commentary."""
+
+
+# Single-clip prompt — much more accurate than batch because the model can't
+# mix up which frames belong to which clip when there's only one clip.
+_SINGLE_PROMPT = """\
+You are looking at exactly 3 frames from ONE short video clip from the movie "{movie_name}".
+The frames are shown in order: start, middle, end of the clip.
+
+Analyze ONLY what you actually see in these 3 frames. Do NOT guess based on the movie name.
+If a frame is dark, empty, or has no characters — say so honestly. Do not invent characters.
+
+Return a JSON object with:
+- characters: list of character names ACTUALLY visible (empty list [] if none / unclear / not characters from the movie)
+- emotion: one of: joy, sadness, fear, anger, determination, vulnerability, shame, guilt, pride, neutral
+- scene_type: one of: training, fight, emotional_dialogue, rejection, acceptance, flashback, celebration, isolation, comedy, action, quiet_moment, transformation
+- themes: 2-4 from: [growth, trauma, impostor_syndrome, false_self, identity, rejection, acceptance, vulnerability, shame, fear, determination, healing, connection, isolation, anger, betrayal, grief, love, trust]
+- description: 1-2 sentences describing ONLY what is visually shown in these 3 frames
+- tags: 6-12 specific tags for what is shown (location, objects, actions, mood)
 - is_blurry: true if most frames are out of focus or heavily motion-blurred
 - is_static: true if all 3 frames look nearly identical (frozen/no motion)
 
-Reply ONLY with a JSON array of exactly {n} objects, no markdown."""
+Reply ONLY with a single JSON object, no markdown, no commentary."""
 
 
 def _analyze_batch(items: list, movie_name: str, client, model: str) -> list:
@@ -202,7 +381,7 @@ def _analyze_batch(items: list, movie_name: str, client, model: str) -> list:
         contents.append(f"CLIP {i + 1}:")
         for fb in item["frames"]:
             contents.append(types.Part.from_bytes(data=fb, mime_type="image/jpeg"))
-    contents.append(_BATCH_PROMPT.format(n=len(items), movie_name=movie_name))
+    contents.append(_BATCH_PROMPT)
 
     r = client.models.generate_content(model=model, contents=contents)
     text = re.sub(r"^```(?:json)?\s*", "", r.text.strip())
@@ -225,51 +404,78 @@ def _analyze_batch(items: list, movie_name: str, client, model: str) -> list:
     return results
 
 
-def _analyze_batch_gigacoder(items: list, movie_name: str) -> list:
-    """Fallback: analyze clips via GigaCoder GPT-5.4-mini (multimodal)."""
+def _analyze_single_gigacoder(item: dict, movie_name: str) -> dict:
+    """
+    Analyze ONE clip via GigaCoder. Much more accurate than batching because
+    the model can't confuse which frames belong to which clip — there's only one.
+    Takes ~2-4s per clip but eliminates hallucinated descriptions.
+    """
     import base64
     import urllib.request
 
     settings = config.load_settings()
-    gc_keys = settings.get("gigacoder_api_keys", [])
-    gc_url = settings.get("gigacoder_api_url", "https://www.gigacoder.org/api/v1/chat/completions")
+    gc_keys  = settings.get("gigacoder_api_keys", [])
+    gc_url   = settings.get("gigacoder_api_url", "https://www.gigacoder.org/api/v1/chat/completions")
     gc_model = settings.get("gigacoder_model", "gpt-5.4-mini")
     if not gc_keys:
-        raise RuntimeError("No gigacoder_api_keys for fallback")
+        raise RuntimeError("No gigacoder_api_keys configured")
 
-    content_parts = []
-    for i, item in enumerate(items):
-        content_parts.append({"type": "text", "text": f"CLIP {i + 1}:"})
-        for fb in item["frames"]:
-            b64 = base64.b64encode(fb).decode("ascii")
-            content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+    # Build content: 3 labeled frames + analysis prompt
+    content_parts = [{"type": "text", "text": "Frame 1 (start of clip):"}]
+    if len(item["frames"]) >= 1:
+        b64 = base64.b64encode(item["frames"][0]).decode("ascii")
+        content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+    if len(item["frames"]) >= 2:
+        content_parts.append({"type": "text", "text": "Frame 2 (middle of clip):"})
+        b64 = base64.b64encode(item["frames"][1]).decode("ascii")
+        content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+    if len(item["frames"]) >= 3:
+        content_parts.append({"type": "text", "text": "Frame 3 (end of clip):"})
+        b64 = base64.b64encode(item["frames"][2]).decode("ascii")
+        content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
 
-    content_parts.append({"type": "text", "text": _BATCH_PROMPT.format(n=len(items), movie_name=movie_name)})
+    content_parts.append({"type": "text", "text": _SINGLE_PROMPT.format(movie_name=movie_name)})
 
     payload = json.dumps({
         "model": gc_model,
-        "messages": [{"role": "user", "content": content_parts}],
-        "max_tokens": 4096,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a precise visual analyzer. Describe ONLY what is visible in the frames. "
+                    "Never invent characters or scenes that aren't shown. "
+                    "If frames are dark, empty, or unclear, say so honestly. "
+                    "Reply with valid JSON only — no markdown, no commentary."
+                ),
+            },
+            {"role": "user", "content": content_parts},
+        ],
+        "max_tokens": 1024,
     }).encode("utf-8")
 
     last_err = None
-    for key in gc_keys:
-        try:
-            req = urllib.request.Request(
-                gc_url, data=payload,
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=180) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-            text = body["choices"][0]["message"]["content"]
-            text = re.sub(r"^```(?:json)?\s*", "", text.strip())
-            text = re.sub(r"\s*```$", "", text)
-            m = re.search(r"\[.*\]", text, re.DOTALL)
-            raw = json.loads(m.group() if m else text)
-            results = []
-            for i, item in enumerate(items):
-                a = raw[i] if i < len(raw) and isinstance(raw[i], dict) else {}
+    start_idx, rotated_keys = _next_gigacoder_key(gc_keys)
+    for key in rotated_keys:
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(
+                    gc_url, data=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {key}",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        "Accept": "application/json",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                text = body["choices"][0]["message"]["content"]
+                text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+                text = re.sub(r"\s*```$", "", text)
+                m = re.search(r"\{.*\}", text, re.DOTALL)
+                a = json.loads(m.group() if m else text)
                 a.setdefault("characters", [])
                 a.setdefault("emotion", "neutral")
                 a.setdefault("scene_type", "quiet_moment")
@@ -278,13 +484,115 @@ def _analyze_batch_gigacoder(items: list, movie_name: str) -> list:
                 a.setdefault("tags", [])
                 a.setdefault("is_blurry", False)
                 a.setdefault("is_static", False)
-                results.append(a)
-            return results
-        except Exception as e:
-            last_err = e
-            continue
+                return a
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                # Retry on network/DNS errors with backoff (1s, 3s, 7s)
+                is_network = any(s in err_str for s in (
+                    "lookup timed out", "11002", "timed out", "connection",
+                    "temporarily unavailable", "name or service",
+                ))
+                if is_network and attempt < 2:
+                    time.sleep([1, 3, 7][attempt])
+                    continue
+                # Other errors — break inner loop, try next key
+                break
 
-    raise RuntimeError(f"GigaCoder analyze fallback failed: {last_err}")
+    raise RuntimeError(f"GigaCoder single-clip analyze failed: {last_err}")
+
+
+def _analyze_batch_gigacoder(items: list, movie_name: str) -> list:
+    """
+    Analyze a batch of clips by calling _analyze_single_gigacoder on each one.
+    True batching (multiple clips in one request) caused severe hallucinations
+    because the model mixed up frames between clips. Single-clip analysis is
+    slower but accurate — and since we now process batches sequentially, total
+    throughput is the same.
+    """
+    results = []
+    for item in items:
+        try:
+            a = _analyze_single_gigacoder(item, movie_name)
+        except Exception as e:
+            print(f"[movie_library] Single-clip analysis failed for "
+                  f"{item['clip'].get('id', '?')}: {e}", flush=True)
+            raise
+        results.append(a)
+    return results
+
+
+def _analyze_batch_pioneer(items: list, movie_name: str) -> list:
+    """Fallback: analyze clips via Pioneer API (multimodal, base64 frames)."""
+    import base64
+    import urllib.request
+
+    settings = config.load_settings()
+    api_keys = settings.get("pioneer_api_keys", [])
+    api_url = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
+    api_model = settings.get("pioneer_model", "gemini-3.5-flash")
+    if not api_keys:
+        raise RuntimeError("No pioneer_api_keys configured")
+
+    content_parts = []
+    for i, item in enumerate(items):
+        content_parts.append({"type": "text", "text": f"CLIP {i + 1}:"})
+        for fb in item["frames"]:
+            b64 = base64.b64encode(fb).decode("ascii")
+            content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+
+    content_parts.append({"type": "text", "text": _BATCH_PROMPT})
+
+    payload = json.dumps({
+        "model": api_model,
+        "messages": [{"role": "user", "content": content_parts}],
+        "max_tokens": 4096,
+    }).encode("utf-8")
+
+    last_err = None
+    start_idx, rotated_keys = _next_pioneer_key(api_keys)
+    for offset, key in enumerate(rotated_keys):
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(
+                    api_url, data=payload,
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=180) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                text = body["choices"][0]["message"]["content"]
+                text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+                text = re.sub(r"\s*```$", "", text)
+                m = re.search(r"\[.*\]", text, re.DOTALL)
+                raw = json.loads(m.group() if m else text)
+                results = []
+                for i, item in enumerate(items):
+                    a = raw[i] if i < len(raw) and isinstance(raw[i], dict) else {}
+                    a.setdefault("characters", [])
+                    a.setdefault("emotion", "neutral")
+                    a.setdefault("scene_type", "quiet_moment")
+                    a.setdefault("themes", [])
+                    a.setdefault("description", "")
+                    a.setdefault("tags", [])
+                    a.setdefault("is_blurry", False)
+                    a.setdefault("is_static", False)
+                    results.append(a)
+                return results
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                # Retry on network/DNS errors with backoff
+                is_network = any(s in err_str for s in (
+                    "lookup timed out", "11002", "timed out", "connection",
+                    "temporarily unavailable", "name or service",
+                ))
+                if is_network and attempt < 2:
+                    time.sleep([1, 3, 7][attempt])
+                    continue
+                break
+
+    raise RuntimeError(f"Pioneer analyze failed: {last_err}")
 
 
 def _analysis_cached(clip_path: str) -> dict | None:
@@ -316,7 +624,14 @@ def _save_analysis(clip_path: str, analysis: dict):
 
 
 def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    # eventlet's monkey-patched threading + subprocess works correctly with
+    # eventlet.GreenPool. Plain ThreadPoolExecutor hangs under eventlet.
+    try:
+        import eventlet
+        _USE_GREEN_POOL = True
+    except ImportError:
+        _USE_GREEN_POOL = False
+    from concurrent.futures import ThreadPoolExecutor
 
     to_analyze     = []
     cached_results = []
@@ -336,29 +651,74 @@ def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
     print(f"[movie_library] Analyzing {len(to_analyze)} clips "
           f"({len(cached_results)} cached)...", flush=True)
 
-    def _extract_frames(clip):
-        frames = []
-        for ratio in [0.0, 0.5, 1.0]:
-            fb = _frame_bytes(clip["file"], ratio)
-            if fb:
-                frames.append(fb)
-        return {"clip": clip, "frames": frames}
+    # ── Frame extraction with progress ─────────────────────────────────────
+    # Sequential extraction — no thread/green pools.
+    # eventlet's monkey-patching makes any pool unreliable with subprocess on
+    # Windows; sequential is dead-simple and never hangs. ~0.1-0.3s per clip
+    # so even 1500 clips finish in 5-8 min, with live per-clip progress.
+    frames_start = time.time()
+    total_clips  = len(to_analyze)
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        items = list(pool.map(_extract_frames, to_analyze))
-    items = [it for it in items if it["frames"]]
+    start_msg = f"Starting frame extraction for {total_clips} clips (sequential)..."
+    print(f"[movie_library] {start_msg}", flush=True)
+    if emit:
+        emit("movie", start_msg)
+
+    items = []
+    last_log = time.time()
+
+    for d, clip in enumerate(to_analyze, start=1):
+        frames = []
+        try:
+            for ratio in [0.0, 0.5, 1.0]:
+                fb = _frame_bytes(clip["file"], ratio)
+                if fb:
+                    frames.append(fb)
+        except Exception as e:
+            print(f"[movie_library] Frame extract error for {clip.get('id', '?')}: {e}", flush=True)
+
+        if frames:
+            items.append({"clip": clip, "frames": frames})
+
+        # Log every clip for first 5, then every 10 clips, OR every 5 seconds
+        now = time.time()
+        if d <= 5 or d % 10 == 0 or d == total_clips or (now - last_log) >= 5:
+            last_log = now
+            elapsed  = now - frames_start
+            rate     = d / max(0.1, elapsed)
+            eta      = (total_clips - d) / max(0.1, rate)
+            pct      = int(d / total_clips * 100)
+            msg = (
+                f"Extracting frames: {d}/{total_clips} "
+                f"({pct}%, {rate:.1f}/s, ~{eta/60:.1f}min left)"
+            )
+            print(f"[movie_library] {msg}", flush=True)
+            if emit:
+                emit("movie", msg)
+            # Yield to eventlet so SocketIO can flush messages to UI
+            try:
+                import eventlet as _ev
+                _ev.sleep(0)
+            except Exception:
+                pass
+
+    extract_msg = f"Frame extraction done: {len(items)} clips ready in {(time.time()-frames_start)/60:.1f} min"
+    print(f"[movie_library] {extract_msg}", flush=True)
+    if emit:
+        emit("movie", extract_msg)
 
     batches     = [items[i:i + BATCH_SIZE] for i in range(0, len(items), BATCH_SIZE)]
     done        = [0]
     lock        = threading.Lock()
     results     = []
     worker_errors = []
-    client, model = _gemini()
 
     def _process_batch(batch):
         for attempt in range(3):
             try:
-                analyses = _analyze_batch(batch, movie_name, client, model)
+                # Pioneer is the PRIMARY analyzer (more accurate descriptions,
+                # no Cloudflare delays). GigaCoder is the fallback.
+                analyses = _analyze_batch_pioneer(batch, movie_name)
                 for item, analysis in zip(batch, analyses):
                     clip = item["clip"]
                     analysis["id"]   = clip["id"]
@@ -372,13 +732,12 @@ def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
                 return
             except Exception as e:
                 err = str(e).lower()
-                if _is_gemini_auth_error(e):
-                    raise RuntimeError(f"[movie_library] Gemini auth/config error: {e}") from e
                 is_rate = "429" in str(e) or "quota" in err or "resource_exhausted" in err
                 if is_rate and attempt < 2:
                     time.sleep(15 * (attempt + 1))
                 else:
-                    print(f"[movie_library] Gemini batch error, trying GigaCoder: {e}", flush=True)
+                    # Fallback to GigaCoder
+                    print(f"[movie_library] Pioneer failed, trying GigaCoder: {e}", flush=True)
                     try:
                         analyses = _analyze_batch_gigacoder(batch, movie_name)
                         for item, analysis in zip(batch, analyses):
@@ -392,8 +751,8 @@ def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
                             if emit:
                                 emit("movie", f"Analyzed {done[0]}/{len(items)} clips...")
                         return
-                    except Exception as gc_e:
-                        print(f"[movie_library] GigaCoder fallback also failed: {gc_e}", flush=True)
+                    except Exception as fb_e:
+                        print(f"[movie_library] GigaCoder fallback also failed: {fb_e}", flush=True)
                     for item in batch:
                         clip = item["clip"]
                         fallback = {
@@ -409,14 +768,48 @@ def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
                             results.append(fallback)
                     return
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(_process_batch, b) for b in batches]
-        for f in as_completed(futures):
+    # Process analysis batches with bounded parallelism for the HTTP calls.
+    # Frame extraction was already sequential. The remaining work is HTTP-only
+    # (Pioneer/GigaCoder API), which works fine under eventlet's monkey-patched
+    # socket. We run up to PARALLEL_API requests at a time so all 4 Pioneer keys
+    # are exercised simultaneously instead of one-by-one.
+    PARALLEL_API = 4
+    api_start    = time.time()
+
+    try:
+        import eventlet as _ev
+        _USE_EVENTLET = True
+    except Exception:
+        _USE_EVENTLET = False
+
+    if _USE_EVENTLET and len(batches) > 1:
+        sem = _ev.semaphore.Semaphore(PARALLEL_API)
+
+        def _wrapped(batch, b_idx):
+            with sem:
+                try:
+                    _process_batch(batch)
+                except Exception as e:
+                    print(f"[movie_library] Worker error on batch {b_idx}: {e}", flush=True)
+                    worker_errors.append(e)
+
+        threads = [_ev.spawn(_wrapped, b, i) for i, b in enumerate(batches, start=1)]
+        for t in threads:
+            t.wait()
+    else:
+        for b_idx, b in enumerate(batches, start=1):
             try:
-                f.result()
+                _process_batch(b)
             except Exception as e:
-                print(f"[movie_library] Worker error: {e}", flush=True)
+                print(f"[movie_library] Worker error on batch {b_idx}: {e}", flush=True)
                 worker_errors.append(e)
+            if _USE_EVENTLET:
+                _ev.sleep(0)
+
+    api_done_msg = f"API analysis done: {done[0]}/{len(items)} clips in {(time.time()-api_start)/60:.1f} min"
+    print(f"[movie_library] {api_done_msg}", flush=True)
+    if emit:
+        emit("movie", api_done_msg)
 
     if worker_errors:
         raise RuntimeError(f"[movie_library] Clip analysis failed: {worker_errors[0]}")
@@ -627,46 +1020,6 @@ def make_uniq_params() -> dict:
     }
 
 
-# ── Семантичні вектори ───────────────────────────────────────────────────────
-
-def _attach_embeddings(clips: list, emit=None) -> int:
-    """
-    Дорахувати semantic embedding для кліпів, у яких його ще немає.
-    Вектор будується з текстового опису (description+tags+characters+emotion+
-    scene_type+themes), які Gemini вже згенерував — відео не відкривається.
-    Записує вектор у clip["embedding"] in-place.
-    Повертає кількість дорахованих векторів. Якщо embeddings недоступні —
-    мовчки повертає 0 (кліпи лишаються без векторів, пошук впаде на keyword).
-    """
-    from backend import embeddings as _emb
-
-    need = [c for c in clips if not c.get("embedding")]
-    if not need:
-        return 0
-
-    texts = [_emb.clip_embed_text(c) for c in need]
-    if emit:
-        emit("movie", f"Computing semantic vectors for {len(need)} clips...")
-    try:
-        vectors = _emb.embed_texts(texts, emit=emit)
-    except Exception as e:
-        print(f"[movie_library] Embedding computation failed: {e}", flush=True)
-        vectors = None
-
-    if not vectors:
-        print("[movie_library] No embeddings produced — clips left without vectors "
-              "(search will use keyword fallback)", flush=True)
-        return 0
-
-    count = 0
-    for c, v in zip(need, vectors):
-        if v:
-            c["embedding"] = v
-            count += 1
-    print(f"[movie_library] Attached embeddings to {count}/{len(need)} clips", flush=True)
-    return count
-
-
 # ── Публічний API ──────────────────────────────────────────────────────────────
 
 def process_movie(movie_path: str, movie_name: str, emit=None) -> dict:
@@ -705,9 +1058,6 @@ def process_movie(movie_path: str, movie_name: str, emit=None) -> dict:
     good = [a for a in analyzed
             if not a.get("is_blurry") and not a.get("is_static")]
     log(f"Analysis done: {len(good)}/{len(analyzed)} clips passed quality check")
-
-    # Дорахувати семантичні вектори (для семантичного підбору кліпів)
-    _attach_embeddings(good, emit=emit)
 
     index = {
         "movie_name": movie_name,
@@ -783,19 +1133,42 @@ def process_movie_folder(folder_path: str, movie_name: str, emit=None) -> dict:
             log(f"Skipping (too short or unreadable): {src_key}")
             continue
 
-        log(f"Duration: {dur / 60:.1f} min. Detecting scene changes...")
         # Унікальний префікс для кожного файлу — щоб кліпи не перезаписувались
         file_prefix = f"{movie_id}_f{file_idx:02d}"
-        clips = _cut_by_scenes(movie_path, clips_out_dir, file_prefix, dur, emit=emit)
-        log(f"Cut {len(clips)} clips. Starting Gemini analysis...")
+
+        # Reuse already-cut clips from previous interrupted runs.
+        # If we find existing clips with this prefix in clips_out_dir, skip the
+        # expensive scene-detection + cutting step and reuse what's on disk.
+        existing_clips_on_disk = sorted([
+            fn for fn in os.listdir(clips_out_dir)
+            if fn.startswith(file_prefix + "_") and fn.endswith(".mp4")
+        ])
+
+        if existing_clips_on_disk:
+            log(f"Found {len(existing_clips_on_disk)} clips already cut for {src_key} — reusing, skipping scene detection")
+            clips = []
+            for fn in existing_clips_on_disk:
+                full = os.path.join(clips_out_dir, fn)
+                clip_dur = _get_duration(full)
+                if clip_dur < CLIP_MIN:
+                    continue
+                clip_id = fn[:-4]  # strip .mp4
+                clips.append({
+                    "id":    clip_id,
+                    "file":  full,
+                    "start": 0.0,
+                    "end":   clip_dur,
+                })
+            log(f"Reused {len(clips)} clips. Starting Gemini analysis...")
+        else:
+            log(f"Duration: {dur / 60:.1f} min. Detecting scene changes...")
+            clips = _cut_by_scenes(movie_path, clips_out_dir, file_prefix, dur, emit=emit)
+            log(f"Cut {len(clips)} clips. Starting Gemini analysis...")
 
         analyzed = _analyze_all_clips(clips, movie_name, emit=emit)
         good = [a for a in analyzed
                 if not a.get("is_blurry") and not a.get("is_static")]
         log(f"{len(good)}/{len(analyzed)} clips passed quality check for {src_key}")
-
-        # Дорахувати семантичні вектори новим кліпам перед збереженням
-        _attach_embeddings(good, emit=emit)
 
         all_good_clips.extend(good)
         total_dur += dur

@@ -10,9 +10,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 _cand_lock = threading.Lock()
 
-# Max times a competitor clip can appear across all videos in one batch.
-# Kept at 5 (not 2) so fresh-first selection has a wide enough fallback pool.
-_COMPETITOR_MAX_USES = 3
+# Max times any competitor clip can appear across the whole batch.
+# Set to 1 — every clip is used at most once per video, no exceptions.
+# Reused across multiple-language batches via global_used_clips.json (cross-video uniqueness).
+_COMPETITOR_MAX_USES = 1
 # Stocks must be fully unique — max 1 use across all videos
 _STOCK_MAX_USES = 1
 
@@ -748,6 +749,7 @@ def _assemble_clips_from_candidates(
     used_clips:         set        = set()
     source_clip_counts: dict       = {}
     last_source:        str | None = None
+    last_clip_path:     str | None = None  # for adjacent-index check (prevents clip_N → clip_N+1)
     non_fresh_used:     int        = 0
     max_non_fresh:      int        = max(1, int(n_chunks * 0.5))
 
@@ -755,6 +757,36 @@ def _assemble_clips_from_candidates(
     _max_per_source = max(2, int((n_chunks / _unique_sources) * 1.5))
 
     _analysis_cache: dict = {}
+
+    def _clip_index_in_source(path: str) -> int | None:
+        """
+        Extract numeric index from clip filename like {source}_0042.mp4.
+        Returns int or None if name doesn't match the expected pattern.
+        """
+        name = os.path.basename(path)
+        m = _re.match(r"^.+_(\d+)\.mp4$", name)
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+
+    def _is_adjacent(prev_path: str | None, candidate: str) -> bool:
+        """
+        True if candidate is the immediate next clip from the same source as prev_path
+        (e.g. prev = source_X_0042.mp4 and candidate = source_X_0043.mp4).
+        Used to avoid copyright issues from playing original-order consecutive clips.
+        """
+        if not prev_path:
+            return False
+        if _source_of(prev_path) != _source_of(candidate):
+            return False
+        prev_idx = _clip_index_in_source(prev_path)
+        cand_idx = _clip_index_in_source(candidate)
+        if prev_idx is None or cand_idx is None:
+            return False
+        return cand_idx == prev_idx + 1
 
     def _clip_action(path: str) -> str:
         if path not in _analysis_cache:
@@ -785,6 +817,10 @@ def _assemble_clips_from_candidates(
         if session_blocked and clip in session_blocked:
             return False
         if last_source and _source_of(clip) == last_source:
+            return False
+        # Block immediate next-index clip from the same source as the previous one
+        # (e.g. previous was X_0042.mp4 → block X_0043.mp4 as the next pick).
+        if _is_adjacent(last_clip_path, clip):
             return False
         return True
 
@@ -818,6 +854,10 @@ def _assemble_clips_from_candidates(
             if _clip_action(clip) in ("reject",):
                 continue
             if global_used.get(clip, 0) >= _COMPETITOR_MAX_USES:
+                continue
+            if clip in used_clips:
+                continue
+            if _is_adjacent(last_clip_path, clip):
                 continue
             return clip
         print("[pipeline] WARNING: competitor pool exhausted", flush=True)
@@ -858,6 +898,8 @@ def _assemble_clips_from_candidates(
                 if _clip_action(sc) in ("reject",):
                     continue
                 if last_source and _source_of(sc) == last_source:
+                    continue
+                if _is_adjacent(last_clip_path, sc):
                     continue
                 if validate_stock_for_section(sc, stock_context) >= STOCK_SCORE_THRESHOLD:
                     clip_path = sc
@@ -919,6 +961,7 @@ def _assemble_clips_from_candidates(
             non_fresh_used += 1
         _record_used(clip_path)
         last_source = _source_of(clip_path)
+        last_clip_path = clip_path
         all_clips.append((clip_path, use_dur))
 
     # Session blocking: every 3rd used clip is blocked for subsequent videos in this session.
@@ -947,14 +990,45 @@ def _assemble_clips_random(
     """
     Random clip assignment: shuffle pool, assign one clip per chunk.
     No repeats within a single video. Between languages — repeats allowed.
+    Avoids playing the immediate next-index clip from the same source right after
+    its predecessor (e.g. X_0042 → X_0043) to reduce copyright detection risk.
     Supports watermark_crop from niche config.
     """
+    import re as _re
     import subprocess as _sp
 
     niche_data = niche_data or {}
     crop_top = float(niche_data.get("crop_top_pct", 0))
     crop_bottom = float(niche_data.get("crop_bottom_pct", 0))
     do_crop = (crop_top > 0 or crop_bottom > 0)
+
+    def _source_of(path: str) -> str:
+        name = os.path.basename(path)
+        if "?" in name:
+            return name.split("?")[0]
+        m = _re.match(r"^(.+?)_\d+\.mp4$", name)
+        return m.group(1) if m else name
+
+    def _clip_index_in_source(path: str) -> int | None:
+        name = os.path.basename(path)
+        m = _re.match(r"^.+_(\d+)\.mp4$", name)
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+
+    def _is_adjacent(prev_path: str | None, candidate: str) -> bool:
+        if not prev_path:
+            return False
+        if _source_of(prev_path) != _source_of(candidate):
+            return False
+        prev_idx = _clip_index_in_source(prev_path)
+        cand_idx = _clip_index_in_source(candidate)
+        if prev_idx is None or cand_idx is None:
+            return False
+        return cand_idx == prev_idx + 1
 
     available = [p for p in pool if os.path.exists(p)]
     if not available:
@@ -964,6 +1038,7 @@ def _assemble_clips_random(
 
     all_clips = []
     used_in_video = set()
+    last_clip_path: str | None = None
     pool_idx = 0
 
     for chunk in chunks:
@@ -974,16 +1049,31 @@ def _assemble_clips_random(
 
         clip_path = None
         start_idx = pool_idx
+        # First pass: respect both used-in-video and adjacency rules
         while True:
             if pool_idx >= len(available):
                 pool_idx = 0
             candidate = available[pool_idx]
             pool_idx += 1
-            if candidate not in used_in_video:
+            if candidate not in used_in_video and not _is_adjacent(last_clip_path, candidate):
                 clip_path = candidate
                 break
             if pool_idx == start_idx:
                 break
+
+        # Fallback 1: relax adjacency but keep uniqueness
+        if not clip_path:
+            start_idx = pool_idx
+            while True:
+                if pool_idx >= len(available):
+                    pool_idx = 0
+                candidate = available[pool_idx]
+                pool_idx += 1
+                if candidate not in used_in_video:
+                    clip_path = candidate
+                    break
+                if pool_idx == start_idx:
+                    break
 
         if not clip_path:
             print(f"[pipeline:random] WARNING: pool exhausted, reusing clips", flush=True)
@@ -997,6 +1087,7 @@ def _assemble_clips_random(
         use_dur = min(real_dur, chunk_dur)
         used_in_video.add(clip_path)
         global_used[clip_path] = global_used.get(clip_path, 0) + 1
+        last_clip_path = clip_path
 
         # Watermark crop: crop top/bottom % then scale back to 1920x1080
         if do_crop:

@@ -23,42 +23,13 @@ from backend.rewriter import rewrite_all
 from backend.text_renderer import apply_text_overlays
 from backend.movie_library import (
     search_clips, get_movie_clips,
+    validate_clips_batch,
     _uniqualize_movie_clip, make_uniq_params,
     VALIDATION_THRESHOLD,
 )
-from backend.clip_matcher import (
-    _validate_movie_clips_text_pioneer_batch,
-    _validate_clip_visual_pioneer,
-    _validate_movie_clips_text_gigacoder_batch,
-    _validate_clip_visual_gigacoder,
-    _gigacoder_keys,
-)
-from backend.translator import translate_sections
 
 WORDS_PER_SECTION  = 35
 MIN_AUDIO_DURATION = 60.0   # секунд — менше цього вважається помилкою TTS
-
-_REJECT_KEYWORDS = {
-    "credits", "credit", "end credits", "opening credits", "title card",
-    "title screen", "text screen", "intertitle", "author", "authors",
-    "directed by", "produced by", "written by", "cast", "crew",
-    "copyright", "logo", "studio logo", "black screen", "blank",
-    "the end", "fin",
-}
-
-
-def _is_text_clip(clip: dict) -> bool:
-    """Returns True for credits, title cards, text-only screens."""
-    desc = clip.get("description", "").lower()
-    tags = [t.lower() for t in clip.get("tags", [])]
-    scene = clip.get("scene_type", "").lower()
-    for kw in _REJECT_KEYWORDS:
-        if kw in desc or kw in scene:
-            return True
-        for tag in tags:
-            if kw in tag:
-                return True
-    return False
 
 # ── Whisper model cache (loaded once, reused across calls) ──────────────────────
 _WHISPER_MODEL = None
@@ -70,12 +41,9 @@ def _get_whisper_model():
     if _WHISPER_MODEL is None:
         with _WHISPER_LOCK:
             if _WHISPER_MODEL is None:
-                import torch
                 import whisper as _whisper
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                model_name = "medium" if device == "cuda" else "tiny"
-                print(f"[movie_pipeline] Loading Whisper model ({model_name}) on {device}...", flush=True)
-                _WHISPER_MODEL = _whisper.load_model(model_name, device=device)
+                print("[movie_pipeline] Loading Whisper model (tiny) — first time...", flush=True)
+                _WHISPER_MODEL = _whisper.load_model("tiny")
                 print("[movie_pipeline] Whisper model loaded.", flush=True)
     return _WHISPER_MODEL
 
@@ -228,8 +196,10 @@ Return ONLY a JSON array, no markdown:
 
 
 def _plan_text_overlays(segments_with_times: list, emit=None) -> list:
-    """Pioneer (Claude Opus) читає сегменти скрипту і повертає план текстових оверлеїв."""
-    from backend import api_client
+    """Claude читає сегменти скрипту і повертає план текстових оверлеїв."""
+    import anthropic
+    settings = config.load_settings()
+    client   = anthropic.Anthropic(api_key=settings.get("claude_api_key", ""), timeout=120.0)
 
     seg_data = [
         {"index": s["index"], "start": round(s["start"], 1), "text": s["text"][:120]}
@@ -240,20 +210,12 @@ def _plan_text_overlays(segments_with_times: list, emit=None) -> list:
     )
 
     try:
-        try:
-            text, _ = api_client.call_pioneer(
-                system="You are a creative video editor planning text overlays.",
-                messages=[{"role": "user", "content": prompt}],
-                timeout=120,
-                use_rewrite_model=False,
-            )
-        except Exception:
-            text, _ = api_client.call_gigacoder(
-                system="You are a creative video editor planning text overlays.",
-                messages=[{"role": "user", "content": prompt}],
-                timeout=120,
-            )
-        text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+        r = client.messages.create(
+            model=settings.get("claude_model", "claude-sonnet-4-6"),
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = re.sub(r"^```(?:json)?\s*", "", r.content[0].text.strip())
         text = re.sub(r"\s*```$", "", text)
         m    = re.search(r"\[.*\]", text, re.DOTALL)
         plan = json.loads(m.group() if m else text)
@@ -321,6 +283,27 @@ def _build_text_overlays(plan: list, segments_with_times: list) -> list:
 
 # ── Clip normalization + uniqualization ────────────────────────────────────────
 
+def _per_clip_uniq_params(clip_path: str, base_params: dict) -> dict:
+    """
+    Derive per-clip uniqualization values within the same ranges as base_params.
+    Each clip gets its OWN zoom/brightness/contrast/saturation/flip/grain so the
+    final video is variation-rich (different settings on every clip), but the
+    values are deterministic — derived from the clip filename + base seed —
+    so re-running produces the same output.
+    """
+    seed_src = clip_path + "|" + str(base_params.get("flip", "")) + "|" + str(base_params.get("zoom", ""))
+    seed     = int.from_bytes(hashlib.md5(seed_src.encode()).digest()[:4], "big")
+    rng      = random.Random(seed)
+    return {
+        "zoom":       rng.uniform(1.04, 1.08),
+        "brightness": rng.uniform(-0.05, 0.05),
+        "contrast":   rng.uniform(0.95, 1.10),
+        "saturation": rng.uniform(0.88, 1.18),
+        "flip":       rng.random() < 0.30,
+        "grain":      rng.uniform(6, 14),
+    }
+
+
 def _prepare_movie_clip(clip_path: str, out_path: str, uniq_params: dict,
                         max_dur: float = 5.0,
                         effect: str = "none",
@@ -328,12 +311,19 @@ def _prepare_movie_clip(clip_path: str, out_path: str, uniq_params: dict,
     """
     ОДИН FFmpeg pass: normalize + uniqualize + speed + vignette — все за раз.
     1 замість 4 процесів = в 4x швидше.
+
+    uniq_params here is just the base / language-level seed bundle. Each clip
+    derives its own variation deterministically so all clips in one video have
+    DIFFERENT zoom / brightness / flip values (no flat look).
     """
+    # Get per-clip variation (different values for each clip, stable across reruns)
+    per_clip = _per_clip_uniq_params(clip_path, uniq_params)
+
     # Build filter chain
     filters = ["scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30"]
 
     # Uniqualize: zoom
-    zoom = uniq_params.get("zoom", 1.0)
+    zoom = per_clip.get("zoom", 1.0)
     if zoom > 1.0:
         crop_w = int(1920 / zoom)
         crop_h = int(1080 / zoom)
@@ -342,18 +332,18 @@ def _prepare_movie_clip(clip_path: str, out_path: str, uniq_params: dict,
         filters.append(f"crop={crop_w}:{crop_h}:{x}:{y},scale=1920:1080")
 
     # brightness, contrast, saturation
-    brightness = uniq_params.get("brightness", 0.0)
-    contrast = uniq_params.get("contrast", 1.0)
-    saturation = uniq_params.get("saturation", 1.0)
+    brightness = per_clip.get("brightness", 0.0)
+    contrast = per_clip.get("contrast", 1.0)
+    saturation = per_clip.get("saturation", 1.0)
     if brightness != 0.0 or contrast != 1.0 or saturation != 1.0:
         filters.append(f"eq=brightness={brightness:.2f}:contrast={contrast:.2f}:saturation={saturation:.2f}")
 
     # flip
-    if uniq_params.get("flip", False):
+    if per_clip.get("flip", False):
         filters.append("hflip")
 
     # grain
-    grain = uniq_params.get("grain", 0)
+    grain = per_clip.get("grain", 0)
     if grain > 0:
         filters.append(f"noise=alls={grain}:allf=t+u")
 
@@ -384,364 +374,107 @@ def _prepare_movie_clip(clip_path: str, out_path: str, uniq_params: dict,
         return False
 
 
-
-
 # ── Clip selection ─────────────────────────────────────────────────────────────
-
-VISUAL_THRESHOLD = 0.7
-MAX_VISUAL_RETRIES = 3
-
-
-def _extract_global_context(segments: list, movie_name: str) -> str:
-    """
-    Аналізує всі сегменти скрипту і будує глобальний контекст:
-    - Які персонажі згадуються найчастіше
-    - Основна тема відео
-    Повертає короткий рядок для вставки в промпт валідації.
-    """
-    all_movie_clips = get_movie_clips(movie_name)
-    known_characters = set()
-    for c in all_movie_clips:
-        for char in c.get("characters", []):
-            known_characters.add(char.lower())
-
-    full_text = " ".join(seg.get("text", "") for seg in segments).lower()
-
-    char_counts = {}
-    for char in known_characters:
-        if len(char) <= 2:
-            # Short names (Li, Po) — match whole words only to avoid false positives
-            import re as _re
-            count = len(_re.findall(r'\b' + _re.escape(char) + r'\b', full_text))
-        else:
-            count = full_text.count(char)
-        if count > 0:
-            char_counts[char] = count
-
-    top_chars = sorted(char_counts.items(), key=lambda x: -x[1])[:5]
-    main_char = top_chars[0][0].title() if top_chars else ""
-    other_chars = [c.title() for c, _ in top_chars[1:4]]
-
-    context_parts = [f"Movie: {movie_name}."]
-    if main_char:
-        context_parts.append(f"MAIN character: {main_char} (appears most in narration).")
-    if other_chars:
-        context_parts.append(f"Other characters: {', '.join(other_chars)}.")
-    context_parts.append(
-        f"IMPORTANT: Strongly prefer clips showing {main_char or 'the main character'}. "
-        f"A clip with the correct character scores much higher than one with matching mood but wrong character."
-    )
-
-    return " ".join(context_parts)
-
 
 def _select_clips_for_segments(segments: list, movie_name: str,
                                 audio_dur: float,
-                                global_used_ids: set = None,
-                                main_character: str = "") -> list:
+                                global_used_ids: set = None) -> list:
     """
-    Оптимізований підбір кліпів:
-    1. Embeddings (Vertex) → топ-8 кандидатів за сенсом (миттєво, локальна математика)
-    2. Pioneer text batch (1 запит на сегмент) → оцінює всі 8 → бере топ-2
-    3. Pioneer visual (2 запити на сегмент) → перевіряє кадри топ-2 → бере кращий
+    Для кожного Whisper-сегменту (2-5s):
+    1. Знаходить 3 кандидати (keyword scoring)
+    2. Валідує всі 3 через Gemini batch
+    3. Обирає найкращий (score >= 0.85; fallback — найвищий score)
+    → 1 кліп на сегмент, тривалість = тривалість сегменту
 
-    4 Pioneer ключі працюють паралельно.
-    Кліп використаний = зникає з пулу (без повторів).
+    global_used_ids — множина ID кліпів вже використаних в ПОПЕРЕДНІХ відео батчу.
+
     Повертає: [{"file": path, "duration": seg_dur}, ...]
     """
-    import threading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from backend import embeddings as _emb
-
     used_ids = global_used_ids if global_used_ids is not None else set()
+    selected: list = []
+
     all_movie_clips = get_movie_clips(movie_name)
-    valid_clips = [c for c in all_movie_clips if os.path.exists(c.get("file", "")) and not _is_text_clip(c)]
 
-    settings = config.load_settings()
-    pioneer_keys = settings.get("pioneer_api_keys", [])
-
-    if not pioneer_keys:
-        print("[movie_pipeline] WARNING: no Pioneer keys — using semantic ranking only (no validation)", flush=True)
-        result = []
-        local_used = set(used_ids)
-        for seg in segments:
-            seg_dur = max(2.0, seg["end"] - seg["start"])
-            avail = [c for c in valid_clips if c.get("id") not in local_used] or valid_clips
-            seg_vec = _emb.embed_text(seg.get("text", ""))
-            ranked = [c for c in avail if c.get("embedding")]
-            if seg_vec and ranked:
-                ranked.sort(key=lambda c: _emb.cosine(seg_vec, c["embedding"]), reverse=True)
-                c = ranked[0]
-            else:
-                c = avail[0] if avail else all_movie_clips[0]
-            local_used.add(c.get("id"))
-            result.append({"file": c["file"], "duration": seg_dur, "id": c.get("id", c["file"])})
-        return result
-
-    gc_keys = _gigacoder_keys()
-    all_keys = pioneer_keys + gc_keys  # Pioneer first, GigaCoder as fallback workers
-    n_workers = max(len(all_keys), 1)
-
-    # API call counters (thread-safe)
-    _api_counts = {"text": 0, "visual": 0}
-    _api_lock = threading.Lock()
-
-    def _inc(counter: str, n: int = 1):
-        with _api_lock:
-            _api_counts[counter] += n
-
-    # ── Global context (characters + theme) ──
-    global_context = _extract_global_context(segments, movie_name)
-    print(f"[movie_pipeline] Global context: {global_context}", flush=True)
-
-    # ── Build segment info with wider window ──
-    seg_info = []
-    for seg_idx, seg in enumerate(segments):
+    for seg in segments:
+        chunk   = seg.get("text", "")
         seg_dur = max(2.0, seg["end"] - seg["start"])
-        parts = []
-        if seg_idx > 0:
-            parts.append(segments[seg_idx - 1].get("text", ""))
-        parts.append(seg.get("text", ""))
-        if seg_idx < len(segments) - 1:
-            parts.append(segments[seg_idx + 1].get("text", ""))
-        wide_text = " ".join(p for p in parts if p)
-        seg_info.append({"idx": seg_idx, "dur": seg_dur, "text": wide_text})
 
-    # ── Character detection for boosting ──
-    all_movie_clips_full = get_movie_clips(movie_name)
-    known_characters = set()
-    for c in all_movie_clips_full:
-        for char in c.get("characters", []):
-            known_characters.add(char.lower())
+        # 3 кандидати (keyword scoring)
+        candidates = search_clips(
+            chunk, movie_name=movie_name,
+            used_ids=used_ids, top_n=5,
+            gemini_validate=False,
+        )
 
-    def _detect_characters(text: str) -> set:
-        """Detect which known characters are mentioned in segment text."""
-        text_lower = text.lower()
-        found = set()
-        for char in known_characters:
-            if len(char) <= 2:
-                if re.search(r'\b' + re.escape(char) + r'\b', text_lower):
-                    found.add(char)
-            else:
-                if char in text_lower:
-                    found.add(char)
-        return found
+        # Fallback — будь-який невикористаний кліп
+        if not candidates:
+            candidates = [
+                c for c in all_movie_clips
+                if c.get("id") not in used_ids
+                and os.path.exists(c.get("file", ""))
+            ]
+            random.shuffle(candidates)
+            candidates = candidates[:5]
 
-    CHARACTER_BOOST = 0.25       # буст за згаданого в сегменті персонажа
-    HERO_BOOST = 0.30            # буст за головного героя відео (м'який пріоритет)
-    WRONG_HERO_PENALTY = 0.45    # штраф, якщо в кадрі ЧУЖИЙ головний персонаж
+        # Якщо всі використані — дозволяємо повтори
+        if not candidates:
+            candidates = [
+                c for c in all_movie_clips
+                if os.path.exists(c.get("file", ""))
+            ]
+            random.shuffle(candidates)
+            candidates = candidates[:5]
 
-    # ── Головний герой відео (м'який пріоритет по всьому відео) ──
-    hero = (main_character or "").strip().lower()
-    hero_known = hero in known_characters if hero else False
-    if hero and not hero_known:
-        # Спробувати знайти часткове співпадіння (напр. "tigress" ⊂ "master tigress")
-        for kc in known_characters:
-            if hero in kc or kc in hero:
-                hero = kc
-                hero_known = True
-                break
-    if hero:
-        if hero_known:
-            print(f"[movie_pipeline] Main character: '{hero}' — soft priority active", flush=True)
-        else:
-            print(f"[movie_pipeline] Main character '{hero}' not found in clip metadata — no hero priority", flush=True)
-            hero = ""
-
-    def _hero_adjust(clip) -> float:
-        """
-        М'який пріоритет головного героя:
-        +HERO_BOOST якщо герой у кадрі;
-        -WRONG_HERO_PENALTY якщо в кадрі Є персонажі, але героя серед них немає
-                            (тобто кадр явно про когось іншого — напр. жаба);
-        0 якщо в кадрі взагалі немає впізнаних персонажів (фон/оточення/емоції — ок).
-        """
-        if not hero:
-            return 0.0
-        clip_chars = set(ch.lower() for ch in clip.get("characters", []))
-        if not clip_chars:
-            return 0.0  # кадр без персонажів — нейтрально, лишаємо для різноманітності
-        if hero in clip_chars:
-            return HERO_BOOST
-        return -WRONG_HERO_PENALTY  # у кадрі хтось інший, героя немає → штраф
-
-    # ── Phase 1: Embeddings → топ-8 кандидатів з character boost (миттєво) ──
-    print(f"[movie_pipeline] Phase 1: semantic ranking {len(seg_info)} segments × top-8 (with character boost)...", flush=True)
-
-    local_used = set(used_ids)
-    candidates_map = {}
-    for si, info in enumerate(seg_info):
-        avail = [c for c in valid_clips if c.get("id") not in local_used] or valid_clips
-        seg_vec = _emb.embed_text(info["text"])
-        ranked = [c for c in avail if c.get("embedding")]
-        if seg_vec and ranked:
-            seg_chars = _detect_characters(info["text"])
-            scored = []
-            for c in ranked:
-                sim = _emb.cosine(seg_vec, c["embedding"])
-                clip_chars = set(ch.lower() for ch in c.get("characters", []))
-                if seg_chars:
-                    # У тексті ПРЯМО названо персонажа → пріоритет ЙОМУ.
-                    # Герой відео тут НЕ застосовується (щоб сцена про Тай Лунга
-                    # показувала Тай Лунга, а не героя відео).
-                    if seg_chars & clip_chars:
-                        sim += CHARACTER_BOOST
-                    elif clip_chars and hero and hero in clip_chars and not (seg_chars & clip_chars):
-                        # кадр героя відео, але говориться про іншого — легкий штраф,
-                        # щоб не підмінювати названого персонажа героєм
-                        sim -= CHARACTER_BOOST
-                else:
-                    # Імені в тексті немає (займенники/загальне) → м'який пріоритет героя,
-                    # щоб не лізли випадкові персонажі (жаби тощо).
-                    sim += _hero_adjust(c)
-                scored.append((sim, c))
-            scored.sort(key=lambda x: x[0], reverse=True)
-            candidates_map[si] = [c for _, c in scored[:8]]
-        else:
-            candidates_map[si] = avail[:8]
-
-    # ── Phase 2: Pioneer text batch (1 запит = 8 кліпів на сегмент) ──
-    print(f"[movie_pipeline] Phase 2: text-validating {len(seg_info)} segments × 8 clips, {n_workers} workers...", flush=True)
-
-    text_scores = {}
-    text_lock = threading.Lock()
-
-    def _text_validate_worker(seg_indices: list, api_key: str, is_gigacoder: bool = False):
-        results = {}
-        for si in seg_indices:
-            pool = candidates_map[si]
-            if not pool:
-                results[si] = []
-                continue
-            chunk = seg_info[si]["text"]
-            context_chunk = f"{global_context}\n\nCurrent narration: {chunk}"
-            items = [{
-                "clip_path": c.get("file", ""),
-                "section_text": context_chunk,
-                "description": c.get("description", os.path.basename(c.get("file", ""))),
-                "tags": c.get("tags", []),
-                "characters": c.get("characters", []),
-            } for c in pool]
-            try:
-                if is_gigacoder:
-                    scores = _validate_movie_clips_text_gigacoder_batch(items, api_key)
-                else:
-                    scores = _validate_movie_clips_text_pioneer_batch(items, api_key)
-                scores = [round(min(max(float(s), 0.0), 1.0), 4) for s in scores]
-                _inc("text")
-            except Exception as e:
-                print(f"[movie_pipeline] text error seg {si}: {e}", flush=True)
-                scores = [0.0] * len(pool)
-            results[si] = sorted(zip(pool, scores), key=lambda x: -x[1])
-        return results
-
-    seg_indices = list(range(len(seg_info)))
-    chunks_per_worker = [[] for _ in range(n_workers)]
-    for i, si in enumerate(seg_indices):
-        chunks_per_worker[i % n_workers].append(si)
-
-    with ThreadPoolExecutor(max_workers=n_workers) as pool_exec:
-        futures = []
-        for w_idx, worker_segs in enumerate(chunks_per_worker):
-            if worker_segs:
-                key = all_keys[w_idx]
-                is_gc = w_idx >= len(pioneer_keys)
-                futures.append(pool_exec.submit(
-                    _text_validate_worker, worker_segs, key, is_gc
-                ))
-        for f in as_completed(futures):
-            try:
-                batch_result = f.result()
-                with text_lock:
-                    text_scores.update(batch_result)
-            except Exception as e:
-                print(f"[movie_pipeline] Text validation worker error: {e}", flush=True)
-
-    # ── Phase 3: Visual verification of top-2 per segment ──
-    print(f"[movie_pipeline] Phase 3: visual verification of top-2 per segment...", flush=True)
-
-    seg_results = {}
-    seg_results_lock = threading.Lock()
-
-    def _visual_verify_segment(si: int, key: str, is_gigacoder: bool = False):
-        chunk = seg_info[si]["text"]
-        context_chunk = f"{global_context}\n\nCurrent narration: {chunk}"
-        seg_dur = seg_info[si]["dur"]
-        scored = text_scores.get(si, [])
-
-        if not scored:
-            cands = candidates_map.get(si, [])
-            fallback = cands[0] if cands else None
-            return si, fallback, seg_dur
-
-        top2 = scored[:2]
-        best_clip = None
-        best_visual = -1.0
-
-        for clip, txt_score in top2:
-            try:
-                if is_gigacoder:
-                    visual_score = _validate_clip_visual_gigacoder(clip["file"], context_chunk, key)
-                else:
-                    visual_score = _validate_clip_visual_pioneer(clip["file"], context_chunk, key)
-                if visual_score < 0:
-                    visual_score = 0.0
-                _inc("visual")
-            except Exception:
-                visual_score = 0.0
-            if visual_score > best_visual:
-                best_visual = visual_score
-                best_clip = clip
-
-        if best_clip is None:
-            best_clip = scored[0][0]
-
-        return si, best_clip, seg_dur
-
-    with ThreadPoolExecutor(max_workers=n_workers) as pool_exec:
-        futures = []
-        for si in range(len(seg_info)):
-            key = all_keys[si % n_workers]
-            is_gc = (si % n_workers) >= len(pioneer_keys)
-            futures.append(pool_exec.submit(_visual_verify_segment, si, key, is_gc))
-
-        for f in as_completed(futures):
-            try:
-                si, clip, seg_dur = f.result()
-                with seg_results_lock:
-                    seg_results[si] = (clip, seg_dur)
-            except Exception as e:
-                print(f"[movie_pipeline] Visual verify error: {e}", flush=True)
-
-    # Build final selection in order (no repeats)
-    selected = []
-    used_ids_final = set(used_ids)
-    for si in range(len(seg_info)):
-        clip, seg_dur = seg_results.get(si, (None, seg_info[si]["dur"]))
-        if clip is None:
+        if not candidates:
             continue
-        cid = clip.get("id", clip["file"])
-        if cid in used_ids_final:
-            # Кліп вже використаний — бери наступний з candidates
-            for alt_clip, _ in text_scores.get(si, [])[1:]:
-                alt_id = alt_clip.get("id", alt_clip["file"])
-                if alt_id not in used_ids_final:
-                    clip = alt_clip
-                    cid = alt_id
-                    break
-        selected.append({"file": clip["file"], "duration": seg_dur, "id": cid})
-        used_ids_final.add(cid)
 
-    total_api = _api_counts["text"] + _api_counts["visual"]
-    print(
-        f"[movie_pipeline] Selected {len(selected)} clips for {audio_dur:.1f}s audio",
-        flush=True,
-    )
-    print(
-        f"[movie_pipeline] API calls: {total_api} total "
-        f"(text: {_api_counts['text']}, visual: {_api_counts['visual']})",
-        flush=True,
-    )
+        # Gemini batch validation (3 кандидати за 1 запит)
+        pool       = [c for c in candidates if os.path.exists(c.get("file", ""))][:5]
+        if not pool:
+            continue
+        first_pool = pool[:3]
+        clip_paths = [c["file"] for c in first_pool]
+        try:
+            scores = validate_clips_batch(clip_paths, chunk)
+        except Exception as e:
+            print(f"[movie_pipeline] Batch validation error: {e}", flush=True)
+            scores = [0.0] * len(first_pool)
+
+        validation_threshold = 0.75
+        scored_pool = list(zip(first_pool, scores))
+
+        if scored_pool and max((s for _, s in scored_pool), default=0.0) < validation_threshold and len(pool) > 3:
+            extra_pool = pool[3:5]
+            extra_paths = [c["file"] for c in extra_pool]
+            try:
+                extra_scores = validate_clips_batch(extra_paths, chunk)
+            except Exception as e:
+                print(f"[movie_pipeline] Extra validation error: {e}", flush=True)
+                extra_scores = [0.0] * len(extra_pool)
+            scored_pool.extend(zip(extra_pool, extra_scores))
+
+        # Вибираємо найкращий
+        best_validated       = None
+        best_validated_score = -1.0
+        best_overall         = scored_pool[0][0]
+        best_overall_score   = scored_pool[0][1]
+
+        for clip, score in scored_pool:
+            if score > best_overall_score:
+                best_overall_score = score
+                best_overall       = clip
+            if score >= validation_threshold and score > best_validated_score:
+                best_validated_score = score
+                best_validated       = clip
+
+        best_clip = best_validated if best_validated is not None else best_overall
+
+        file_path = best_clip["file"]
+        clip_id   = best_clip.get("id", file_path)
+        selected.append({"file": file_path, "duration": seg_dur, "id": clip_id})
+        used_ids.add(clip_id)
+
+    print(f"[movie_pipeline] Selected {len(selected)} clips for {audio_dur:.1f}s audio", flush=True)
     return selected
 
 
@@ -756,7 +489,7 @@ def _concat_clip_list(clip_paths: list, output: str):
     try:
         subprocess.run(
             [config.FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", list_file,
-             *config.get_video_encoder_args("ultrafast"), "-pix_fmt", "yuv420p", "-an", output],
+             *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p", "-an", output],
             capture_output=True, timeout=3600,
             check=True,
         )
@@ -828,7 +561,7 @@ def _xfade_join(segment_files: list, output: str, fade_dur: float = 0.35,
         [config.FFMPEG, "-y"] + inputs +
         ["-filter_complex", ";".join(filters),
          "-map", "[vout]",
-         *config.get_video_encoder_args("ultrafast"), "-pix_fmt", "yuv420p", "-an", output],
+         *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p", "-an", output],
         capture_output=True, timeout=3600,
     )
     if r.returncode != 0:
@@ -841,7 +574,7 @@ def _loop_video_to_duration(video_path: str, target_dur: float, output: str):
         [config.FFMPEG, "-y",
          "-stream_loop", "-1", "-i", video_path,
          "-t", f"{target_dur:.3f}",
-         *config.get_video_encoder_args("ultrafast"), "-pix_fmt", "yuv420p", "-an", output],
+         *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p", "-an", output],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600,
     )
 
@@ -983,16 +716,10 @@ def _build_movie_video(clips: list, audio_path: str, output_path: str,
 
 def prepare(source_url: str, emit=None) -> dict:
     """Фаза 1: транскрипція джерельного відео."""
-    _t0 = time.time()
-
-    def _elapsed():
-        s = int(time.time() - _t0)
-        return f"{s // 60}:{s % 60:02d}"
-
     def log(step, msg):
-        print(f"[movie_pipeline:prepare:{step}] [{_elapsed()}] {msg}", flush=True)
+        print(f"[movie_pipeline:prepare:{step}] {msg}", flush=True)
         if emit:
-            emit(step, f"[{_elapsed()}] {msg}")
+            emit(step, msg)
 
     prepare_id  = f"movie_{int(time.time())}"
     prepare_dir = os.path.join(config.PROJECTS_DIR, f"_prepare_{prepare_id}")
@@ -1005,20 +732,6 @@ def prepare(source_url: str, emit=None) -> dict:
 
     from backend import channel_scanner
     meta = channel_scanner.get_video_metadata(source_url)
-
-    # Fallback: if YouTube API failed (empty title), get title via yt-dlp
-    if not meta.get("title"):
-        log("prepare", "YouTube API returned no title, trying yt-dlp...")
-        try:
-            r = subprocess.run(
-                ["yt-dlp", "--no-warnings", "--quiet", "--print", "%(title)s", source_url],
-                capture_output=True, text=True, timeout=30,
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                meta["title"] = r.stdout.strip()
-                log("prepare", f"Got title via yt-dlp: {meta['title'][:80]}")
-        except Exception as e:
-            log("prepare", f"yt-dlp title fallback failed: {e}")
 
     state = {
         "prepare_id":         prepare_id,
@@ -1043,25 +756,17 @@ def prepare(source_url: str, emit=None) -> dict:
 
 
 def produce(prepare_id: str, movie_name: str, language: str, emit=None,
-            global_used_ids: set = None, test_mode: bool = False,
-            main_character: str = "") -> dict:
+            global_used_ids: set = None) -> dict:
     """
     Фаза 2: рірайт → TTS → підбір кліпів + validation → текстові оверлеї → монтаж.
 
     global_used_ids — множина clip ID вже використаних в попередніх відео батчу.
     Передається ззовні щоб гарантувати різноманітність відеоряду між відео.
-    test_mode — обрізає скрипт до ~5 хвилин для швидкого тесту.
     """
-    _t0 = time.time()
-
-    def _elapsed():
-        s = int(time.time() - _t0)
-        return f"{s // 60}:{s % 60:02d}"
-
     def log(step, msg):
-        print(f"[movie_pipeline:produce:{step}] [{_elapsed()}] {msg}", flush=True)
+        print(f"[movie_pipeline:produce:{step}] {msg}", flush=True)
         if emit:
-            emit(step, f"[{_elapsed()}] {msg}")
+            emit(step, msg)
 
     prepare_dir = os.path.join(config.PROJECTS_DIR, f"_prepare_{prepare_id}")
     with open(os.path.join(prepare_dir, "state.json"), encoding="utf-8") as f:
@@ -1069,8 +774,6 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
 
     transcript   = state["transcript"]
     source_title = state.get("source_title", "")
-    if not source_title:
-        source_title = transcript[:150].split(".")[0].strip() or "Movie Psychology Analysis"
 
     # ── Resume: шукаємо існуючий проект з тим самим prepare_id + language ────
     _resume_proj_id = None
@@ -1120,17 +823,13 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
             script = f.read()
         log("rewrite", f"Script cached ({len(script)} chars)")
     else:
-        if test_mode:
-            log("rewrite", "TEST MODE: rewriting short script (~750 words)...")
-        else:
-            log("rewrite", "Rewriting script (with quality check)...")
+        log("rewrite", "Rewriting script (with quality check)...")
         result = rewrite_all(
             transcript          = transcript,
             language            = language,
             source_title        = source_title,
             source_description  = state.get("source_description", ""),
             source_tags         = state.get("source_tags", []),
-            test_mode           = test_mode,
         )
         script = result["script"]
         if len(script.split()) < 100:
@@ -1146,16 +845,6 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
                       f, ensure_ascii=False, indent=2)
         log("rewrite", f"Script done: {len(script)} chars, {len(script.split())} words")
 
-    # ── Test mode: skip trim (rewriter already wrote short) ──────────────────
-    if test_mode:
-        words = script.split()
-        if len(words) > 750:
-            script = " ".join(words[:750])
-            last_dot = script.rfind(".")
-            if last_dot > len(script) // 2:
-                script = script[:last_dot + 1]
-            log("test", f"TEST MODE: trimmed script to {len(script.split())} words (~5 min)")
-
     # ── TTS ───────────────────────────────────────────────────────────────────
     audio_path = os.path.join(proj_dir, "voiceover.mp3")
     if not os.path.exists(audio_path):
@@ -1168,10 +857,8 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
     audio_dur = _get_duration(audio_path)
     log("tts", f"Audio duration: {audio_dur:.1f}s")
 
-    # Перевірка мінімальної тривалості (skip in test mode)
-    if test_mode and audio_dur < MIN_AUDIO_DURATION:
-        pass  # test mode allows shorter audio
-    elif audio_dur < MIN_AUDIO_DURATION:
+    # Перевірка мінімальної тривалості
+    if audio_dur < MIN_AUDIO_DURATION:
         raise RuntimeError(
             f"Voiceover too short: {audio_dur:.1f}s (min {MIN_AUDIO_DURATION}s). "
             "Script may be too short or TTS failed."
@@ -1188,14 +875,6 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
     text_overlays = _build_text_overlays(overlay_plan, segments_with_times)
     log("overlays", f"Planned {len(text_overlays)} text overlays.")
 
-    # ── Translate segment texts to English for clip matching ────────────────
-    seg_texts_orig = [s.get("text", "") for s in segments_with_times]
-    seg_texts_en = translate_sections(seg_texts_orig, language, project_dir=proj_dir, emit=emit)
-    segments_en = [
-        {**s, "text": en_text}
-        for s, en_text in zip(segments_with_times, seg_texts_en)
-    ]
-
     # ── Підбір кліпів: 3 кандидати на сегмент → Gemini → найкращий ───────────
     clips_cache = os.path.join(proj_dir, "clips.json")
     if os.path.exists(clips_cache):
@@ -1210,9 +889,8 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
     else:
         log("clips", f"Selecting clips from '{movie_name}' (3 candidates/seg → Gemini)...")
         clip_data = _select_clips_for_segments(
-            segments_en, movie_name, audio_dur,
+            segments_with_times, movie_name, audio_dur,
             global_used_ids=global_used_ids,
-            main_character=main_character,
         )
         if not clip_data:
             raise RuntimeError(f"No clips found for movie '{movie_name}'. Is it indexed?")
@@ -1383,18 +1061,10 @@ def produce_from_script(
     text_overlays = _build_text_overlays(overlay_plan, segments_with_times)
     log("overlays", f"Planned {len(text_overlays)} text overlays.")
 
-    # ── Translate segment texts to English for clip matching ────────────────
-    seg_texts_orig = [s.get("text", "") for s in segments_with_times]
-    seg_texts_en = translate_sections(seg_texts_orig, language, project_dir=proj_dir, emit=emit)
-    segments_en = [
-        {**s, "text": en_text}
-        for s, en_text in zip(segments_with_times, seg_texts_en)
-    ]
-
     # ── Clip selection: 3 candidates/seg → Gemini → best ─────────────────────
     log("clips", f"Selecting clips from '{movie_name}' (3 candidates/seg → Gemini)...")
     clip_data = _select_clips_for_segments(
-        segments_en, movie_name, audio_dur,
+        segments_with_times, movie_name, audio_dur,
         global_used_ids=global_used_ids,
     )
     if not clip_data:
@@ -1523,5 +1193,3 @@ def produce_batch(prepare_id: str, movie_name: str, language: str,
     ok_count = sum(1 for r in results if r.get("status") == "ok")
     log(f"Batch done: {ok_count}/{count} videos successful")
     return results
-
-# end of module

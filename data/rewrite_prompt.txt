@@ -48,12 +48,13 @@ Before delivering the result, ensure that:
 If in doubt — choose a more literal preservation of meaning.
 
 LENGTH CONTROL — CRITICAL
-* The final text MUST be at least as long as the original. This is non-negotiable.
-* Ideally the rewritten text should be 10-20% LONGER than the original due to natural rephrasing and expanded transitions.
-* An increase in volume is allowed and encouraged due to natural rephrasing.
-* Excessive compression is STRICTLY FORBIDDEN.
-* If you find yourself writing less than the original — stop, go back, and expand each section.
-* Count your characters before submitting. If shorter than original — rewrite and expand.
+* The final text length MUST be between 90% and 140% of the original. Both bounds are non-negotiable.
+* Target: roughly the same length as the original, with light expansion (10-20%) only when necessary for natural rephrasing or smooth transitions.
+* Excessive compression is STRICTLY FORBIDDEN — never write less than 90% of the original.
+* Excessive expansion is STRICTLY FORBIDDEN — never write more than 140% of the original. Do not pad, do not add filler, do not invent additional context to inflate length.
+* If you find yourself writing less than 90% — stop, go back, and expand each section.
+* If you find yourself writing more than 140% — stop, go back, and tighten the prose.
+* Count your characters before submitting. Confirm you are within the 90%-140% window.
 
 RESPONSE FORMAT (STRICTLY MANDATORY)
 * Main text: only in a code block; without comments inside
