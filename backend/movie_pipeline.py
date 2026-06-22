@@ -378,35 +378,81 @@ def _prepare_movie_clip(clip_path: str, out_path: str, uniq_params: dict,
 
 def _select_clips_for_segments(segments: list, movie_name: str,
                                 audio_dur: float,
-                                global_used_ids: set = None) -> list:
+                                global_used_ids: set = None,
+                                main_characters: list = None,
+                                score_rules: dict = None,
+                                niche_path: str = None) -> list:
     """
-    Для кожного Whisper-сегменту (2-5s):
-    1. Знаходить 3 кандидати (keyword scoring)
-    2. Валідує всі 3 через Gemini batch
-    3. Обирає найкращий (score >= 0.85; fallback — найвищий score)
-    → 1 кліп на сегмент, тривалість = тривалість сегменту
+    For each Whisper segment (2-5s):
+      1. Get 5 candidates via search_clips (Vertex embeddings → top-N).
+      2. Rank them via rank_clips_by_text — single text-only API call,
+         no visual frames sent. Pioneer (primary) / GigaCoder (fallback).
+      3. Apply niche score modifiers (main_character bonus, scene penalties, etc.).
+      4. Pick the best clip respecting uniqueness and adjacent-index rules.
 
-    global_used_ids — множина ID кліпів вже використаних в ПОПЕРЕДНІХ відео батчу.
-
-    Повертає: [{"file": path, "duration": seg_dur}, ...]
+    global_used_ids — clip IDs already used in PREVIOUS videos of this batch.
+    main_characters — list of names input on the UI (e.g. ["Tigress"]).
+    score_rules — dict from niche JSON's "score_rules" block.
     """
+    from backend.movie_library import rank_clips_by_text
+
     used_ids = global_used_ids if global_used_ids is not None else set()
     selected: list = []
 
     all_movie_clips = get_movie_clips(movie_name)
 
-    for seg in segments:
+    # Pre-compute the full set of known character names across the movie
+    all_known_chars: set = set()
+    for c in all_movie_clips:
+        for ch in c.get("characters", []) or []:
+            if ch:
+                all_known_chars.add(ch)
+
+    last_clip_id: str | None = None
+
+    def _index_in_source(clip_id: str) -> int | None:
+        """Extract numeric tail from clip id like 'kungfu_panda_0042' → 42."""
+        if not clip_id:
+            return None
+        m = re.match(r"^.+_(\d+)$", clip_id)
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+
+    def _is_adjacent(prev_id: str | None, candidate_id: str) -> bool:
+        if not prev_id:
+            return False
+        p_idx = _index_in_source(prev_id)
+        c_idx = _index_in_source(candidate_id)
+        if p_idx is None or c_idx is None:
+            return False
+        # Same movie source, immediate next index
+        prev_src = re.sub(r"_\d+$", "", prev_id)
+        cand_src = re.sub(r"_\d+$", "", candidate_id)
+        if prev_src != cand_src:
+            return False
+        return c_idx == p_idx + 1
+
+    n_segs = len(segments)
+    for seg_idx, seg in enumerate(segments):
         chunk   = seg.get("text", "")
         seg_dur = max(2.0, seg["end"] - seg["start"])
 
-        # 3 кандидати (keyword scoring)
+        # Surrounding context for the ranker
+        prev_text = segments[seg_idx - 1].get("text", "") if seg_idx > 0 else ""
+        next_text = segments[seg_idx + 1].get("text", "") if seg_idx + 1 < n_segs else ""
+
+        # Get up to 5 candidates from the embedding-based search
         candidates = search_clips(
             chunk, movie_name=movie_name,
             used_ids=used_ids, top_n=5,
             gemini_validate=False,
         )
 
-        # Fallback — будь-який невикористаний кліп
+        # Fallback — any unused clip
         if not candidates:
             candidates = [
                 c for c in all_movie_clips
@@ -416,7 +462,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
             random.shuffle(candidates)
             candidates = candidates[:5]
 
-        # Якщо всі використані — дозволяємо повтори
+        # If everything is used — allow repeats as last resort
         if not candidates:
             candidates = [
                 c for c in all_movie_clips
@@ -428,51 +474,53 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         if not candidates:
             continue
 
-        # Gemini batch validation (3 кандидати за 1 запит)
-        pool       = [c for c in candidates if os.path.exists(c.get("file", ""))][:5]
-        if not pool:
-            continue
-        first_pool = pool[:3]
-        clip_paths = [c["file"] for c in first_pool]
+        # Rank candidates via single text-only API call + local modifiers
         try:
-            scores = validate_clips_batch(clip_paths, chunk)
+            ranked = rank_clips_by_text(
+                candidates=candidates,
+                segment_text=chunk,
+                prev_text=prev_text,
+                next_text=next_text,
+                main_characters=main_characters or [],
+                score_rules=score_rules or {},
+                all_known_chars=all_known_chars,
+            )
         except Exception as e:
-            print(f"[movie_pipeline] Batch validation error: {e}", flush=True)
-            scores = [0.0] * len(first_pool)
+            print(f"[movie_pipeline] Text ranking error: {e}", flush=True)
+            ranked = [(c, 0.0, {}) for c in candidates]
 
-        validation_threshold = 0.75
-        scored_pool = list(zip(first_pool, scores))
+        # Pick the best clip respecting uniqueness and adjacent-index rules
+        best_clip = None
+        for clip, score, breakdown in ranked:
+            cid = clip.get("id", clip.get("file", ""))
+            if cid in used_ids:
+                continue
+            if _is_adjacent(last_clip_id, cid):
+                continue
+            best_clip = clip
+            break
 
-        if scored_pool and max((s for _, s in scored_pool), default=0.0) < validation_threshold and len(pool) > 3:
-            extra_pool = pool[3:5]
-            extra_paths = [c["file"] for c in extra_pool]
-            try:
-                extra_scores = validate_clips_batch(extra_paths, chunk)
-            except Exception as e:
-                print(f"[movie_pipeline] Extra validation error: {e}", flush=True)
-                extra_scores = [0.0] * len(extra_pool)
-            scored_pool.extend(zip(extra_pool, extra_scores))
+        # Relax adjacent rule if nothing left
+        if best_clip is None:
+            for clip, score, breakdown in ranked:
+                cid = clip.get("id", clip.get("file", ""))
+                if cid in used_ids:
+                    continue
+                best_clip = clip
+                break
 
-        # Вибираємо найкращий
-        best_validated       = None
-        best_validated_score = -1.0
-        best_overall         = scored_pool[0][0]
-        best_overall_score   = scored_pool[0][1]
+        # Last resort: highest-ranked even if used
+        if best_clip is None and ranked:
+            best_clip = ranked[0][0]
 
-        for clip, score in scored_pool:
-            if score > best_overall_score:
-                best_overall_score = score
-                best_overall       = clip
-            if score >= validation_threshold and score > best_validated_score:
-                best_validated_score = score
-                best_validated       = clip
-
-        best_clip = best_validated if best_validated is not None else best_overall
+        if best_clip is None:
+            continue
 
         file_path = best_clip["file"]
         clip_id   = best_clip.get("id", file_path)
         selected.append({"file": file_path, "duration": seg_dur, "id": clip_id})
         used_ids.add(clip_id)
+        last_clip_id = clip_id
 
     print(f"[movie_pipeline] Selected {len(selected)} clips for {audio_dur:.1f}s audio", flush=True)
     return selected
@@ -756,12 +804,17 @@ def prepare(source_url: str, emit=None) -> dict:
 
 
 def produce(prepare_id: str, movie_name: str, language: str, emit=None,
-            global_used_ids: set = None) -> dict:
+            global_used_ids: set = None,
+            main_character: str = "",
+            test_mode: bool = False) -> dict:
     """
-    Фаза 2: рірайт → TTS → підбір кліпів + validation → текстові оверлеї → монтаж.
+    Фаза 2: рірайт → TTS → підбір кліпів + ranking → текстові оверлеї → монтаж.
 
     global_used_ids — множина clip ID вже використаних в попередніх відео батчу.
     Передається ззовні щоб гарантувати різноманітність відеоряду між відео.
+
+    main_character — головні герої відео (через кому) для буст-скорів у текстовому
+    ранжуванні кандидатів. Наприклад "Tigress" або "Tigress, Po".
     """
     def log(step, msg):
         print(f"[movie_pipeline:produce:{step}] {msg}", flush=True)
@@ -875,7 +928,20 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
     text_overlays = _build_text_overlays(overlay_plan, segments_with_times)
     log("overlays", f"Planned {len(text_overlays)} text overlays.")
 
-    # ── Підбір кліпів: 3 кандидати на сегмент → Gemini → найкращий ───────────
+    # ── Підбір кліпів: top-5 → Pioneer text ranking → найкращий ──────────────
+    # Load niche score_rules so the ranker knows main_character / scene penalties / etc.
+    niche_path = os.path.join(config.NICHES_DIR, f"{state.get('niche_name', '')}.json")
+    score_rules = {}
+    if os.path.exists(niche_path):
+        try:
+            with open(niche_path, encoding="utf-8") as f:
+                niche_cfg = json.load(f)
+            score_rules = niche_cfg.get("score_rules", {}) or {}
+        except Exception:
+            score_rules = {}
+
+    main_chars_list = [c.strip() for c in (main_character or "").split(",") if c.strip()]
+
     clips_cache = os.path.join(proj_dir, "clips.json")
     if os.path.exists(clips_cache):
         with open(clips_cache, encoding="utf-8") as f:
@@ -887,10 +953,13 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
             clip_data = [c for c in clip_data if os.path.exists(c.get("file", ""))]
         log("clips", f"Clips cached: {len(clip_data)} clips loaded from clips.json")
     else:
-        log("clips", f"Selecting clips from '{movie_name}' (3 candidates/seg → Gemini)...")
+        log("clips", f"Selecting clips from '{movie_name}' (top-5 → text ranking → best)...")
         clip_data = _select_clips_for_segments(
             segments_with_times, movie_name, audio_dur,
             global_used_ids=global_used_ids,
+            main_characters=main_chars_list,
+            score_rules=score_rules,
+            niche_path=niche_path,
         )
         if not clip_data:
             raise RuntimeError(f"No clips found for movie '{movie_name}'. Is it indexed?")
@@ -994,11 +1063,15 @@ def produce_from_script(
     metadata: dict = None,
     emit=None,
     global_used_ids: set = None,
+    main_character: str = "",
+    niche_name: str = "",
 ) -> dict:
     """
     Produce a video from a pre-written script (Writer flow).
     Skips transcription and rewrite — goes straight to TTS → clips → montage.
     metadata: optional dict with keys title, titles, description, tags.
+    main_character: characters to boost in clip ranking (comma-separated names).
+    niche_name: niche file (without .json) for loading score_rules.
     """
     def log(step, msg):
         print(f"[movie_pipeline:from_script:{step}] {msg}", flush=True)
@@ -1061,11 +1134,27 @@ def produce_from_script(
     text_overlays = _build_text_overlays(overlay_plan, segments_with_times)
     log("overlays", f"Planned {len(text_overlays)} text overlays.")
 
-    # ── Clip selection: 3 candidates/seg → Gemini → best ─────────────────────
-    log("clips", f"Selecting clips from '{movie_name}' (3 candidates/seg → Gemini)...")
+    # ── Clip selection: top-5 → text ranking → best ──────────────────────────
+    # Load niche score_rules for the ranker
+    score_rules = {}
+    if niche_name:
+        niche_path = os.path.join(config.NICHES_DIR, f"{niche_name}.json")
+        if os.path.exists(niche_path):
+            try:
+                with open(niche_path, encoding="utf-8") as f:
+                    niche_cfg = json.load(f)
+                score_rules = niche_cfg.get("score_rules", {}) or {}
+            except Exception:
+                score_rules = {}
+
+    main_chars_list = [c.strip() for c in (main_character or "").split(",") if c.strip()]
+
+    log("clips", f"Selecting clips from '{movie_name}' (top-5 → text ranking → best)...")
     clip_data = _select_clips_for_segments(
         segments_with_times, movie_name, audio_dur,
         global_used_ids=global_used_ids,
+        main_characters=main_chars_list,
+        score_rules=score_rules,
     )
     if not clip_data:
         raise RuntimeError(f"No clips found for movie '{movie_name}'. Is it indexed?")
@@ -1141,7 +1230,8 @@ def produce_from_script(
 
 
 def produce_batch(prepare_id: str, movie_name: str, language: str,
-                  count: int = 3, emit=None) -> list:
+                  count: int = 3, emit=None,
+                  main_character: str = "") -> list:
     """
     Виробляє count відео послідовно з одного prepare_id.
 
@@ -1173,6 +1263,7 @@ def produce_batch(prepare_id: str, movie_name: str, language: str,
                 language        = language,
                 emit            = emit,
                 global_used_ids = global_used_ids,
+                main_character  = main_character,
             )
             results.append({"index": i + 1, "status": "ok", **result})
             log(f"Video {i + 1}/{count} done: {result['output_path']}")

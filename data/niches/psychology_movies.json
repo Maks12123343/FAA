@@ -3,7 +3,18 @@
   "description": "Psychology of movies, characters, dark themes, film analysis",
   "pipeline_type": "movie",
   "montage_style": "cinematic",
-  "title_keywords": ["psychology", "psychological", "dark", "movie", "film", "character", "villain", "hero", "mind", "trauma"],
+  "title_keywords": [
+    "psychology",
+    "psychological",
+    "dark",
+    "movie",
+    "film",
+    "character",
+    "villain",
+    "hero",
+    "mind",
+    "trauma"
+  ],
   "channels": [
     "https://www.youtube.com/@NerdSync",
     "https://www.youtube.com/@TheTake",
@@ -20,10 +31,53 @@
     "film theory psychology"
   ],
   "stock_tags": [
-    "cinema", "movie theater", "film reel", "dark psychology",
-    "human mind", "brain", "emotions", "storytelling",
-    "dramatic scene", "psychological thriller"
+    "cinema",
+    "movie theater",
+    "film reel",
+    "dark psychology",
+    "human mind",
+    "brain",
+    "emotions",
+    "storytelling",
+    "dramatic scene",
+    "psychological thriller"
   ],
-  "clip_score_threshold": 0.80,
-  "movie_library": ["Kung Fu Panda"]
+  "clip_score_threshold": 0.8,
+  "movie_library": [
+    "Kung Fu Panda"
+  ],
+  "score_rules": {
+    "character_mentioned_bonus": 0.4,
+    "main_character_bonus": 0.2,
+    "wrong_character_penalty": -0.2,
+    "no_relevant_character_penalty": -0.15,
+    "character_bonus_cap": 0.5,
+    "scene_penalties": {
+      "credits": -1.0,
+      "title_card": -1.0,
+      "transition": -0.3
+    },
+    "theme_bonus_per_match": 0.05,
+    "theme_bonus_cap": 0.2,
+    "psychology_themes": [
+      "trauma",
+      "identity",
+      "isolation",
+      "fear",
+      "rejection",
+      "shame",
+      "guilt",
+      "vulnerability",
+      "acceptance",
+      "growth",
+      "impostor_syndrome",
+      "false_self",
+      "healing",
+      "betrayal",
+      "anger",
+      "grief",
+      "love",
+      "trust"
+    ]
+  }
 }

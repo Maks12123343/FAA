@@ -983,6 +983,323 @@ def validate_clips_batch(clip_paths: list, section_text: str) -> list:
     return [s if s is not None else 0.0 for s in scores]
 
 
+# ── Text-only ranking (NEW: replaces visual validation in movie pipeline) ─────
+
+_TEXT_RANK_PROMPT = """\
+You are picking the best clip out of {n} candidates for a narration segment.
+
+CONTEXT (what's being said around this moment):
+Previous: {prev_text}
+CURRENT: {current_text}
+Next: {next_text}
+
+CANDIDATES — each one already has a description, tags and themes from a prior visual analysis:
+
+{candidates_block}
+
+Score every candidate from 0.0 (totally unrelated) to 1.0 (perfect fit) based on
+how well it illustrates the CURRENT narration. Use Previous/Next only as context
+to disambiguate the current segment — don't reward clips that fit the next or
+previous sentence better than the current one.
+
+Reply with JSON only, no markdown, exactly:
+{{"scores": [0.0, 0.0, 0.0, 0.0, 0.0]}}
+The list must have exactly {n} numbers in the same order as the candidates."""
+
+
+def _format_candidates_block(candidates: list) -> str:
+    """Render candidates 1..N as a compact text block for the ranking prompt."""
+    lines = []
+    for i, c in enumerate(candidates, start=1):
+        chars = ", ".join(c.get("characters", []) or []) or "—"
+        tags = ", ".join((c.get("tags", []) or [])[:8]) or "—"
+        themes = ", ".join(c.get("themes", []) or []) or "—"
+        emotion = c.get("emotion", "neutral")
+        scene = c.get("scene_type", "—")
+        desc = (c.get("description", "") or "").strip().replace("\n", " ")
+        lines.append(
+            f"CLIP {i}:\n"
+            f"  description: {desc}\n"
+            f"  characters: {chars}\n"
+            f"  emotion: {emotion}\n"
+            f"  scene_type: {scene}\n"
+            f"  tags: {tags}\n"
+            f"  themes: {themes}"
+        )
+    return "\n\n".join(lines)
+
+
+def _call_text_ranker(prompt: str) -> list | None:
+    """
+    Send the ranking prompt to Pioneer (primary) → GigaCoder (fallback).
+    Returns list[float] or None on total failure.
+    """
+    import urllib.request
+    import urllib.error
+
+    settings = config.load_settings()
+
+    def _parse_scores(body_text: str, expected_n: int) -> list | None:
+        try:
+            text = re.sub(r"^```(?:json)?\s*", "", body_text.strip())
+            text = re.sub(r"\s*```$", "", text)
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            data = json.loads(m.group() if m else text)
+            arr = data.get("scores", [])
+            if not isinstance(arr, list):
+                return None
+            out = []
+            for x in arr[:expected_n]:
+                try:
+                    out.append(max(0.0, min(1.0, float(x))))
+                except Exception:
+                    out.append(0.0)
+            while len(out) < expected_n:
+                out.append(0.0)
+            return out
+        except Exception:
+            return None
+
+    expected_n = prompt.count("CLIP ")  # crude but OK — we control the prompt
+
+    # Try Pioneer first
+    pio_keys = settings.get("pioneer_api_keys", [])
+    pio_url = settings.get("pioneer_api_url", "")
+    pio_model = settings.get("pioneer_model", "gemini-3.5-flash")
+    if pio_keys and pio_url:
+        _, rotated = _next_pioneer_key(pio_keys)
+        for key in rotated:
+            for attempt in range(3):
+                try:
+                    payload = json.dumps({
+                        "model": pio_model,
+                        "messages": [
+                            {"role": "system", "content": "You rank clip candidates for a narration. Reply with strict JSON only."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "max_tokens": 200,
+                    }).encode("utf-8")
+                    req = urllib.request.Request(
+                        pio_url, data=payload,
+                        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        body = json.loads(resp.read().decode("utf-8"))
+                    text = body["choices"][0]["message"]["content"]
+                    scores = _parse_scores(text, expected_n)
+                    if scores is not None:
+                        return scores
+                    break  # got a response but couldn't parse — try next key once
+                except Exception as e:
+                    err = str(e).lower()
+                    is_net = any(s in err for s in (
+                        "lookup timed out", "11002", "timed out", "connection",
+                        "temporarily unavailable", "name or service",
+                    ))
+                    if is_net and attempt < 2:
+                        time.sleep([1, 3, 7][attempt])
+                        continue
+                    break
+
+    # Fallback: GigaCoder
+    gc_keys = settings.get("gigacoder_api_keys", [])
+    gc_url = settings.get("gigacoder_api_url", "")
+    gc_model = settings.get("gigacoder_model", "gpt-5.4-mini")
+    if gc_keys and gc_url:
+        _, rotated = _next_gigacoder_key(gc_keys)
+        for key in rotated:
+            for attempt in range(3):
+                try:
+                    payload = json.dumps({
+                        "model": gc_model,
+                        "messages": [
+                            {"role": "system", "content": "You rank clip candidates for a narration. Reply with strict JSON only."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "max_tokens": 200,
+                    }).encode("utf-8")
+                    req = urllib.request.Request(
+                        gc_url, data=payload,
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {key}",
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                            "Accept": "application/json",
+                        },
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        body = json.loads(resp.read().decode("utf-8"))
+                    text = body["choices"][0]["message"]["content"]
+                    scores = _parse_scores(text, expected_n)
+                    if scores is not None:
+                        return scores
+                    break
+                except Exception as e:
+                    err = str(e).lower()
+                    is_net = any(s in err for s in (
+                        "lookup timed out", "11002", "timed out", "connection",
+                        "temporarily unavailable", "name or service",
+                    ))
+                    if is_net and attempt < 2:
+                        time.sleep([1, 3, 7][attempt])
+                        continue
+                    break
+
+    return None
+
+
+def _detect_mentioned_characters(text: str, all_known_chars: set) -> set:
+    """Find which known characters are explicitly mentioned in the segment text."""
+    if not text or not all_known_chars:
+        return set()
+    text_lower = text.lower()
+    found = set()
+    for ch in all_known_chars:
+        if not ch or len(ch) < 2:
+            continue
+        if ch.lower() in text_lower:
+            found.add(ch)
+    return found
+
+
+def _apply_score_modifiers(
+    candidate: dict,
+    base_score: float,
+    segment_text: str,
+    main_characters: list,
+    mentioned_characters: set,
+    score_rules: dict,
+) -> tuple:
+    """
+    Apply niche-defined score rules on top of the base Pioneer score.
+    Returns (final_score, breakdown_dict) for logging/debugging.
+    """
+    rules = score_rules or {}
+    breakdown = {"base": base_score}
+
+    char_bonus = 0.0
+    char_pen   = 0.0
+    clip_chars = set(candidate.get("characters", []) or [])
+    main_set   = {c.strip() for c in (main_characters or []) if c and c.strip()}
+
+    # Direct match: clip contains a character explicitly mentioned in segment
+    matched_mentioned = clip_chars & mentioned_characters
+    if matched_mentioned:
+        char_bonus += float(rules.get("character_mentioned_bonus", 0.40))
+
+    # Main character bonus when no explicit mention or the mentioned one is also main
+    if main_set and (clip_chars & main_set):
+        char_bonus += float(rules.get("main_character_bonus", 0.20))
+
+    # Penalty: segment mentions a non-main character, but clip shows ONLY main
+    if mentioned_characters and not (clip_chars & mentioned_characters):
+        non_main_mentioned = mentioned_characters - main_set
+        if non_main_mentioned and clip_chars and (clip_chars <= main_set):
+            char_pen += float(rules.get("wrong_character_penalty", -0.20))
+
+    # Penalty when clip has no relevant character and no main char either
+    if not (clip_chars & mentioned_characters) and not (clip_chars & main_set):
+        if clip_chars or mentioned_characters or main_set:
+            char_pen += float(rules.get("no_relevant_character_penalty", -0.15))
+
+    # Cap the positive character bonus
+    cap = float(rules.get("character_bonus_cap", 0.50))
+    char_bonus = min(char_bonus, cap)
+    breakdown["char_bonus"] = char_bonus
+    breakdown["char_penalty"] = char_pen
+
+    # Scene type penalty
+    scene_pen = 0.0
+    scene_penalties = rules.get("scene_penalties", {}) or {}
+    scene_type = candidate.get("scene_type", "")
+    if scene_type and scene_type in scene_penalties:
+        scene_pen = float(scene_penalties[scene_type])
+    breakdown["scene_penalty"] = scene_pen
+
+    # Theme bonus (soft signal)
+    theme_bonus = 0.0
+    psych_themes = set(rules.get("psychology_themes", []) or [])
+    clip_themes = set(candidate.get("themes", []) or [])
+    bonus_per = float(rules.get("theme_bonus_per_match", 0.05))
+    seg_lower = (segment_text or "").lower()
+    matches = 0
+    for theme in clip_themes & psych_themes:
+        # Theme bonus if theme word appears in the segment text
+        keyword = theme.replace("_", " ")
+        if keyword in seg_lower:
+            matches += 1
+    theme_bonus = min(matches * bonus_per, float(rules.get("theme_bonus_cap", 0.20)))
+    breakdown["theme_bonus"] = theme_bonus
+
+    final = base_score + char_bonus + char_pen + scene_pen + theme_bonus
+    breakdown["final"] = final
+    return final, breakdown
+
+
+def rank_clips_by_text(
+    candidates: list,
+    segment_text: str,
+    prev_text: str = "",
+    next_text: str = "",
+    main_characters: list = None,
+    score_rules: dict = None,
+    all_known_chars: set = None,
+) -> list:
+    """
+    Rank up to N candidates against the narration using a single text-only API call,
+    then apply niche score modifiers locally.
+
+    Returns a sorted list of (candidate, final_score, breakdown) — best first.
+    """
+    if not candidates:
+        return []
+
+    # Step 1: build prompt and get base scores from Pioneer/GigaCoder
+    block = _format_candidates_block(candidates)
+    prompt = _TEXT_RANK_PROMPT.format(
+        n=len(candidates),
+        prev_text=(prev_text or "—").strip()[:300],
+        current_text=(segment_text or "").strip()[:400],
+        next_text=(next_text or "—").strip()[:300],
+        candidates_block=block,
+    )
+
+    base_scores = _call_text_ranker(prompt)
+    if base_scores is None or len(base_scores) < len(candidates):
+        # Total API failure — fall back to keyword-derived order (descending by index)
+        base_scores = [0.5] * len(candidates)
+
+    # Step 2: detect mentioned characters in current segment
+    if all_known_chars is None:
+        # Auto-derive from candidate pool if caller didn't supply
+        all_known_chars = set()
+        for c in candidates:
+            for ch in c.get("characters", []) or []:
+                if ch:
+                    all_known_chars.add(ch)
+
+    mentioned = _detect_mentioned_characters(segment_text or "", all_known_chars)
+
+    # Step 3: apply local modifiers
+    ranked = []
+    for c, base in zip(candidates, base_scores):
+        final, breakdown = _apply_score_modifiers(
+            candidate=c,
+            base_score=base,
+            segment_text=segment_text or "",
+            main_characters=main_characters or [],
+            mentioned_characters=mentioned,
+            score_rules=score_rules or {},
+        )
+        ranked.append((c, final, breakdown))
+
+    ranked.sort(key=lambda x: x[1], reverse=True)
+    return ranked
+
+
 # ── Uniqualization ─────────────────────────────────────────────────────────────
 
 def _uniqualize_movie_clip(input_path: str, output_path: str, params: dict):
