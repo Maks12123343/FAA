@@ -135,6 +135,10 @@ def call_gigacoder_opus(system: str, messages: list, timeout: int = 180, max_ret
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {api_key}",
+                    # Cloudflare on gigacoder.org blocks default Python user agents
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept": "application/json",
                 },
                 json=payload,
                 timeout=timeout,
@@ -146,7 +150,16 @@ def call_gigacoder_opus(system: str, messages: list, timeout: int = 180, max_ret
             stop_reason = "max_tokens" if finish == "length" else finish
             return text, stop_reason
         except Exception as e:
-            last_err = f"{type(e).__name__} attempt {attempt+1}"
+            # Capture HTTP status + response body for debugging instead of just type name
+            err_detail = type(e).__name__
+            try:
+                if hasattr(e, "response") and e.response is not None:
+                    err_detail += f" status={e.response.status_code}"
+                    body = e.response.text[:300]
+                    err_detail += f" body={body!r}"
+            except Exception:
+                pass
+            last_err = f"{err_detail} attempt {attempt+1}"
             print(f"[api_client] GigaCoder Opus: {last_err}", flush=True)
             if attempt < max_retries - 1:
                 time.sleep(5)
@@ -184,6 +197,10 @@ def call_gigacoder(system: str, messages: list, timeout: int = 180, max_retries:
                     headers={
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {api_key}",
+                        # Cloudflare on gigacoder.org blocks default Python user agents
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        "Accept": "application/json",
                     },
                     json=payload,
                     timeout=timeout,
@@ -195,9 +212,17 @@ def call_gigacoder(system: str, messages: list, timeout: int = 180, max_retries:
                 stop_reason = "max_tokens" if finish == "length" else finish
                 return text, stop_reason
             except Exception as e:
-                last_err = f"{type(e).__name__} key {api_keys.index(api_key)+1} attempt {attempt+1}"
+                err_detail = type(e).__name__
+                try:
+                    if hasattr(e, "response") and e.response is not None:
+                        err_detail += f" status={e.response.status_code}"
+                        body = e.response.text[:300]
+                        err_detail += f" body={body!r}"
+                except Exception:
+                    pass
+                last_err = f"{err_detail} attempt {attempt+1}"
                 print(f"[api_client] GigaCoder: {last_err}", flush=True)
                 if attempt < max_retries - 1:
-                    time.sleep(3)
+                    time.sleep(5)
 
-    raise RuntimeError(f"GigaCoder GPT failed: {last_err}")
+    raise RuntimeError(f"GigaCoder failed: {last_err}")
