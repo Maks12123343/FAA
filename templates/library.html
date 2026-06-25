@@ -6,9 +6,9 @@
   <h2>Add Videos to Library</h2>
   <div class="field">
     <label>Niche</label>
-    <select id="libNiche">
+    <select id="libNiche" onchange="updateNicheUI()">
       {% for n in niches %}
-      <option value="{{ n.id }}">{{ n.name }}</option>
+      <option value="{{ n.id }}" data-mode="{{ n.library_mode or 'standard' }}">{{ n.name }}</option>
       {% endfor %}
     </select>
   </div>
@@ -17,6 +17,22 @@
     <textarea id="libUrls" rows="6" placeholder="https://www.youtube.com/watch?v=...&#10;https://www.youtube.com/watch?v=...&#10;https://www.youtube.com/watch?v=..." style="width:100%;background:#111;border:1px solid #333;border-radius:6px;padding:10px;color:#fff;font-size:13px;resize:vertical;margin-top:4px"></textarea>
   </div>
   <button class="btn btn-primary" onclick="addToLibrary()">Download & Validate All</button>
+</div>
+
+<!-- ── clip_classification mode (war niche etc.) ─────────────────────────── -->
+<div class="card" id="libClassifyCard" style="display:none">
+  <h2>CLIP Auto-Classification</h2>
+  <p style="color:#aaa;font-size:13px;margin-bottom:12px">
+    Drop mp4 files into the niche's <code>_sources/</code> folder, then click below.
+    Each source is scene-cut, then every clip is classified into the niche's category folders
+    by an on-device CLIP model (3 frames averaged). Clips with low confidence go to
+    <code>_unsorted/</code> for manual review.
+  </p>
+  <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <button class="btn btn-success" onclick="runClipClassifier()">Run CLIP classifier</button>
+    <button class="btn" onclick="loadClassifyStats()">Refresh stats</button>
+  </div>
+  <div id="classifyStatsWrap" style="margin-top:16px"></div>
 </div>
 
 <div class="card">
@@ -164,6 +180,73 @@ socket.on('library_done', data => {
   _libBulkIdx++;
   processNextLibUrl();
 });
+
+// ── clip_classification mode (war niche) ─────────────────────────────────
+
+function updateNicheUI() {
+  const sel = document.getElementById('libNiche');
+  const opt = sel.options[sel.selectedIndex];
+  const mode = (opt && opt.dataset.mode) || 'standard';
+  const card = document.getElementById('libClassifyCard');
+  if (mode === 'clip_classification') {
+    card.style.display = 'block';
+    loadClassifyStats();
+  } else {
+    card.style.display = 'none';
+  }
+}
+
+function runClipClassifier() {
+  const niche = document.getElementById('libNiche').value;
+  document.getElementById('libLog').innerHTML = '';
+  document.getElementById('libProgressCard').style.display = 'block';
+  log(`Starting CLIP classifier for niche "${niche}"...`);
+  fetch('/api/library/classify', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({niche}),
+  }).then(r => r.json()).then(d => {
+    if (d.error) log('ERROR: ' + d.error, 'error');
+  }).catch(e => log('ERROR: ' + e, 'error'));
+}
+
+function loadClassifyStats() {
+  const niche = document.getElementById('libNiche').value;
+  fetch('/api/library/classify_stats?niche=' + niche).then(r => r.json()).then(data => {
+    const wrap = document.getElementById('classifyStatsWrap');
+    if (!wrap || !data || data.error) return;
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead>'
+      + '<tr style="border-bottom:1px solid #333">'
+      + '<th style="text-align:left;padding:6px 0;color:#aaa">Category</th>'
+      + '<th style="text-align:center;color:#aaa">Clips</th>'
+      + '</tr></thead><tbody>';
+    const cats = data.categories || {};
+    const keys = Object.keys(cats);
+    let total = 0;
+    for (const k of keys) {
+      total += cats[k] || 0;
+      html += `<tr style="border-bottom:1px solid #1e1e1e">
+        <td style="padding:8px 0">${k}</td>
+        <td style="text-align:center"><span class="badge badge-green">${cats[k] || 0}</span></td>
+      </tr>`;
+    }
+    html += `</tbody></table><p style="color:#aaa;font-size:12px;margin-top:8px">
+      Total clips: ${total} — sources processed: ${data.sources_processed || 0}</p>`;
+    if (data.sources_dir) {
+      html += `<p style="color:#666;font-size:11px;margin-top:4px">
+        Drop source mp4s into: <code>${data.sources_dir}</code></p>`;
+    }
+    wrap.innerHTML = html;
+  }).catch(() => {});
+}
+
+socket.on('library_classify_done', data => {
+  log(`Classification done. ${data.categorized_clips || 0} categorized, ${data.unsorted_clips || 0} unsorted.`, 'done');
+  loadClassifyStats();
+});
+
+// Init on page load
+updateNicheUI();
 
 // Load stock stats on page load
 loadStockStats();

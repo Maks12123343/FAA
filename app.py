@@ -74,7 +74,12 @@ def _niches() -> list:
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
             name = f[:-5]
-            niches.append({"id": name, "name": data.get("name", name)})
+            niches.append({
+                "id":           name,
+                "name":         data.get("name", name),
+                "library_mode": data.get("library_mode", "standard"),
+                "pipeline_type": data.get("pipeline_type", "standard"),
+            })
     return niches
 
 
@@ -422,6 +427,81 @@ def fetch_stocks():
 
     socketio.start_background_task(run)
     return jsonify({"ok": True})
+
+
+# ── CLIP-classification library mode (e.g. russia_ukraine_war) ──────────────
+@app.route("/api/library/classify", methods=["POST"])
+def library_classify():
+    global _job_active
+    data = request.json or {}
+    try:
+        niche = _safe_id(data.get("niche", ""), "niche")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    niche_path = os.path.join(config.NICHES_DIR, f"{niche}.json")
+    if not os.path.exists(niche_path):
+        return jsonify({"error": f"Niche not found: {niche}"}), 404
+    with open(niche_path, encoding="utf-8") as f:
+        niche_cfg = json.load(f)
+
+    if niche_cfg.get("library_mode") != "clip_classification":
+        return jsonify({"error": f"Niche '{niche}' is not in clip_classification mode"}), 400
+
+    with _job_lock:
+        if _job_active:
+            return jsonify({"error": "A job is already running. Wait for it to finish."}), 429
+        _job_active = True
+
+    def _emit(step, msg):
+        socketio.emit("library_progress", {"message": msg})
+        eventlet.sleep(0)
+
+    def run():
+        global _job_active
+        try:
+            from backend import clip_classifier
+            result = clip_classifier.process_library(niche, niche_cfg, emit=_emit)
+            socketio.emit("library_classify_done", result)
+        except Exception as e:
+            import traceback
+            print(f"[app] ERROR in library_classify: {e}\n{traceback.format_exc()}", flush=True)
+            socketio.emit("library_progress", {"message": f"ERROR: {e}"})
+        finally:
+            with _job_lock:
+                _job_active = False
+
+    socketio.start_background_task(run)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/library/classify_stats")
+def library_classify_stats():
+    try:
+        niche = _safe_id(request.args.get("niche", ""), "niche")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    niche_path = os.path.join(config.NICHES_DIR, f"{niche}.json")
+    if not os.path.exists(niche_path):
+        return jsonify({"error": "Niche not found"}), 404
+    with open(niche_path, encoding="utf-8") as f:
+        niche_cfg = json.load(f)
+    if niche_cfg.get("library_mode") != "clip_classification":
+        return jsonify({"error": "Not a clip_classification niche"}), 400
+
+    from backend import clip_classifier
+    state = clip_classifier._load_state(niche)
+    cats = list((niche_cfg.get("categories") or {}).keys()) + ["_unsorted"]
+    counts = clip_classifier._count_per_category(niche, cats)
+    return jsonify({
+        "niche":               niche,
+        "categories":          counts,
+        "sources_processed":   len(state.get("processed_sources", [])),
+        "categorized_clips":   state.get("categorized_clips", 0),
+        "unsorted_clips":      state.get("unsorted_clips", 0),
+        "sources_dir":         clip_classifier._sources_dir(niche),
+    })
 
 
 @app.route("/api/find_competitors", methods=["POST"])

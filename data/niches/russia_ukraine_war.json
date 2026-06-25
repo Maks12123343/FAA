@@ -1,0 +1,32 @@
+{
+  "name": "Russia-Ukraine War",
+  "description": "Documentary-style videos about the Russian-Ukrainian war",
+  "pipeline_type": "library",
+  "library_mode": "clip_classification",
+  "montage_style": "cinematic",
+  "search_keywords": [
+    "ukraine war analysis",
+    "russia ukraine war news",
+    "ukrainian armed forces"
+  ],
+  "categories": {
+    "infantry": "soldiers in trenches, infantry combat, foot soldiers in military gear, troops running through smoke, men with assault rifles taking positions",
+    "armor": "tanks firing, armored personnel carriers, IFVs in combat, military vehicles in convoy, destroyed armored vehicles on battlefield",
+    "artillery": "artillery firing, howitzers, rocket launchers, HIMARS launching, Grad rocket systems, self-propelled guns shelling",
+    "drones": "FPV drone footage, drone strikes from above, military drones in flight, kamikaze drones, drone operator with controller, top-down drone view of battlefield",
+    "aviation": "fighter jets in flight, military helicopters, anti-aircraft missile launches, Patriot system firing, missiles intercepting in sky, jet aircraft on runway",
+    "naval": "warships at sea, naval combat, military boats, sea drones, harbor with battleships, missile strike on ship",
+    "explosions": "large explosions, smoke columns rising, buildings being destroyed, missile impacts, fires from strikes, aftermath of bombing",
+    "general": "military maps with arrows, soldiers with flags, command center briefing rooms, military convoys on roads, ruined city buildings, troops walking together, military leadership figures speaking"
+  },
+  "clip_min_duration": 2,
+  "clip_max_duration": 5,
+  "scene_threshold": 0.3,
+  "min_classification_confidence": 0.18,
+  "frame_aggregation": "average",
+  "skip_validation": true,
+  "competitor_ratio": 1.0,
+  "output_width": 1920,
+  "output_height": 1080,
+  "fps": 30
+}

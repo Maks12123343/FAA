@@ -11,3 +11,5 @@ tqdm==4.66.5
 gunicorn==21.2.0
 eventlet==0.35.2
 youtube-transcript-api==1.0.3
+open-clip-torch==2.30.0
+pillow==10.4.0

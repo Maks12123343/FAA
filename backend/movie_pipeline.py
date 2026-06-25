@@ -485,47 +485,77 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         return c_idx == p_idx + 1
 
     n_segs = len(segments)
-    for seg_idx, seg in enumerate(segments):
-        chunk   = seg.get("text", "")
-        seg_dur = max(2.0, seg["end"] - seg["start"])
 
-        # Surrounding context for the ranker
+    # ── Phase 0: pre-compute all segment embeddings in batch ────────────────
+    # Vertex text-embedding-004 accepts up to 100 inputs per request, so 400
+    # segments = 4 batch calls instead of 400 separate ones. We then prime
+    # the embeddings cache so each search_clips → _semantic_rank → embed_text
+    # call below returns the vector instantly without an API hit.
+    try:
+        from backend import embeddings as _emb
+        seg_texts = [segments[i].get("text", "") for i in range(n_segs)]
+        nonempty = [t for t in seg_texts if t and t.strip()]
+        if nonempty:
+            t0 = time.time()
+            print(f"[movie_pipeline] Pre-computing {len(nonempty)} segment embeddings in batch...", flush=True)
+            if emit:
+                emit("clips", f"Pre-computing {len(nonempty)} segment embeddings in batch...")
+            vecs = _emb.embed_texts(nonempty, emit=emit)
+            if vecs:
+                with _emb._TEXT_CACHE_LOCK:
+                    for txt, vec in zip(nonempty, vecs):
+                        if txt and vec and txt.strip() not in _emb._TEXT_CACHE:
+                            if len(_emb._TEXT_CACHE) >= 5000:
+                                break
+                            _emb._TEXT_CACHE[txt.strip()] = vec
+                print(f"[movie_pipeline] Pre-cached {len(vecs)} segment vectors in {time.time()-t0:.1f}s", flush=True)
+    except Exception as e:
+        print(f"[movie_pipeline] Embedding pre-cache failed (will fall back to per-call): {e}", flush=True)
+
+    # ── Phase 1: rank all segments in PARALLEL ───────────────────────────────
+    # The ranking step is the slow part (Vertex embedding + Pioneer/GigaCoder
+    # API call per segment). We run up to PARALLEL_RANK at a time so the API
+    # calls don't sit one-after-another.
+    PARALLEL_RANK = 4
+
+    try:
+        import eventlet as _ev
+        _USE_EV = True
+        _sem = _ev.semaphore.Semaphore(PARALLEL_RANK)
+    except Exception:
+        _USE_EV = False
+        _sem = None
+
+    # Per-segment ranked lists (index → list[(clip, score, breakdown)])
+    ranked_per_seg: list = [None] * n_segs
+
+    def _rank_one(seg_idx: int):
+        seg = segments[seg_idx]
+        chunk = seg.get("text", "")
         prev_text = segments[seg_idx - 1].get("text", "") if seg_idx > 0 else ""
         next_text = segments[seg_idx + 1].get("text", "") if seg_idx + 1 < n_segs else ""
 
-        # Get up to 5 candidates from the embedding-based search
-        candidates = search_clips(
-            chunk, movie_name=movie_name,
-            used_ids=used_ids, top_n=5,
-            gemini_validate=False,
-        )
+        # Get up to 5 candidates from the embedding-based search.
+        # Note: we don't pass used_ids here — uniqueness is enforced in Phase 2,
+        # so all parallel rankings see the same candidate pool and don't race.
+        try:
+            cands = search_clips(
+                chunk, movie_name=movie_name,
+                used_ids=set(),  # uniqueness enforced later
+                top_n=5,
+                gemini_validate=False,
+            )
+        except Exception as e:
+            print(f"[movie_pipeline] search_clips error seg={seg_idx}: {e}", flush=True)
+            cands = []
 
-        # Fallback — any unused clip
-        if not candidates:
-            candidates = [
-                c for c in all_movie_clips
-                if c.get("id") not in used_ids
-                and os.path.exists(c.get("file", ""))
-            ]
-            random.shuffle(candidates)
-            candidates = candidates[:5]
+        if not cands:
+            ranked_per_seg[seg_idx] = []
+            return
 
-        # If everything is used — allow repeats as last resort
-        if not candidates:
-            candidates = [
-                c for c in all_movie_clips
-                if os.path.exists(c.get("file", ""))
-            ]
-            random.shuffle(candidates)
-            candidates = candidates[:5]
-
-        if not candidates:
-            continue
-
-        # Rank candidates via single text-only API call + local modifiers
         try:
             ranked = rank_clips_by_text(
-                candidates=candidates,
+                candidates=cands,
                 segment_text=chunk,
                 prev_text=prev_text,
                 next_text=next_text,
@@ -534,8 +564,67 @@ def _select_clips_for_segments(segments: list, movie_name: str,
                 all_known_chars=all_known_chars,
             )
         except Exception as e:
-            print(f"[movie_pipeline] Text ranking error: {e}", flush=True)
-            ranked = [(c, 0.0, {}) for c in candidates]
+            print(f"[movie_pipeline] Text ranking error seg={seg_idx}: {e}", flush=True)
+            ranked = [(c, 0.0, {}) for c in cands]
+
+        ranked_per_seg[seg_idx] = ranked
+
+    rank_start = time.time()
+    print(f"[movie_pipeline] Ranking {n_segs} segments in parallel ({PARALLEL_RANK} workers)...", flush=True)
+    if emit:
+        emit("clips", f"Ranking {n_segs} segments in parallel ({PARALLEL_RANK} workers)...")
+
+    if _USE_EV:
+        def _wrapped(i: int):
+            with _sem:
+                _rank_one(i)
+                # Emit progress every 25 segments
+                if (i + 1) % 25 == 0 or i + 1 == n_segs:
+                    done_count = sum(1 for r in ranked_per_seg if r is not None)
+                    elapsed = time.time() - rank_start
+                    rate = done_count / max(0.1, elapsed)
+                    eta = (n_segs - done_count) / max(0.1, rate)
+                    msg = f"Ranking: {done_count}/{n_segs} ({int(done_count/n_segs*100)}%, ~{eta/60:.1f}min left)"
+                    print(f"[movie_pipeline] {msg}", flush=True)
+                    if emit:
+                        emit("clips", msg)
+
+        threads = [_ev.spawn(_wrapped, i) for i in range(n_segs)]
+        for t in threads:
+            t.wait()
+    else:
+        for i in range(n_segs):
+            _rank_one(i)
+
+    print(f"[movie_pipeline] Ranking done in {(time.time()-rank_start)/60:.1f} min", flush=True)
+
+    # ── Phase 2: pick winners sequentially (uniqueness + adjacency rules) ────
+    for seg_idx, seg in enumerate(segments):
+        chunk   = seg.get("text", "")
+        seg_dur = max(2.0, seg["end"] - seg["start"])
+
+        ranked = ranked_per_seg[seg_idx] or []
+
+        # If ranking returned nothing, fall back to any unused clip
+        if not ranked:
+            fallback = [
+                c for c in all_movie_clips
+                if c.get("id") not in used_ids
+                and os.path.exists(c.get("file", ""))
+            ]
+            random.shuffle(fallback)
+            ranked = [(c, 0.0, {}) for c in fallback[:5]]
+
+        if not ranked:
+            ranked = [
+                (c, 0.0, {}) for c in all_movie_clips
+                if os.path.exists(c.get("file", ""))
+            ]
+            random.shuffle(ranked)
+            ranked = ranked[:5]
+
+        if not ranked:
+            continue
 
         # Pick the best clip respecting uniqueness and adjacent-index rules
         best_clip = None
@@ -1267,14 +1356,13 @@ def produce_from_script(
         "project_id":  proj_id,
         "project_dir": proj_dir,
         "output_path": output_path,
-        "audio_dur":   round(audio_dur, 1),
-        "clips_used":  len(prepared),
-        "title":       meta.get("title", title),
-        "titles":      meta.get("titles", []),
-        "description": meta.get("description", ""),
-        "tags":        meta.get("tags", []),
+        "clips_used":   len(prepared),
+        "title":        meta.get("title", source_title),
+        "all_titles":   meta.get("titles", []),
+        "description":  meta.get("description", ""),
+        "tags":         meta.get("tags", []),
+        "used_ids":     list(used_ids_in_this_video),
     }
-
 
 
 def produce_batch(prepare_id: str, movie_name: str, language: str,
@@ -1296,11 +1384,11 @@ def produce_batch(prepare_id: str, movie_name: str, language: str,
         if emit:
             emit("batch", msg)
 
-    count = max(1, min(count, 10))
+    count = max(1, min(count, 10))  # обмеження 1–10 відео
     log(f"Starting batch: {count} videos, movie='{movie_name}', lang='{language}'")
 
     results        = []
-    global_used_ids = set()
+    global_used_ids = set()  # кліпи використані в попередніх відео
 
     for i in range(count):
         log(f"Video {i + 1}/{count} starting...")
@@ -1316,6 +1404,7 @@ def produce_batch(prepare_id: str, movie_name: str, language: str,
             results.append({"index": i + 1, "status": "ok", **result})
             log(f"Video {i + 1}/{count} done: {result['output_path']}")
 
+            # Оновлюємо глобальний пул використаних кліпів з повернутих used_ids
             returned_ids = result.get("used_ids", [])
             for cid in returned_ids:
                 if cid:
