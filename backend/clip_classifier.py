@@ -356,10 +356,12 @@ def _cut_source_into_clips(src_path: str, out_dir: str, src_id: str,
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def process_library(niche_name: str, niche_cfg: dict, emit=None) -> dict:
+def process_library(niche_name: str, niche_cfg: dict, emit=None,
+                    youtube_urls: list = None) -> dict:
     """
     Run the full pipeline for one library-mode niche:
-    cut scenes from every new source mp4, classify clips, move to category folders.
+    optionally download YouTube URLs, then cut scenes from every new source mp4,
+    classify clips, move to category folders.
 
     niche_cfg must contain at least:
       - categories: dict[str, str]   # name → text description for CLIP
@@ -368,6 +370,9 @@ def process_library(niche_name: str, niche_cfg: dict, emit=None) -> dict:
       - clip_min_duration (default 2)
       - clip_max_duration (default 5)
       - min_classification_confidence (default 0.18)
+
+    youtube_urls — optional list of URLs to download into _sources/ before
+    processing. Downloads run 3 in parallel to avoid YouTube rate-limiting.
     """
     def log(msg: str):
         print(f"[clip_classifier:{niche_name}] {msg}", flush=True)
@@ -392,6 +397,15 @@ def process_library(niche_name: str, niche_cfg: dict, emit=None) -> dict:
     os.makedirs(unsorted, exist_ok=True)
     for cat in categories.keys():
         os.makedirs(_category_dir(niche_name, cat), exist_ok=True)
+
+    # ── Optional: download YouTube URLs first ────────────────────────────────
+    if youtube_urls:
+        urls = [u.strip() for u in youtube_urls if u and u.strip().startswith("http")]
+        if urls:
+            log(f"Downloading {len(urls)} YouTube URL(s) into _sources/ (3 parallel)...")
+            t0 = time.time()
+            saved = _download_youtube_urls(urls, sources, emit=emit)
+            log(f"Downloaded {len(saved)}/{len(urls)} videos in {(time.time()-t0)/60:.1f} min")
 
     # Discover source mp4 files we haven't processed yet
     state = _load_state(niche_name)
@@ -527,3 +541,125 @@ def list_clips_in_category(niche_name: str, category: str) -> list:
         ])
     except FileNotFoundError:
         return []
+
+
+# ── YouTube downloading ──────────────────────────────────────────────────────
+
+def _safe_filename(name: str) -> str:
+    """Strip filesystem-unfriendly characters."""
+    name = re.sub(r"[<>:\"/\\|?*\x00-\x1f]", "_", name)
+    name = name.strip(" .")
+    return name[:120] or "video"
+
+
+def _download_one_youtube(url: str, target_dir: str, emit=None) -> str | None:
+    """
+    Download one YouTube URL as mp4 to target_dir.
+    Returns the path to the saved file or None on failure.
+
+    yt-dlp picks the best mp4 with audio (or merges video+audio into mp4).
+    We don't use --quiet so any error message ends up in our logs for
+    debugging YouTube bot-detection / blocked URLs.
+    """
+    # Output template — yt-dlp expands %(title)s and %(id)s from the video
+    out_template = os.path.join(target_dir, "%(title).100s_%(id)s.%(ext)s")
+
+    cmd = [
+        "yt-dlp",
+        "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+        "--merge-output-format", "mp4",
+        "--no-warnings",
+        "--no-progress",
+        "--max-filesize", "5000M",
+        "-o", out_template,
+        url,
+    ]
+
+    msg = f"Downloading: {url}"
+    print(f"[clip_classifier] {msg}", flush=True)
+    if emit:
+        emit("library", msg)
+
+    try:
+        # Capture stderr only — yt-dlp also prints final filename to stdout
+        r = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=3600,  # 1 hour per video — fronts may have long docs
+        )
+        if r.returncode != 0:
+            err = (r.stderr or "")[-400:]
+            print(f"[clip_classifier] yt-dlp failed for {url}: {err}", flush=True)
+            if emit:
+                emit("library", f"yt-dlp failed: {err[:120]}")
+            return None
+    except subprocess.TimeoutExpired:
+        print(f"[clip_classifier] yt-dlp timeout for {url}", flush=True)
+        if emit:
+            emit("library", f"yt-dlp timeout: {url}")
+        return None
+    except Exception as e:
+        print(f"[clip_classifier] yt-dlp error for {url}: {e}", flush=True)
+        if emit:
+            emit("library", f"yt-dlp error: {e}")
+        return None
+
+    # Find the new mp4 — yt-dlp doesn't reliably print the final path, so
+    # we scan target_dir for the most recently modified mp4.
+    try:
+        candidates = [
+            os.path.join(target_dir, fn) for fn in os.listdir(target_dir)
+            if fn.lower().endswith(".mp4")
+        ]
+        if not candidates:
+            return None
+        # Pick the freshest file
+        latest = max(candidates, key=lambda p: os.path.getmtime(p))
+        # Sanity check — must have been modified in the last 90 minutes
+        if time.time() - os.path.getmtime(latest) > 90 * 60:
+            return None
+        return latest
+    except Exception:
+        return None
+
+
+def _download_youtube_urls(urls: list, target_dir: str, emit=None) -> list:
+    """
+    Download a list of YouTube URLs into target_dir, up to 3 in parallel
+    (more triggers YouTube rate-limiting). Returns the list of successfully
+    saved file paths.
+    """
+    if not urls:
+        return []
+    os.makedirs(target_dir, exist_ok=True)
+
+    saved: list = []
+    saved_lock = threading.Lock()
+    done = [0]
+
+    def _work(url: str):
+        path = _download_one_youtube(url, target_dir, emit=emit)
+        with saved_lock:
+            done[0] += 1
+            if path:
+                saved.append(path)
+            n_done = done[0]
+        if emit:
+            emit("library", f"Downloads: {n_done}/{len(urls)} done")
+
+    try:
+        import eventlet as _ev
+        pool = _ev.GreenPool(size=3)
+        for u in urls:
+            pool.spawn(_work, u)
+        pool.waitall()
+    except Exception:
+        # Fallback to threads if eventlet not available
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            list(ex.map(_work, urls))
+
+    return saved

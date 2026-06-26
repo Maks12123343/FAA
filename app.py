@@ -439,6 +439,12 @@ def library_classify():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
+    # Optional YouTube URLs — downloaded into _sources/ before classification
+    youtube_urls = data.get("youtube_urls", []) or []
+    if isinstance(youtube_urls, str):
+        youtube_urls = [u.strip() for u in youtube_urls.split("\n") if u.strip()]
+    youtube_urls = [u for u in youtube_urls if u.startswith("http")]
+
     niche_path = os.path.join(config.NICHES_DIR, f"{niche}.json")
     if not os.path.exists(niche_path):
         return jsonify({"error": f"Niche not found: {niche}"}), 404
@@ -461,7 +467,9 @@ def library_classify():
         global _job_active
         try:
             from backend import clip_classifier
-            result = clip_classifier.process_library(niche, niche_cfg, emit=_emit)
+            result = clip_classifier.process_library(
+                niche, niche_cfg, emit=_emit, youtube_urls=youtube_urls,
+            )
             socketio.emit("library_classify_done", result)
         except Exception as e:
             import traceback

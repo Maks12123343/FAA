@@ -23,12 +23,16 @@
 <div class="card" id="libClassifyCard" style="display:none">
   <h2>CLIP Auto-Classification</h2>
   <p style="color:#aaa;font-size:13px;margin-bottom:12px">
-    Drop mp4 files into the niche's <code>_sources/</code> folder, then click below.
-    Each source is scene-cut, then every clip is classified into the niche's category folders
-    by an on-device CLIP model (3 frames averaged). Clips with low confidence go to
-    <code>_unsorted/</code> for manual review.
+    Either paste YouTube URLs to download automatically, or drop mp4 files into the
+    niche's <code>_sources/</code> folder. Each source is scene-cut, then every clip is
+    classified into the niche's category folders by an on-device CLIP model (3 frames
+    averaged). Clips with low confidence go to <code>_unsorted/</code> for manual review.
   </p>
-  <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+  <div class="field" style="margin-top:8px">
+    <label>YouTube URLs <span style="color:#6b7280;font-size:12px">(optional, one per line — downloaded 3 in parallel)</span></label>
+    <textarea id="libClassifyUrls" rows="6" placeholder="https://www.youtube.com/watch?v=...&#10;https://www.youtube.com/watch?v=..." style="width:100%;background:#111;border:1px solid #333;border-radius:6px;padding:10px;color:#fff;font-size:13px;resize:vertical;margin-top:4px"></textarea>
+  </div>
+  <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px">
     <button class="btn btn-success" onclick="runClipClassifier()">Run CLIP classifier</button>
     <button class="btn" onclick="loadClassifyStats()">Refresh stats</button>
   </div>
@@ -198,13 +202,20 @@ function updateNicheUI() {
 
 function runClipClassifier() {
   const niche = document.getElementById('libNiche').value;
+  const rawUrls = (document.getElementById('libClassifyUrls') || {}).value || '';
+  const urls = rawUrls.split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
+
   document.getElementById('libLog').innerHTML = '';
   document.getElementById('libProgressCard').style.display = 'block';
-  log(`Starting CLIP classifier for niche "${niche}"...`);
+  if (urls.length) {
+    log(`Starting CLIP classifier for "${niche}" with ${urls.length} YouTube URL(s)...`);
+  } else {
+    log(`Starting CLIP classifier for "${niche}" (using files already in _sources/)...`);
+  }
   fetch('/api/library/classify', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({niche}),
+    body: JSON.stringify({niche, youtube_urls: urls}),
   }).then(r => r.json()).then(d => {
     if (d.error) log('ERROR: ' + d.error, 'error');
   }).catch(e => log('ERROR: ' + e, 'error'));
