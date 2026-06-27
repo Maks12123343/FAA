@@ -987,7 +987,7 @@ def validate_clips_batch(clip_paths: list, section_text: str) -> list:
 
 _TEXT_RANK_PROMPT = """\
 You are picking the best clip out of {n} candidates for a narration segment.
-
+{main_char_note}
 CONTEXT (what's being said around this moment):
 Previous: {prev_text}
 CURRENT: {current_text}
@@ -1259,8 +1259,77 @@ def rank_clips_by_text(
 
     # Step 1: build prompt and get base scores from Pioneer/GigaCoder
     block = _format_candidates_block(candidates)
+
+    # Build extended rules block — encodes everything score_rules used to do locally,
+    # so the model itself applies all the bonuses/penalties (works in any language).
+    rules = score_rules or {}
+    rule_lines = ["SCORING RULES (apply all of these when scoring):"]
+
+    if main_characters:
+        names = ", ".join(main_characters)
+        rule_lines.append(
+            f"- VIDEO FOCUS: this whole video is about {names}. The narration is in another "
+            f"language (Polish, German, French, Spanish, Portuguese), so {names} may appear "
+            f"there translated (e.g. Tigress → tygrysica, Tigerin, tigresse, tigresa). "
+            f"Recognize all of these as the same character."
+        )
+        rule_lines.append(
+            f"- Strongly PREFER clips showing {names}. Give them a bonus of about +{rules.get('main_character_bonus', 0.20):.2f}."
+        )
+        rule_lines.append(
+            f"- If the CURRENT narration explicitly mentions a specific named character "
+            f"(in any language) AND that character is visible in the clip, give an even "
+            f"stronger bonus of about +{rules.get('character_mentioned_bonus', 0.40):.2f}."
+        )
+        rule_lines.append(
+            f"- If the narration is clearly about a different character (e.g. Tai Lung, Shifu, Po) "
+            f"and the clip only shows {names} without that mentioned character, "
+            f"apply a penalty of about {rules.get('wrong_character_penalty', -0.20):.2f}."
+        )
+        rule_lines.append(
+            f"- If the clip shows NO character relevant to the narration and NO {names} either, "
+            f"apply a small penalty of about {rules.get('no_relevant_character_penalty', -0.15):.2f}."
+        )
+
+    # Scene type penalties — credits, title cards, transitions
+    scene_pen = rules.get("scene_penalties") or {}
+    if scene_pen:
+        bad_scenes = [s for s, v in scene_pen.items() if v <= -0.5]
+        soft_bad = [s for s, v in scene_pen.items() if -0.5 < v < 0]
+        if bad_scenes:
+            rule_lines.append(
+                f"- HARD PENALTY: clips marked as scene_type {bad_scenes} are almost always wrong "
+                f"(credits / title cards / logos). Score them at most 0.05."
+            )
+        if soft_bad:
+            rule_lines.append(
+                f"- Soft penalty for scene_type {soft_bad} (transitions, generic shots) — "
+                f"only pick them when nothing else fits."
+            )
+
+    # Theme matching (psychology themes etc.)
+    themes_list = rules.get("psychology_themes") or []
+    if themes_list:
+        sample = ", ".join(themes_list[:6])
+        rule_lines.append(
+            f"- Small bonus when the clip's themes match emotional/psychological themes in "
+            f"the narration (e.g. {sample}). Don't over-reward this — it's a tiebreaker."
+        )
+
+    # Generic guardrails
+    rule_lines.append(
+        "- Don't reward clips that fit the previous or next sentence better than the current one."
+    )
+    rule_lines.append(
+        "- A clip's literal description should match the action being narrated. Visual mood "
+        "alone is not enough."
+    )
+
+    rules_block = "\n".join(rule_lines)
+
     prompt = _TEXT_RANK_PROMPT.format(
         n=len(candidates),
+        main_char_note="\n" + rules_block + "\n",
         prev_text=(prev_text or "—").strip()[:300],
         current_text=(segment_text or "").strip()[:400],
         next_text=(next_text or "—").strip()[:300],
