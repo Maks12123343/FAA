@@ -1058,15 +1058,43 @@ def _call_text_ranker(prompt: str) -> list | None:
     settings = config.load_settings()
 
     def _parse_scores(body_text: str, expected_n: int) -> list | None:
+        if not body_text or not body_text.strip():
+            print("[ranker] EMPTY content from model (likely max_tokens too small / thinking model)", flush=True)
+            return None
         try:
             text = re.sub(r"^```(?:json)?\s*", "", body_text.strip())
             text = re.sub(r"\s*```$", "", text)
+
+            arr = None
+            # Shape 1: {"scores": [...]}  — find an object that has a scores key
             m = re.search(r"\{.*\}", text, re.DOTALL)
-            data = json.loads(m.group() if m else text)
-            arr = data.get("scores", [])
-            if not isinstance(arr, list):
-                print(f"[ranker] WARNING: 'scores' is not a list: {data!r}", flush=True)
+            if m:
+                try:
+                    data = json.loads(m.group())
+                    if isinstance(data, dict) and isinstance(data.get("scores"), list):
+                        arr = data["scores"]
+                except Exception:
+                    pass
+            # Shape 2: bare JSON array [0.9, 0.3, ...]
+            if arr is None:
+                m2 = re.search(r"\[[^\[\]]*\]", text, re.DOTALL)
+                if m2:
+                    try:
+                        cand = json.loads(m2.group())
+                        if isinstance(cand, list):
+                            arr = cand
+                    except Exception:
+                        pass
+            # Shape 3: last resort — pull all floats out of the text
+            if arr is None:
+                nums = re.findall(r"-?\d*\.?\d+", text)
+                if nums:
+                    arr = nums
+
+            if not isinstance(arr, list) or not arr:
+                print(f"[ranker] WARNING: no scores found in response: {text[:300]!r}", flush=True)
                 return None
+
             out = []
             for x in arr[:expected_n]:
                 try:
@@ -1094,10 +1122,12 @@ def _call_text_ranker(prompt: str) -> list | None:
                     payload = json.dumps({
                         "model": pio_model,
                         "messages": [
-                            {"role": "system", "content": "You rank clip candidates for a narration. Reply with strict JSON only."},
+                            {"role": "system", "content": "You rank clip candidates for a narration. Reply with strict JSON only, e.g. {\"scores\":[0.9,0.3]}. No prose, no reasoning."},
                             {"role": "user", "content": prompt},
                         ],
-                        "max_tokens": 200,
+                        "max_tokens": 2000,
+                        "temperature": 0,
+                        "response_format": {"type": "json_object"},
                     }).encode("utf-8")
                     req = urllib.request.Request(
                         pio_url, data=payload,
@@ -1106,10 +1136,15 @@ def _call_text_ranker(prompt: str) -> list | None:
                     )
                     with urllib.request.urlopen(req, timeout=60) as resp:
                         body = json.loads(resp.read().decode("utf-8"))
-                    text = body["choices"][0]["message"]["content"]
+                    msg = body.get("choices", [{}])[0].get("message", {}) or {}
+                    text = msg.get("content") or msg.get("reasoning") or msg.get("reasoning_content") or ""
+                    if not text:
+                        fr = body.get("choices", [{}])[0].get("finish_reason")
+                        print(f"[ranker:pioneer] EMPTY content finish_reason={fr} usage={body.get('usage')}", flush=True)
                     scores = _parse_scores(text, expected_n)
                     if scores is not None:
                         return scores
+                    print(f"[ranker:pioneer] PARSE FAIL — raw response: {text[:300]!r}", flush=True)
                     break  # got a response but couldn't parse — try next key once
                 except Exception as e:
                     err = str(e).lower()
@@ -1134,10 +1169,11 @@ def _call_text_ranker(prompt: str) -> list | None:
                     payload = json.dumps({
                         "model": gc_model,
                         "messages": [
-                            {"role": "system", "content": "You rank clip candidates for a narration. Reply with strict JSON only."},
+                            {"role": "system", "content": "You rank clip candidates for a narration. Reply with strict JSON only, e.g. {\"scores\":[0.9,0.3]}. No prose, no reasoning."},
                             {"role": "user", "content": prompt},
                         ],
-                        "max_tokens": 200,
+                        "max_tokens": 2000,
+                        "temperature": 0,
                     }).encode("utf-8")
                     req = urllib.request.Request(
                         gc_url, data=payload,
@@ -1152,10 +1188,12 @@ def _call_text_ranker(prompt: str) -> list | None:
                     )
                     with urllib.request.urlopen(req, timeout=60) as resp:
                         body = json.loads(resp.read().decode("utf-8"))
-                    text = body["choices"][0]["message"]["content"]
+                    msg = body.get("choices", [{}])[0].get("message", {}) or {}
+                    text = msg.get("content") or msg.get("reasoning") or msg.get("reasoning_content") or ""
                     scores = _parse_scores(text, expected_n)
                     if scores is not None:
                         return scores
+                    print(f"[ranker:gigacoder] PARSE FAIL — raw response: {text[:300]!r}", flush=True)
                     break
                 except Exception as e:
                     err = str(e).lower()
@@ -1366,11 +1404,14 @@ def rank_clips_by_text(
     )
 
     base_scores = _call_text_ranker(prompt)
-    if base_scores is None or len(base_scores) < len(candidates):
-        # Total API failure — fall back to keyword-derived order (descending by index)
+    if base_scores is None:
+        print(f"[ranker] _call_text_ranker returned None — API or parsing failed (candidates={len(candidates)})", flush=True)
+        base_scores = [0.5] * len(candidates)
+    elif len(base_scores) < len(candidates):
+        print(f"[ranker] returned {len(base_scores)} scores for {len(candidates)} candidates — padding", flush=True)
         base_scores = [0.5] * len(candidates)
     elif all(float(s) <= 0.0001 for s in base_scores):
-        print("[movie_library] Text ranker returned all-zero scores; using neutral fallback scores", flush=True)
+        print("[ranker] returned all-zero scores; using neutral fallback scores", flush=True)
         base_scores = [0.5] * len(candidates)
 
     # Step 2: detect mentioned characters in current segment
@@ -1686,153 +1727,3 @@ def _score_clip(clip: dict, segment_text: str) -> float:
     text_words = set(text_lower.split())
     score = 0.0
 
-    def _word_match(query: str, text: str, full_bonus: float = 1.0, partial_bonus: float = 0.4) -> float:
-        """Повертає бонус якщо query входить в text (повністю або частково)."""
-        q = query.lower().strip()
-        if not q:
-            return 0.0
-        # Full match
-        if q in text:
-            return full_bonus
-        # Partial: Shifu matches Master Shifu
-        words = text.split()
-        for w in words:
-            if q in w or w in q:
-                return partial_bonus
-        return 0.0
-
-    # Characters: "Master Shifu" matches "Shifu teaches Po" -> Shifu = partial match
-    for char in clip.get("characters", []):
-        score += _word_match(char, text_lower, full_bonus=5.0, partial_bonus=3.0)
-
-    # Emotion: strong match
-    if clip.get("emotion"):
-        score += _word_match(clip["emotion"], text_lower, full_bonus=4.0, partial_bonus=2.5)
-
-    # Scene type
-    if clip.get("scene_type"):
-        score += _word_match(clip["scene_type"], text_lower, full_bonus=3.0, partial_bonus=1.5)
-
-    # Themes: each word of theme checked separately
-    for theme in clip.get("themes", []):
-        for w in theme.replace("_", " ").split():
-            if len(w) > 2:
-                score += _word_match(w, text_lower, full_bonus=2.5, partial_bonus=1.5)
-
-    # Tags: full tag match + partial word match
-    for tag in clip.get("tags", []):
-        score += _word_match(tag, text_lower, full_bonus=2.0, partial_bonus=1.0)
-
-    # Description: words > 4 chars
-    for word in clip.get("description", "").lower().split():
-        if len(word) > 4:
-            score += _word_match(word, text_lower, full_bonus=0.8, partial_bonus=0.3)
-
-    return score
-
-
-def _has_embeddings(clips: list) -> bool:
-    """
-    True якщо семантичний пошук доцільний — тобто векторами покрита БІЛЬШІСТЬ
-    кліпів. При частковому бекфілі (вектори лише в частини кліпів) повертаємо
-    False, щоб не загубити кліпи без векторів — тоді працює keyword по всіх.
-    """
-    if not clips:
-        return False
-    with_emb = sum(1 for c in clips if c.get("embedding"))
-    return with_emb >= len(clips) * 0.8
-
-
-def _semantic_rank(segment_text: str, clips: list, used_ids: set, top_n: int) -> list:
-    """
-    Ранжувати кліпи за косинусною близькістю їхнього вектора до вектора сегмента.
-    Кліпи-кредити/титри відсіюються (як і в keyword-режимі).
-    Повертає список clip dict (найрелевантніші першими), без рандому.
-    Якщо вектор сегмента порахувати не вдалось — повертає None (→ keyword fallback).
-    """
-    from backend import embeddings as _emb
-
-    seg_vec = _emb.embed_text(segment_text)
-    if not seg_vec:
-        return None
-
-    scored = []
-    for clip in clips:
-        if clip.get("id") in used_ids:
-            continue
-        if not os.path.exists(clip.get("file", "")):
-            continue
-        emb = clip.get("embedding")
-        if not emb:
-            continue
-        # Відсів кредитів/титрів/текстових екранів (та сама логіка, що в _score_clip)
-        if _score_clip(clip, segment_text) < 0:
-            continue
-        sim = _emb.cosine(seg_vec, emb)
-        if sim >= SEMANTIC_MIN_SIM:
-            scored.append((sim, clip))
-
-    if not scored:
-        return []
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [c for _, c in scored[:top_n]]
-
-
-def search_clips(segment_text: str, movie_name: str = None,
-                 used_ids: set = None, top_n: int = 15,
-                 gemini_validate: bool = False) -> list:
-    """
-    Знайти кліпи що підходять до тексту сегменту нарації.
-
-    Крок 1: семантичний пошук за embedding-векторами (за СЕНСОМ, не за словами).
-            Якщо вектори відсутні або недоступні — fallback на keyword scoring.
-    Крок 2: Gemini validation 0.85 (якщо gemini_validate=True).
-    Fallback: якщо нічого не пройшло валідацію — повертає top-5 без валідації.
-    """
-    if movie_name:
-        all_clips = get_movie_clips(movie_name)
-    else:
-        all_clips = []
-        for m in list_movies():
-            all_clips.extend(get_movie_clips(m["name"]))
-
-    used_ids = used_ids or set()
-
-    # ── Крок 1: семантичний пошук (пріоритетний) ──
-    top = None
-    if _has_embeddings(all_clips):
-        semantic = _semantic_rank(segment_text, all_clips, used_ids, top_n)
-        if semantic is not None:
-            top = semantic
-
-    # ── Fallback: keyword scoring (якщо немає векторів або їх не порахувати) ──
-    if top is None:
-        candidates = []
-        for clip in all_clips:
-            if clip.get("id") in used_ids:
-                continue
-            if not os.path.exists(clip.get("file", "")):
-                continue
-            s = _score_clip(clip, segment_text)
-            if s > 0:
-                candidates.append((s, clip))
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        top = [c for _, c in candidates[:top_n]]
-
-    if not gemini_validate or not top:
-        return top
-
-    # Gemini validation: оцінюємо топ-10, фільтруємо >= 0.85
-    validated = []
-    for clip in top[:10]:
-        gem_score = validate_clip(clip["file"], segment_text)
-        if gem_score >= VALIDATION_THRESHOLD:
-            validated.append((gem_score, clip))
-
-    if validated:
-        validated.sort(key=lambda x: x[0], reverse=True)
-        return [c for _, c in validated]
-
-    # Fallback — повертаємо top-5 без валідації
-    return top[:5]
