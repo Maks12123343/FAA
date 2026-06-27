@@ -27,10 +27,20 @@ from backend import api_client
 def _call_claude(system: str, messages: list, timeout: int = 180) -> tuple:
     """Call Pioneer Opus first, GigaCoder Opus as fallback."""
     try:
-        return api_client.call_pioneer(system, messages, timeout=timeout)
+        return api_client.call_pioneer(
+            system,
+            messages,
+            timeout=timeout,
+            max_retries=1,
+        )
     except Exception as e:
         print(f"[rewriter] Pioneer failed ({e}), falling back to GigaCoder Opus", flush=True)
-        return api_client.call_gigacoder_opus(system, messages, timeout=timeout)
+        return api_client.call_gigacoder_opus(
+            system,
+            messages,
+            timeout=min(timeout, 180),
+            max_retries=1,
+        )
 
 
 # ── Script rewrite ────────────────────────────────────────────────────────────
@@ -59,7 +69,7 @@ def _rewrite_script(transcript: str, language: str, video_title: str,
     part_num    = 1
 
     while True:
-        text, stop_reason = _call_claude(system, messages)
+        text, stop_reason = _call_claude(system, messages, timeout=300)
         full_script += ("\n\n" if full_script else "") + _extract_code_block(text)
 
         if stop_reason != "max_tokens":
