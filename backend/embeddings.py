@@ -152,6 +152,10 @@ def _vertex_embed_all(texts: list, emit=None) -> list:
     from google import genai
 
     os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", config.VERTEX_CREDENTIALS)
+    if not os.path.exists(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")):
+        raise RuntimeError(
+            f"Vertex credentials file not found: {os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', '')}"
+        )
     settings = config.load_settings()
     client = genai.Client(
         vertexai=True,
@@ -245,8 +249,8 @@ def embed_text(text: str, emit=None) -> list:
 
 
 def _backend_order() -> list:
-    """Vertex only — embeddings are exclusively handled by Vertex AI."""
-    return ["vertex"]
+    """Try Pioneer first, then Vertex AI fallback."""
+    return ["pioneer", "vertex"]
 
 
 def _set_backend(kind: str):
