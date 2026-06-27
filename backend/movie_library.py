@@ -1065,6 +1065,7 @@ def _call_text_ranker(prompt: str) -> list | None:
             data = json.loads(m.group() if m else text)
             arr = data.get("scores", [])
             if not isinstance(arr, list):
+                print(f"[ranker] WARNING: 'scores' is not a list: {data!r}", flush=True)
                 return None
             out = []
             for x in arr[:expected_n]:
@@ -1075,7 +1076,8 @@ def _call_text_ranker(prompt: str) -> list | None:
             while len(out) < expected_n:
                 out.append(0.0)
             return out
-        except Exception:
+        except Exception as e:
+            print(f"[ranker] PARSE FAIL ({e}): body={body_text[:300]!r}", flush=True)
             return None
 
     expected_n = prompt.count("CLIP ")  # crude but OK — we control the prompt
