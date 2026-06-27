@@ -38,7 +38,7 @@ def _call_claude(system: str, messages: list, timeout: int = 180) -> tuple:
         return api_client.call_gigacoder_opus(
             system,
             messages,
-            timeout=min(timeout, 180),
+            timeout=max(timeout, 300),
             max_retries=1,
         )
 

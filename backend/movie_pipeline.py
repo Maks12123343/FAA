@@ -1171,6 +1171,7 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
             source_title        = source_title,
             source_description  = state.get("source_description", ""),
             source_tags         = state.get("source_tags", []),
+            test_mode           = test_mode,
         )
         script = result["script"]
         if len(script.split()) < 100:
@@ -1418,33 +1419,15 @@ def produce_from_script(
         f"last ends at {segments_with_times[-1]['end']:.1f}s")
 
     # ── Text overlays ─────────────────────────────────────────────────────────
-    log("overlays", "Planning text overlays...")
     overlay_plan  = _plan_text_overlays(segments_with_times, emit=emit)
     text_overlays = _build_text_overlays(overlay_plan, segments_with_times)
     log("overlays", f"Planned {len(text_overlays)} text overlays.")
 
-    # ── Clip selection: top-5 → text ranking → best ──────────────────────────
-    # Load niche score_rules for the ranker
-    score_rules = {}
-    if niche_name:
-        niche_path = os.path.join(config.NICHES_DIR, f"{niche_name}.json")
-        if os.path.exists(niche_path):
-            try:
-                with open(niche_path, encoding="utf-8") as f:
-                    niche_cfg = json.load(f)
-                score_rules = niche_cfg.get("score_rules", {}) or {}
-            except Exception:
-                score_rules = {}
-
-    main_chars_list = [c.strip() for c in (main_character or "").split(",") if c.strip()]
-
-    log("clips", f"Selecting clips from '{movie_name}' (top-5 → text ranking → best)...")
+    # ── Clip selection: 3 candidates/seg → Gemini → best ─────────────────────
+    log("clips", f"Selecting clips from '{movie_name}' (3 candidates/seg → Gemini)...")
     clip_data = _select_clips_for_segments(
         segments_with_times, movie_name, audio_dur,
         global_used_ids=global_used_ids,
-        main_characters=main_chars_list,
-        score_rules=score_rules,
-        emit=emit,
     )
     if not clip_data:
         raise RuntimeError(f"No clips found for movie '{movie_name}'. Is it indexed?")
@@ -1509,13 +1492,14 @@ def produce_from_script(
         "project_id":  proj_id,
         "project_dir": proj_dir,
         "output_path": output_path,
-        "clips_used":   len(prepared),
-        "title":        meta.get("title", source_title),
-        "all_titles":   meta.get("titles", []),
-        "description":  meta.get("description", ""),
-        "tags":         meta.get("tags", []),
-        "used_ids":     list(used_ids_in_this_video),
+        "audio_dur":   round(audio_dur, 1),
+        "clips_used":  len(prepared),
+        "title":       meta.get("title", title),
+        "titles":      meta.get("titles", []),
+        "description": meta.get("description", ""),
+        "tags":        meta.get("tags", []),
     }
+
 
 
 def produce_batch(prepare_id: str, movie_name: str, language: str,
