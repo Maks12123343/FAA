@@ -474,6 +474,24 @@ def _clip_has_any_character(clip: dict, normalized_names: set) -> bool:
         return False
     return bool(_clip_character_names(clip) & normalized_names)
 
+def _clip_debug_flags(clip: dict, used_ids: set, last_clip_id: str | None,
+                      focus: dict, main_characters: list, score_rules: dict, is_adjacent) -> list:
+    scene_penalties = (score_rules or {}).get("scene_penalties", {}) or {}
+    cid = clip.get("id", clip.get("file", ""))
+    flags = []
+    if cid in used_ids:
+        flags.append("USED")
+    if is_adjacent(last_clip_id, cid):
+        flags.append("ADJ")
+    if float(scene_penalties.get(clip.get("scene_type", ""), 0.0)) <= -0.5:
+        flags.append("HARD_SCENE")
+    main_set = _normalized_character_names(main_characters or [])
+    if _clip_has_any_character(clip, main_set):
+        flags.append("HAS_MAIN")
+    if _clip_has_any_character(clip, focus.get("mentioned_other", set())):
+        flags.append("HAS_OTHER")
+    return flags
+
 
 def _classify_segment_focus(segment_text: str, main_characters: list, all_known_chars: set) -> dict:
     from backend.movie_library import _detect_mentioned_characters
@@ -502,12 +520,13 @@ def _pick_ranked_clip(ranked: list, used_ids: set, last_clip_id: str | None, foc
                       main_characters: list, score_rules: dict, is_adjacent,
                       should_push_main: bool):
     if not ranked:
-        return None
+        return None, {"decision": "NO_RANKED", "availability": "none"}
 
     scene_penalties = (score_rules or {}).get("scene_penalties", {}) or {}
     generic_margin = float((score_rules or {}).get("generic_main_character_margin", GENERIC_MAIN_CHARACTER_MARGIN))
     other_margin = float((score_rules or {}).get("other_character_margin", OTHER_CHARACTER_MARGIN))
     main_set = _normalized_character_names(main_characters or [])
+    diag = {"decision": "UNKNOWN", "availability": "none"}
 
     def _available(allow_adjacent: bool, allow_used: bool):
         pool = []
@@ -524,27 +543,45 @@ def _pick_ranked_clip(ranked: list, used_ids: set, last_clip_id: str | None, foc
         ]
         return non_hard or pool
 
-    available = _available(False, False) or _available(True, False) or _available(True, True)
+    available = _available(False, False)
+    if available:
+        diag["availability"] = "strict"
     if not available:
-        return None
+        available = _available(True, False)
+        if available:
+            diag["availability"] = "allow_adjacent"
+    if not available:
+        available = _available(True, True)
+        if available:
+            diag["availability"] = "allow_used"
+    if not available:
+        return None, {"decision": "NO_AVAILABLE", "availability": "none"}
 
     top_score = float(available[0][1])
     if focus["type"] == "main":
         preferred = [item for item in available if _clip_has_any_character(item[0], main_set)]
-        return preferred[0] if preferred else available[0]
+        if preferred:
+            diag["decision"] = "FOCUS_MAIN_PICK_MAIN_CHAR"
+            return preferred[0], diag
+        diag["decision"] = "FOCUS_MAIN_NO_MAIN_CHAR_AVAILABLE"
+        return available[0], diag
 
     if focus["type"] == "other":
         preferred = [item for item in available if _clip_has_any_character(item[0], focus["mentioned_other"])]
         if preferred and float(preferred[0][1]) >= top_score - other_margin:
-            return preferred[0]
-        return available[0]
+            diag["decision"] = "FOCUS_OTHER_PICK_OTHER_CHAR"
+            return preferred[0], diag
+        diag["decision"] = "FOCUS_OTHER_TOP_SCORE_WON"
+        return available[0], diag
 
     if should_push_main:
         preferred = [item for item in available if _clip_has_any_character(item[0], main_set)]
         if preferred and float(preferred[0][1]) >= top_score - generic_margin:
-            return preferred[0]
+            diag["decision"] = "GENERIC_PUSH_MAIN_CHAR"
+            return preferred[0], diag
 
-    return available[0]
+    diag["decision"] = "TOP_SCORE_WON"
+    return available[0], diag
 
 
 def _build_clip_plan_report(selected_meta: list, main_characters: list, score_rules: dict) -> dict:
@@ -763,7 +800,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
             current_ratio = (main_visual_hits / non_other_seen) if non_other_seen else 0.0
             should_push_main = (focus["type"] == "main") or (current_ratio < target_ratio)
 
-        picked = _pick_ranked_clip(
+        picked, pick_diag = _pick_ranked_clip(
             ranked=ranked,
             used_ids=used_ids,
             last_clip_id=last_clip_id,
@@ -774,6 +811,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
             should_push_main=should_push_main,
         )
         if not picked:
+            print(f"[rank] seg#{seg_idx} no clip picked decision={pick_diag.get('decision')}", flush=True)
             continue
 
         best_clip, score, breakdown = picked
@@ -784,12 +822,26 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         # Helps debug why specific videos end up with too few main-character shots.
         try:
             seg_text_preview = (seg.get("text", "") or "").strip()[:80]
-            log_lines = [f"[rank] seg#{seg_idx} \"{seg_text_preview}\" focus={focus.get('type','?')}"]
+            current_ratio = (main_visual_hits / non_other_seen) if non_other_seen else 0.0
+            focus_other = ", ".join(sorted(focus.get("mentioned_other", set()))) or "-"
+            log_lines = [
+                f"[rank] seg#{seg_idx} \"{seg_text_preview}\"",
+                f"   focus={focus.get('type','?')} mentioned_other=[{focus_other}] should_push_main={should_push_main}",
+                f"   main_ratio_before={current_ratio:.2f} target={target_ratio:.2f} decision={pick_diag.get('decision')} availability={pick_diag.get('availability')}",
+            ]
             for rank_idx, (c, s, _bd) in enumerate(ranked[:5]):
-                chars = ", ".join(c.get("characters", []) or []) or "—"
-                scene = c.get("scene_type", "—")
+                chars = ", ".join(c.get("characters", []) or []) or "???"
+                scene = c.get("scene_type", "???")
+                desc = (c.get("description", "") or "").strip().replace("\n", " ")[:90]
+                cid = c.get("id", c.get("file", ""))
+                flags = ",".join(_clip_debug_flags(
+                    c, used_ids, last_clip_id, focus, main_characters or [], score_rules or {}, _is_adjacent
+                )) or "-"
                 marker = " <-- PICKED" if c.get("id") == clip_id else ""
-                log_lines.append(f"   #{rank_idx+1} score={s:.2f} chars=[{chars}] scene={scene}{marker}")
+                log_lines.append(
+                    f"   #{rank_idx+1} score={s:.2f} id={cid} chars=[{chars}] scene={scene} flags=[{flags}]"
+                    f" desc=\"{desc}\"{marker}"
+                )
             print("\n".join(log_lines), flush=True)
         except Exception:
             pass

@@ -997,10 +997,28 @@ CANDIDATES — each one already has a description, tags and themes from a prior 
 
 {candidates_block}
 
+First decide what the CURRENT segment is mainly doing:
+- talking about the MAIN CHARACTER of the whole video
+- talking about some OTHER named character
+- making a GENERAL psychological point
+
 Score every candidate from 0.0 (totally unrelated) to 1.0 (perfect fit) based on
 how well it illustrates the CURRENT narration. Use Previous/Next only as context
 to disambiguate the current segment — don't reward clips that fit the next or
 previous sentence better than the current one.
+
+Scoring anchors:
+- 0.90-1.00 = near-perfect visual match for the current narration
+- 0.70-0.89 = strong usable match
+- 0.40-0.69 = weak or partial match
+- 0.00-0.39 = poor or misleading match
+
+Important:
+- Prefer meaning-level matching, not exact word matching.
+- Character names may be translated, declined, inflected, or slightly misspelled.
+- When the segment is general but the whole video is about one main character,
+  prefer clips that keep that character visually present.
+- Literal visual relevance beats vague mood similarity.
 
 Reply with JSON only, no markdown, exactly:
 {{"scores": [0.0, 0.0, 0.0, 0.0, 0.0]}}
@@ -1151,16 +1169,25 @@ def _call_text_ranker(prompt: str) -> list | None:
     return None
 
 
+def _normalize_character_text(text: str) -> str:
+    if not text:
+        return ""
+    text = text.lower().replace("_", " ").replace("-", " ")
+    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _detect_mentioned_characters(text: str, all_known_chars: set) -> set:
     """Find which known characters are explicitly mentioned in the segment text."""
     if not text or not all_known_chars:
         return set()
-    text_lower = text.lower()
+    normalized_text = f" {_normalize_character_text(text)} "
     found = set()
     for ch in all_known_chars:
         if not ch or len(ch) < 2:
             continue
-        if ch.lower() in text_lower:
+        normalized_ch = _normalize_character_text(ch)
+        if normalized_ch and f" {normalized_ch} " in normalized_text:
             found.add(ch)
     return found
 
@@ -1339,6 +1366,9 @@ def rank_clips_by_text(
     base_scores = _call_text_ranker(prompt)
     if base_scores is None or len(base_scores) < len(candidates):
         # Total API failure — fall back to keyword-derived order (descending by index)
+        base_scores = [0.5] * len(candidates)
+    elif all(float(s) <= 0.0001 for s in base_scores):
+        print("[movie_library] Text ranker returned all-zero scores; using neutral fallback scores", flush=True)
         base_scores = [0.5] * len(candidates)
 
     # Step 2: detect mentioned characters in current segment
