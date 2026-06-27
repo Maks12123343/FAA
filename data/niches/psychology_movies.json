@@ -78,6 +78,9 @@
       "grief",
       "love",
       "trust"
-    ]
+    ],
+    "main_character_target_ratio": 0.68,
+    "generic_main_character_margin": 0.12,
+    "other_character_margin": 0.18
   }
 }

@@ -30,6 +30,9 @@ from backend.movie_library import (
 
 WORDS_PER_SECTION  = 35
 MIN_AUDIO_DURATION = 60.0   # секунд — менше цього вважається помилкою TTS
+MAIN_CHARACTER_TARGET_RATIO = 0.68
+GENERIC_MAIN_CHARACTER_MARGIN = 0.12
+OTHER_CHARACTER_MARGIN = 0.18
 
 # ── Whisper model cache (loaded once, reused across calls) ──────────────────────
 _WHISPER_MODEL = None
@@ -169,6 +172,16 @@ def make_uniq_params_for_language(language: str, proj_id: str) -> dict:
 
 # ── Text overlay planning (Claude API) ────────────────────────────────────────
 
+def _overlay_phase_label(progress: float) -> str:
+    if progress < 0.15:
+        return "hook"
+    if progress < 0.65:
+        return "development"
+    if progress < 0.90:
+        return "climax"
+    return "ending"
+
+
 _TEXT_OVERLAY_PROMPT = """\
 You are planning text overlays for a psychological video essay about cartoon characters (YouTube style, like "Impostor Syndrome" / "Dark Psychology" analysis videos).
 
@@ -180,6 +193,12 @@ Script segments:
 Select 20-25% of segments to receive a text overlay. Choose emotionally impactful moments — phrases that hit hard, shocking facts, key psychological terms.
 
 Rules:
+- Shape the overlays like a dramatic arc:
+  * Hook (first 15%): 1-2 sharp high-impact overlays to establish tension
+  * Development (15-65%): mostly text_overlay and text_caption, fewer full screens
+  * Climax (65-90%): strongest text_screen moments belong here
+  * Ending (last 10%): at most one final takeaway overlay
+- Use text_screen sparingly for the hardest-hitting lines, not evenly across the video
 - Text must be VERY SHORT: 1-6 words maximum
 - Space them out: no two overlays within 12 seconds of each other
 - Three types:
@@ -206,8 +225,14 @@ def _plan_text_overlays(segments_with_times: list, emit=None) -> list:
 
     settings = config.load_settings()
 
+    total_dur = max(1.0, segments_with_times[-1]["end"] if segments_with_times else 1.0)
     seg_data = [
-        {"index": s["index"], "start": round(s["start"], 1), "text": s["text"][:120]}
+        {
+            "index": s["index"],
+            "start": round(s["start"], 1),
+            "phase": _overlay_phase_label(s["start"] / total_dur),
+            "text": s["text"][:120],
+        }
         for s in segments_with_times
     ]
     prompt = _TEXT_OVERLAY_PROMPT.format(
@@ -424,32 +449,153 @@ def _prepare_movie_clip(clip_path: str, out_path: str, uniq_params: dict,
 
 # ── Clip selection ─────────────────────────────────────────────────────────────
 
+def _normalize_character_name(name: str) -> str:
+    if not name:
+        return ""
+    name = name.lower().replace("_", " ").replace("-", " ")
+    name = re.sub(r"[^\w\s]", " ", name, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def _normalized_character_names(names) -> set:
+    return {
+        _normalize_character_name(name)
+        for name in (names or [])
+        if _normalize_character_name(name)
+    }
+
+
+def _clip_character_names(clip: dict) -> set:
+    return _normalized_character_names(clip.get("characters", []) or [])
+
+
+def _clip_has_any_character(clip: dict, normalized_names: set) -> bool:
+    if not normalized_names:
+        return False
+    return bool(_clip_character_names(clip) & normalized_names)
+
+
+def _classify_segment_focus(segment_text: str, main_characters: list, all_known_chars: set) -> dict:
+    from backend.movie_library import _detect_mentioned_characters
+
+    mentioned = _detect_mentioned_characters(segment_text or "", all_known_chars or set())
+    main_set = _normalized_character_names(main_characters or [])
+    mentioned_set = _normalized_character_names(mentioned)
+    mentioned_other = mentioned_set - main_set
+    mentioned_main = mentioned_set & main_set
+
+    if mentioned_other:
+        focus_type = "other"
+    elif mentioned_main:
+        focus_type = "main"
+    else:
+        focus_type = "generic"
+
+    return {
+        "type": focus_type,
+        "main": main_set,
+        "mentioned_other": mentioned_other,
+    }
+
+
+def _pick_ranked_clip(ranked: list, used_ids: set, last_clip_id: str | None, focus: dict,
+                      main_characters: list, score_rules: dict, is_adjacent,
+                      should_push_main: bool):
+    if not ranked:
+        return None
+
+    scene_penalties = (score_rules or {}).get("scene_penalties", {}) or {}
+    generic_margin = float((score_rules or {}).get("generic_main_character_margin", GENERIC_MAIN_CHARACTER_MARGIN))
+    other_margin = float((score_rules or {}).get("other_character_margin", OTHER_CHARACTER_MARGIN))
+    main_set = _normalized_character_names(main_characters or [])
+
+    def _available(allow_adjacent: bool, allow_used: bool):
+        pool = []
+        for clip, score, breakdown in ranked:
+            cid = clip.get("id", clip.get("file", ""))
+            if not allow_used and cid in used_ids:
+                continue
+            if not allow_adjacent and is_adjacent(last_clip_id, cid):
+                continue
+            pool.append((clip, score, breakdown))
+        non_hard = [
+            item for item in pool
+            if float(scene_penalties.get(item[0].get("scene_type", ""), 0.0)) > -0.5
+        ]
+        return non_hard or pool
+
+    available = _available(False, False) or _available(True, False) or _available(True, True)
+    if not available:
+        return None
+
+    top_score = float(available[0][1])
+    if focus["type"] == "main":
+        preferred = [item for item in available if _clip_has_any_character(item[0], main_set)]
+        return preferred[0] if preferred else available[0]
+
+    if focus["type"] == "other":
+        preferred = [item for item in available if _clip_has_any_character(item[0], focus["mentioned_other"])]
+        if preferred and float(preferred[0][1]) >= top_score - other_margin:
+            return preferred[0]
+        return available[0]
+
+    if should_push_main:
+        preferred = [item for item in available if _clip_has_any_character(item[0], main_set)]
+        if preferred and float(preferred[0][1]) >= top_score - generic_margin:
+            return preferred[0]
+
+    return available[0]
+
+
+def _build_clip_plan_report(selected_meta: list, main_characters: list, score_rules: dict) -> dict:
+    target_ratio = float((score_rules or {}).get("main_character_target_ratio", MAIN_CHARACTER_TARGET_RATIO))
+    main_set = _normalized_character_names(main_characters or [])
+    eligible = [item for item in selected_meta if item.get("focus_type") != "other"]
+    main_hits = sum(1 for item in eligible if _clip_has_any_character(item["clip"], main_set))
+    eligible_count = len(eligible)
+    share = (main_hits / eligible_count) if eligible_count else 0.0
+    main_focus_misses = sum(
+        1 for item in selected_meta
+        if item.get("focus_type") == "main" and not _clip_has_any_character(item["clip"], main_set)
+    )
+    warnings = []
+    if eligible_count and share < target_ratio:
+        warnings.append(
+            f"Main character visual presence is low: {main_hits}/{eligible_count} non-other segments ({share*100:.0f}%)."
+        )
+    if main_focus_misses:
+        warnings.append(
+            f"{main_focus_misses} main-character segments still lack the main character in the chosen clip."
+        )
+    return {
+        "eligible_segments": eligible_count,
+        "main_character_hits": main_hits,
+        "main_character_share": share,
+        "warnings": warnings,
+    }
+
+
 def _select_clips_for_segments(segments: list, movie_name: str,
                                 audio_dur: float,
                                 global_used_ids: set = None,
                                 main_characters: list = None,
                                 score_rules: dict = None,
-                                niche_path: str = None) -> list:
+                                niche_path: str = None,
+                                emit=None) -> list:
     """
     For each Whisper segment (2-5s):
-      1. Get 5 candidates via search_clips (Vertex embeddings → top-N).
-      2. Rank them via rank_clips_by_text — single text-only API call,
-         no visual frames sent. Pioneer (primary) / GigaCoder (fallback).
-      3. Apply niche score modifiers (main_character bonus, scene penalties, etc.).
+      1. Get 5 candidates via search_clips (Vertex embeddings -> top-N).
+      2. Rank them via rank_clips_by_text - single text-only API call.
+      3. Keep local guardrails for main-character presence, bad scenes, and uniqueness.
       4. Pick the best clip respecting uniqueness and adjacent-index rules.
-
-    global_used_ids — clip IDs already used in PREVIOUS videos of this batch.
-    main_characters — list of names input on the UI (e.g. ["Tigress"]).
-    score_rules — dict from niche JSON's "score_rules" block.
     """
     from backend.movie_library import rank_clips_by_text
 
     used_ids = global_used_ids if global_used_ids is not None else set()
-    selected: list = []
+    selected_meta: list = []
 
     all_movie_clips = get_movie_clips(movie_name)
 
-    # Pre-compute the full set of known character names across the movie
     all_known_chars: set = set()
     for c in all_movie_clips:
         for ch in c.get("characters", []) or []:
@@ -457,9 +603,15 @@ def _select_clips_for_segments(segments: list, movie_name: str,
                 all_known_chars.add(ch)
 
     last_clip_id: str | None = None
+    target_ratio = float((score_rules or {}).get("main_character_target_ratio", MAIN_CHARACTER_TARGET_RATIO))
+    focus_states = [
+        _classify_segment_focus(seg.get("text", ""), main_characters or [], all_known_chars)
+        for seg in segments
+    ]
+    non_other_seen = 0
+    main_visual_hits = 0
 
     def _index_in_source(clip_id: str) -> int | None:
-        """Extract numeric tail from clip id like 'kungfu_panda_0042' → 42."""
         if not clip_id:
             return None
         m = re.match(r"^.+_(\d+)$", clip_id)
@@ -477,7 +629,6 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         c_idx = _index_in_source(candidate_id)
         if p_idx is None or c_idx is None:
             return False
-        # Same movie source, immediate next index
         prev_src = re.sub(r"_\d+$", "", prev_id)
         cand_src = re.sub(r"_\d+$", "", candidate_id)
         if prev_src != cand_src:
@@ -486,11 +637,6 @@ def _select_clips_for_segments(segments: list, movie_name: str,
 
     n_segs = len(segments)
 
-    # ── Phase 0: pre-compute all segment embeddings in batch ────────────────
-    # Vertex text-embedding-004 accepts up to 100 inputs per request, so 400
-    # segments = 4 batch calls instead of 400 separate ones. We then prime
-    # the embeddings cache so each search_clips → _semantic_rank → embed_text
-    # call below returns the vector instantly without an API hit.
     try:
         from backend import embeddings as _emb
         seg_texts = [segments[i].get("text", "") for i in range(n_segs)]
@@ -512,12 +658,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     except Exception as e:
         print(f"[movie_pipeline] Embedding pre-cache failed (will fall back to per-call): {e}", flush=True)
 
-    # ── Phase 1: rank all segments in PARALLEL ───────────────────────────────
-    # The ranking step is the slow part (Vertex embedding + Pioneer/GigaCoder
-    # API call per segment). We run up to PARALLEL_RANK at a time so the API
-    # calls don't sit one-after-another.
     PARALLEL_RANK = 4
-
     try:
         import eventlet as _ev
         _USE_EV = True
@@ -526,7 +667,6 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         _USE_EV = False
         _sem = None
 
-    # Per-segment ranked lists (index → list[(clip, score, breakdown)])
     ranked_per_seg: list = [None] * n_segs
 
     def _rank_one(seg_idx: int):
@@ -535,13 +675,10 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         prev_text = segments[seg_idx - 1].get("text", "") if seg_idx > 0 else ""
         next_text = segments[seg_idx + 1].get("text", "") if seg_idx + 1 < n_segs else ""
 
-        # Get up to 5 candidates from the embedding-based search.
-        # Note: we don't pass used_ids here — uniqueness is enforced in Phase 2,
-        # so all parallel rankings see the same candidate pool and don't race.
         try:
             cands = search_clips(
                 chunk, movie_name=movie_name,
-                used_ids=set(),  # uniqueness enforced later
+                used_ids=set(),
                 top_n=5,
                 gemini_validate=False,
             )
@@ -578,7 +715,6 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         def _wrapped(i: int):
             with _sem:
                 _rank_one(i)
-                # Emit progress every 25 segments
                 if (i + 1) % 25 == 0 or i + 1 == n_segs:
                     done_count = sum(1 for r in ranked_per_seg if r is not None)
                     elapsed = time.time() - rank_start
@@ -598,19 +734,14 @@ def _select_clips_for_segments(segments: list, movie_name: str,
 
     print(f"[movie_pipeline] Ranking done in {(time.time()-rank_start)/60:.1f} min", flush=True)
 
-    # ── Phase 2: pick winners sequentially (uniqueness + adjacency rules) ────
     for seg_idx, seg in enumerate(segments):
-        chunk   = seg.get("text", "")
         seg_dur = max(2.0, seg["end"] - seg["start"])
-
         ranked = ranked_per_seg[seg_idx] or []
 
-        # If ranking returned nothing, fall back to any unused clip
         if not ranked:
             fallback = [
                 c for c in all_movie_clips
-                if c.get("id") not in used_ids
-                and os.path.exists(c.get("file", ""))
+                if c.get("id") not in used_ids and os.path.exists(c.get("file", ""))
             ]
             random.shuffle(fallback)
             ranked = [(c, 0.0, {}) for c in fallback[:5]]
@@ -626,44 +757,64 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         if not ranked:
             continue
 
-        # Pick the best clip respecting uniqueness and adjacent-index rules
-        best_clip = None
-        for clip, score, breakdown in ranked:
-            cid = clip.get("id", clip.get("file", ""))
-            if cid in used_ids:
-                continue
-            if _is_adjacent(last_clip_id, cid):
-                continue
-            best_clip = clip
-            break
+        focus = focus_states[seg_idx]
+        should_push_main = False
+        if main_characters and focus["type"] != "other":
+            current_ratio = (main_visual_hits / non_other_seen) if non_other_seen else 0.0
+            should_push_main = (focus["type"] == "main") or (current_ratio < target_ratio)
 
-        # Relax adjacent rule if nothing left
-        if best_clip is None:
-            for clip, score, breakdown in ranked:
-                cid = clip.get("id", clip.get("file", ""))
-                if cid in used_ids:
-                    continue
-                best_clip = clip
-                break
-
-        # Last resort: highest-ranked even if used
-        if best_clip is None and ranked:
-            best_clip = ranked[0][0]
-
-        if best_clip is None:
+        picked = _pick_ranked_clip(
+            ranked=ranked,
+            used_ids=used_ids,
+            last_clip_id=last_clip_id,
+            focus=focus,
+            main_characters=main_characters or [],
+            score_rules=score_rules or {},
+            is_adjacent=_is_adjacent,
+            should_push_main=should_push_main,
+        )
+        if not picked:
             continue
 
+        best_clip, score, breakdown = picked
         file_path = best_clip["file"]
-        clip_id   = best_clip.get("id", file_path)
-        selected.append({"file": file_path, "duration": seg_dur, "id": clip_id})
+        clip_id = best_clip.get("id", file_path)
+        selected_meta.append({
+            "file": file_path,
+            "duration": seg_dur,
+            "id": clip_id,
+            "clip": best_clip,
+            "score": score,
+            "focus_type": focus["type"],
+        })
         used_ids.add(clip_id)
         last_clip_id = clip_id
 
+        if focus["type"] != "other":
+            non_other_seen += 1
+            if _clip_has_any_character(best_clip, focus["main"]):
+                main_visual_hits += 1
+
+    report = _build_clip_plan_report(selected_meta, main_characters or [], score_rules or {})
+    if report["eligible_segments"]:
+        msg = (
+            f"Main-character presence: {report['main_character_hits']}/{report['eligible_segments']} non-other segments "
+            f"({report['main_character_share']*100:.0f}%)"
+        )
+        print(f"[movie_pipeline] {msg}", flush=True)
+        if emit:
+            emit("clips", msg)
+    for warn in report["warnings"]:
+        print(f"[movie_pipeline] WARNING: {warn}", flush=True)
+        if emit:
+            emit("clips", warn)
+
+    selected = [
+        {"file": item["file"], "duration": item["duration"], "id": item["id"]}
+        for item in selected_meta
+    ]
     print(f"[movie_pipeline] Selected {len(selected)} clips for {audio_dur:.1f}s audio", flush=True)
     return selected
-
-
-# ── Assembly ───────────────────────────────────────────────────────────────────
 
 def _concat_clip_list(clip_paths: list, output: str):
     list_file = output + ".txt"
@@ -1097,6 +1248,7 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
             main_characters=main_chars_list,
             score_rules=score_rules,
             niche_path=niche_path,
+            emit=emit,
         )
         if not clip_data:
             raise RuntimeError(f"No clips found for movie '{movie_name}'. Is it indexed?")
@@ -1292,6 +1444,7 @@ def produce_from_script(
         global_used_ids=global_used_ids,
         main_characters=main_chars_list,
         score_rules=score_rules,
+        emit=emit,
     )
     if not clip_data:
         raise RuntimeError(f"No clips found for movie '{movie_name}'. Is it indexed?")

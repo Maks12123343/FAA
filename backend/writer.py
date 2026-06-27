@@ -14,6 +14,22 @@ import config
 
 MIN_SCRIPT_LENGTH = 20000
 
+
+def _psychology_movie_appendix(topic: str, style_notes: str) -> str:
+    hint = f"{topic}\n{style_notes}".lower()
+    triggers = ("movie", "film", "character", "villain", "hero", "cartoon", "animation", "psychology")
+    if sum(1 for token in triggers if token in hint) < 2:
+        return ""
+    return (
+        "Psychology-movies mode:\n"
+        "- Open with a contradiction or painful truth about the character, not with summary.\n"
+        "- Treat the character like a psychological case study: visible behavior, hidden wound, defense mechanism, fear, and need.\n"
+        "- Use concrete scenes and actions from the film instead of generic abstraction.\n"
+        "- Build sections around escalating insight: surface trait -> inner conflict -> deeper wound -> turning point.\n"
+        "- End on an unsettling or emotionally clarifying insight, not a bland recap.\n"
+    )
+
+
 _GENERATE_SYSTEM = (
     "You are a professional YouTube scriptwriter specializing in psychology, "
     "self-improvement, history, and documentary-style video essays. "
@@ -124,10 +140,15 @@ def generate_script(topic: str, language: str,
     If feedback is provided, it's included as correction instructions.
     Returns the full script text.
     """
+    auto_notes = _psychology_movie_appendix(topic, style_notes)
+    combined_style = style_notes.strip()
+    if auto_notes:
+        combined_style = (combined_style + "\n\n" + auto_notes).strip() if combined_style else auto_notes
+
     prompt = _GENERATE_PROMPT.format(
         topic=topic,
         language=language,
-        style_notes=f"Additional style notes: {style_notes}\n" if style_notes else "",
+        style_notes=f"Additional style notes: {combined_style}\n" if combined_style else "",
     )
     if feedback:
         prompt += (
