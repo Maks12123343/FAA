@@ -779,6 +779,21 @@ def _select_clips_for_segments(segments: list, movie_name: str,
         best_clip, score, breakdown = picked
         file_path = best_clip["file"]
         clip_id = best_clip.get("id", file_path)
+
+        # ── Diagnostic log: show what was considered and why this won ─────
+        # Helps debug why specific videos end up with too few main-character shots.
+        try:
+            seg_text_preview = (seg.get("text", "") or "").strip()[:80]
+            log_lines = [f"[rank] seg#{seg_idx} \"{seg_text_preview}\" focus={focus.get('type','?')}"]
+            for rank_idx, (c, s, _bd) in enumerate(ranked[:5]):
+                chars = ", ".join(c.get("characters", []) or []) or "—"
+                scene = c.get("scene_type", "—")
+                marker = " <-- PICKED" if c.get("id") == clip_id else ""
+                log_lines.append(f"   #{rank_idx+1} score={s:.2f} chars=[{chars}] scene={scene}{marker}")
+            print("\n".join(log_lines), flush=True)
+        except Exception:
+            pass
+
         selected_meta.append({
             "file": file_path,
             "duration": seg_dur,
