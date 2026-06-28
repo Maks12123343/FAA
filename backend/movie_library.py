@@ -28,7 +28,7 @@ BATCH_SIZE         = 1      # ОДИН кліп за один запит — щ�
 # Lower = more recall (more candidates pass, including looser matches).
 # Polish/German/French segments have lower similarity to English clip
 # descriptions, so we keep this low — the LLM ranker filters precision afterwards.
-SEMANTIC_MIN_SIM = 0.05
+SEMANTIC_MIN_SIM = 0.50
 
 # Round-robin counters for API key rotation across parallel workers.
 # Each call to _next_*_key() returns the next key in sequence, so concurrent

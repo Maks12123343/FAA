@@ -716,7 +716,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
             cands = search_clips(
                 chunk, movie_name=movie_name,
                 used_ids=set(),
-                top_n=5,
+                top_n=10,
                 gemini_validate=False,
             )
         except Exception as e:
