@@ -1727,3 +1727,153 @@ def _score_clip(clip: dict, segment_text: str) -> float:
     text_words = set(text_lower.split())
     score = 0.0
 
+    def _word_match(query: str, text: str, full_bonus: float = 1.0, partial_bonus: float = 0.4) -> float:
+        """Повертає бонус якщо query входить в text (повністю або частково)."""
+        q = query.lower().strip()
+        if not q:
+            return 0.0
+        # Full match
+        if q in text:
+            return full_bonus
+        # Partial: Shifu matches Master Shifu
+        words = text.split()
+        for w in words:
+            if q in w or w in q:
+                return partial_bonus
+        return 0.0
+
+    # Characters: "Master Shifu" matches "Shifu teaches Po" -> Shifu = partial match
+    for char in clip.get("characters", []):
+        score += _word_match(char, text_lower, full_bonus=5.0, partial_bonus=3.0)
+
+    # Emotion: strong match
+    if clip.get("emotion"):
+        score += _word_match(clip["emotion"], text_lower, full_bonus=4.0, partial_bonus=2.5)
+
+    # Scene type
+    if clip.get("scene_type"):
+        score += _word_match(clip["scene_type"], text_lower, full_bonus=3.0, partial_bonus=1.5)
+
+    # Themes: each word of theme checked separately
+    for theme in clip.get("themes", []):
+        for w in theme.replace("_", " ").split():
+            if len(w) > 2:
+                score += _word_match(w, text_lower, full_bonus=2.5, partial_bonus=1.5)
+
+    # Tags: full tag match + partial word match
+    for tag in clip.get("tags", []):
+        score += _word_match(tag, text_lower, full_bonus=2.0, partial_bonus=1.0)
+
+    # Description: words > 4 chars
+    for word in clip.get("description", "").lower().split():
+        if len(word) > 4:
+            score += _word_match(word, text_lower, full_bonus=0.8, partial_bonus=0.3)
+
+    return score
+
+
+def _has_embeddings(clips: list) -> bool:
+    """
+    True якщо семантичний пошук доцільний — тобто векторами покрита БІЛЬШІСТЬ
+    кліпів. При частковому бекфілі (вектори лише в частини кліпів) повертаємо
+    False, щоб не загубити кліпи без векторів — тоді працює keyword по всіх.
+    """
+    if not clips:
+        return False
+    with_emb = sum(1 for c in clips if c.get("embedding"))
+    return with_emb >= len(clips) * 0.8
+
+
+def _semantic_rank(segment_text: str, clips: list, used_ids: set, top_n: int) -> list:
+    """
+    Ранжувати кліпи за косинусною близькістю їхнього вектора до вектора сегмента.
+    Кліпи-кредити/титри відсіюються (як і в keyword-режимі).
+    Повертає список clip dict (найрелевантніші першими), без рандому.
+    Якщо вектор сегмента порахувати не вдалось — повертає None (→ keyword fallback).
+    """
+    from backend import embeddings as _emb
+
+    seg_vec = _emb.embed_text(segment_text)
+    if not seg_vec:
+        return None
+
+    scored = []
+    for clip in clips:
+        if clip.get("id") in used_ids:
+            continue
+        if not os.path.exists(clip.get("file", "")):
+            continue
+        emb = clip.get("embedding")
+        if not emb:
+            continue
+        # Відсів кредитів/титрів/текстових екранів (та сама логіка, що в _score_clip)
+        if _score_clip(clip, segment_text) < 0:
+            continue
+        sim = _emb.cosine(seg_vec, emb)
+        if sim >= SEMANTIC_MIN_SIM:
+            scored.append((sim, clip))
+
+    if not scored:
+        return []
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [c for _, c in scored[:top_n]]
+
+
+def search_clips(segment_text: str, movie_name: str = None,
+                 used_ids: set = None, top_n: int = 15,
+                 gemini_validate: bool = False) -> list:
+    """
+    Знайти кліпи що підходять до тексту сегменту нарації.
+
+    Крок 1: семантичний пошук за embedding-векторами (за СЕНСОМ, не за словами).
+            Якщо вектори відсутні або недоступні — fallback на keyword scoring.
+    Крок 2: Gemini validation 0.85 (якщо gemini_validate=True).
+    Fallback: якщо нічого не пройшло валідацію — повертає top-5 без валідації.
+    """
+    if movie_name:
+        all_clips = get_movie_clips(movie_name)
+    else:
+        all_clips = []
+        for m in list_movies():
+            all_clips.extend(get_movie_clips(m["name"]))
+
+    used_ids = used_ids or set()
+
+    # ── Крок 1: семантичний пошук (пріоритетний) ──
+    top = None
+    if _has_embeddings(all_clips):
+        semantic = _semantic_rank(segment_text, all_clips, used_ids, top_n)
+        if semantic is not None:
+            top = semantic
+
+    # ── Fallback: keyword scoring (якщо немає векторів або їх не порахувати) ──
+    if top is None:
+        candidates = []
+        for clip in all_clips:
+            if clip.get("id") in used_ids:
+                continue
+            if not os.path.exists(clip.get("file", "")):
+                continue
+            s = _score_clip(clip, segment_text)
+            if s > 0:
+                candidates.append((s, clip))
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        top = [c for _, c in candidates[:top_n]]
+
+    if not gemini_validate or not top:
+        return top
+
+    # Gemini validation: оцінюємо топ-10, фільтруємо >= 0.85
+    validated = []
+    for clip in top[:10]:
+        gem_score = validate_clip(clip["file"], segment_text)
+        if gem_score >= VALIDATION_THRESHOLD:
+            validated.append((gem_score, clip))
+
+    if validated:
+        validated.sort(key=lambda x: x[0], reverse=True)
+        return [c for _, c in validated]
+
+    # Fallback — повертаємо top-5 без валідації
+    return top[:5]
