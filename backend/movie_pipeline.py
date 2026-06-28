@@ -712,43 +712,60 @@ def _select_clips_for_segments(segments: list, movie_name: str,
 
     ranked_per_seg: list = [None] * n_segs
 
+    GOOD_SCORE = 0.70
+    MAX_ROUNDS = 5
+    BATCH_SIZE = 10
+
     def _rank_one(seg_idx: int):
         seg = segments[seg_idx]
         chunk = seg.get("text", "")
         prev_text = segments[seg_idx - 1].get("text", "") if seg_idx > 0 else ""
         next_text = segments[seg_idx + 1].get("text", "") if seg_idx + 1 < n_segs else ""
 
-        try:
-            cands = search_clips(
-                chunk, movie_name=movie_name,
-                used_ids=set(),
-                top_n=10,
-                gemini_validate=False,
-            )
-        except Exception as e:
-            print(f"[movie_pipeline] search_clips error seg={seg_idx}: {e}", flush=True)
-            cands = []
+        all_ranked = []
+        seen_ids = set()
 
-        if not cands:
-            ranked_per_seg[seg_idx] = []
-            return
+        for round_num in range(MAX_ROUNDS):
+            try:
+                cands = search_clips(
+                    chunk, movie_name=movie_name,
+                    used_ids=seen_ids,
+                    top_n=BATCH_SIZE,
+                    gemini_validate=False,
+                )
+            except Exception as e:
+                print(f"[movie_pipeline] search_clips error seg={seg_idx} round={round_num}: {e}", flush=True)
+                cands = []
 
-        try:
-            ranked = rank_clips_by_text(
-                candidates=cands,
-                segment_text=chunk,
-                prev_text=prev_text,
-                next_text=next_text,
-                main_characters=main_characters or [],
-                score_rules=score_rules or {},
-                all_known_chars=all_known_chars,
-            )
-        except Exception as e:
-            import traceback
-            print(f"[movie_pipeline] Text ranking error seg={seg_idx}: {type(e).__name__}: {e}\n{traceback.format_exc()[:500]}", flush=True)
-            ranked = [(c, 0.0, {}) for c in cands]
+            if not cands:
+                break
 
-        ranked_per_seg[seg_idx] = ranked
+            for c in cands:
+                seen_ids.add(c.get("id", c.get("file", "")))
+
+            try:
+                ranked = rank_clips_by_text(
+                    candidates=cands,
+                    segment_text=chunk,
+                    prev_text=prev_text,
+                    next_text=next_text,
+                    main_characters=main_characters or [],
+                    score_rules=score_rules or {},
+                    all_known_chars=all_known_chars,
+                )
+            except Exception as e:
+                import traceback
+                print(f"[movie_pipeline] Text ranking error seg={seg_idx}: {type(e).__name__}: {e}\n{traceback.format_exc()[:500]}", flush=True)
+                ranked = [(c, 0.0, {}) for c in cands]
+
+            all_ranked.extend(ranked)
+
+            best_score = max(float(s) for _, s, _ in all_ranked) if all_ranked else 0.0
+            if best_score >= GOOD_SCORE:
+                break
+
+        all_ranked.sort(key=lambda x: x[1], reverse=True)
+        ranked_per_seg[seg_idx] = all_ranked
 
     rank_start = time.time()
     print(f"[movie_pipeline] Ranking {n_segs} segments in parallel ({PARALLEL_RANK} workers)...", flush=True)
