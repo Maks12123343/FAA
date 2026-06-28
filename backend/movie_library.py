@@ -24,6 +24,12 @@ CLIP_MIN           = 2.0
 CLIP_MAX           = 5.0
 BATCH_SIZE         = 1      # ОДИН кліп за один запит — щоб модель не плутала кадри між кліпами
 
+# Cosine similarity threshold for semantic clip retrieval.
+# Lower = more recall (more candidates pass, including looser matches).
+# Polish/German/French segments have lower similarity to English clip
+# descriptions, so we keep this low — the LLM ranker filters precision afterwards.
+SEMANTIC_MIN_SIM = 0.05
+
 # Round-robin counters for API key rotation across parallel workers.
 # Each call to _next_*_key() returns the next key in sequence, so concurrent
 # batches spread load evenly instead of hammering key #0.
@@ -1148,6 +1154,7 @@ def _call_text_ranker(prompt: str) -> list | None:
                     break  # got a response but couldn't parse — try next key once
                 except Exception as e:
                     err = str(e).lower()
+                    print(f"[ranker:pioneer] EXCEPTION key=...{key[-12:]} attempt={attempt} err={type(e).__name__}: {str(e)[:200]}", flush=True)
                     is_net = any(s in err for s in (
                         "lookup timed out", "11002", "timed out", "connection",
                         "temporarily unavailable", "name or service",
@@ -1197,6 +1204,7 @@ def _call_text_ranker(prompt: str) -> list | None:
                     break
                 except Exception as e:
                     err = str(e).lower()
+                    print(f"[ranker:gigacoder] EXCEPTION key=...{key[-12:]} attempt={attempt} err={type(e).__name__}: {str(e)[:200]}", flush=True)
                     is_net = any(s in err for s in (
                         "lookup timed out", "11002", "timed out", "connection",
                         "temporarily unavailable", "name or service",
@@ -1875,5 +1883,4 @@ def search_clips(segment_text: str, movie_name: str = None,
         validated.sort(key=lambda x: x[0], reverse=True)
         return [c for _, c in validated]
 
-    # Fallback — повертаємо top-5 без валідації
     return top[:5]

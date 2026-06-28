@@ -738,7 +738,8 @@ def _select_clips_for_segments(segments: list, movie_name: str,
                 all_known_chars=all_known_chars,
             )
         except Exception as e:
-            print(f"[movie_pipeline] Text ranking error seg={seg_idx}: {e}", flush=True)
+            import traceback
+            print(f"[movie_pipeline] Text ranking error seg={seg_idx}: {type(e).__name__}: {e}\n{traceback.format_exc()[:500]}", flush=True)
             ranked = [(c, 0.0, {}) for c in cands]
 
         ranked_per_seg[seg_idx] = ranked
