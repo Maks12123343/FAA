@@ -1713,6 +1713,23 @@ _REJECT_KEYWORDS = {
 }
 
 
+def _is_garbage_clip(clip: dict) -> bool:
+    """
+    Detect clips whose visual analysis returned no useful information.
+    Such clips usually got 'unknown' / '???' from the analyzer when frames
+    were too dark, mid-transition, or full of credits text. They're useless
+    for matching to narration and shouldn't compete with real clips.
+    """
+    desc = (clip.get("description") or "").strip().lower()
+    if desc in ("unknown", "", "—", "-"):
+        return True
+    chars = clip.get("characters") or []
+    has_real_char = any(c and c.strip() and c.strip() not in ("???", "—", "-") for c in chars)
+    if not has_real_char and desc.startswith("unknown"):
+        return True
+    return False
+
+
 def _score_clip(clip: dict, segment_text: str) -> float:
     """Розумний keyword-based скор без Gemini. Fuzzy matching:
     - Shifu знаходить Master Shifu
@@ -1815,6 +1832,8 @@ def _semantic_rank(segment_text: str, clips: list, used_ids: set, top_n: int) ->
             continue
         if not os.path.exists(clip.get("file", "")):
             continue
+        if _is_garbage_clip(clip):
+            continue
         emb = clip.get("embedding")
         if not emb:
             no_emb += 1
@@ -1874,6 +1893,8 @@ def search_clips(segment_text: str, movie_name: str = None,
             if clip.get("id") in used_ids:
                 continue
             if not os.path.exists(clip.get("file", "")):
+                continue
+            if _is_garbage_clip(clip):
                 continue
             s = _score_clip(clip, segment_text)
             if s > 0:

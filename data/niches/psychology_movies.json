@@ -48,10 +48,10 @@
   ],
   "score_rules": {
     "character_mentioned_bonus": 0.4,
-    "main_character_bonus": 0.2,
+    "main_character_bonus": 0.4,
     "wrong_character_penalty": -0.2,
-    "no_relevant_character_penalty": -0.15,
-    "character_bonus_cap": 0.5,
+    "no_relevant_character_penalty": -0.4,
+    "character_bonus_cap": 0.7,
     "scene_penalties": {
       "credits": -1.0,
       "title_card": -1.0,
