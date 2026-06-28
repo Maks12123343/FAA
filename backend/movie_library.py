@@ -1796,16 +1796,20 @@ def _semantic_rank(segment_text: str, clips: list, used_ids: set, top_n: int) ->
     """
     Ранжувати кліпи за косинусною близькістю їхнього вектора до вектора сегмента.
     Кліпи-кредити/титри відсіюються (як і в keyword-режимі).
-    Повертає список clip dict (найрелевантніші першими), без рандому.
+    Повертає список clip dict (найрелевантніших першими), без рандому.
     Якщо вектор сегмента порахувати не вдалось — повертає None (→ keyword fallback).
     """
     from backend import embeddings as _emb
 
     seg_vec = _emb.embed_text(segment_text)
     if not seg_vec:
+        print(f"[semantic] embed_text returned None for: {segment_text[:80]!r}", flush=True)
         return None
 
     scored = []
+    rejected_score = 0
+    rejected_sim = 0
+    no_emb = 0
     for clip in clips:
         if clip.get("id") in used_ids:
             continue
@@ -1813,15 +1817,23 @@ def _semantic_rank(segment_text: str, clips: list, used_ids: set, top_n: int) ->
             continue
         emb = clip.get("embedding")
         if not emb:
+            no_emb += 1
             continue
-        # Відсів кредитів/титрів/текстових екранів (та сама логіка, що в _score_clip)
         if _score_clip(clip, segment_text) < 0:
+            rejected_score += 1
             continue
         sim = _emb.cosine(seg_vec, emb)
         if sim >= SEMANTIC_MIN_SIM:
             scored.append((sim, clip))
+        else:
+            rejected_sim += 1
 
     if not scored:
+        print(
+            f"[semantic] no candidates for {segment_text[:60]!r} "
+            f"(no_emb={no_emb} rejected_score={rejected_score} rejected_sim={rejected_sim})",
+            flush=True,
+        )
         return []
 
     scored.sort(key=lambda x: x[0], reverse=True)
