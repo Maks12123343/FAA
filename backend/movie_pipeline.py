@@ -45,9 +45,15 @@ def _get_whisper_model():
         with _WHISPER_LOCK:
             if _WHISPER_MODEL is None:
                 import whisper as _whisper
-                print("[movie_pipeline] Loading Whisper model (tiny) — first time...", flush=True)
-                _WHISPER_MODEL = _whisper.load_model("tiny")
-                print("[movie_pipeline] Whisper model loaded.", flush=True)
+                import torch
+                # `medium` model is multilingual and handles Polish/German/French/Spanish/Portuguese
+                # well enough to give meaningful clip-matching context.
+                # On a GPU instance (RTX 3060/2080+) it runs in seconds.
+                model_name = os.environ.get("FAA_WHISPER_MODEL", "large-v3")
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                print(f"[movie_pipeline] Loading Whisper model ({model_name}) on {device} — first time...", flush=True)
+                _WHISPER_MODEL = _whisper.load_model(model_name, device=device)
+                print(f"[movie_pipeline] Whisper model loaded ({model_name}/{device}).", flush=True)
     return _WHISPER_MODEL
 
 
