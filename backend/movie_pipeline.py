@@ -538,7 +538,7 @@ def _pick_ranked_clip(ranked: list, used_ids: set, last_clip_id: str | None, foc
         pool = []
         for clip, score, breakdown in ranked:
             cid = clip.get("id", clip.get("file", ""))
-            if not allow_used and cid in used_ids:
+            if not allow_used and used_counts.get(cid, 0) >= MAX_CLIP_USES:
                 continue
             if not allow_adjacent and is_adjacent(last_clip_id, cid):
                 continue
@@ -634,7 +634,12 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     """
     from backend.movie_library import rank_clips_by_text
 
-    used_ids = global_used_ids if global_used_ids is not None else set()
+    MAX_CLIP_USES = 2
+    used_counts: dict = {}
+    if global_used_ids:
+        for cid in global_used_ids:
+            used_counts[cid] = MAX_CLIP_USES
+    used_ids = used_counts  # alias for compatibility with _clip_debug_flags
     selected_meta: list = []
 
     all_movie_clips = get_movie_clips(movie_name)
@@ -878,7 +883,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
             "score": score,
             "focus_type": focus["type"],
         })
-        used_ids.add(clip_id)
+        used_counts[clip_id] = used_counts.get(clip_id, 0) + 1
         last_clip_id = clip_id
 
         if focus["type"] != "other":
