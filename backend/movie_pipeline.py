@@ -522,7 +522,7 @@ def _classify_segment_focus(segment_text: str, main_characters: list, all_known_
     }
 
 
-def _pick_ranked_clip(ranked: list, used_ids: set, last_clip_id: str | None, focus: dict,
+def _pick_ranked_clip(ranked: list, used_ids: dict, last_clip_id: str | None, focus: dict,
                       main_characters: list, score_rules: dict, is_adjacent,
                       should_push_main: bool):
     if not ranked:
@@ -538,7 +538,7 @@ def _pick_ranked_clip(ranked: list, used_ids: set, last_clip_id: str | None, foc
         pool = []
         for clip, score, breakdown in ranked:
             cid = clip.get("id", clip.get("file", ""))
-            if not allow_used and used_counts.get(cid, 0) >= MAX_CLIP_USES:
+            if not allow_used and used_ids.get(cid, 0) >= MAX_CLIP_USES:
                 continue
             if not allow_adjacent and is_adjacent(last_clip_id, cid):
                 continue
