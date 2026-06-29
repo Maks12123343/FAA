@@ -1886,7 +1886,7 @@ def search_clips(segment_text: str, movie_name: str = None,
         if semantic is not None:
             top = semantic
 
-    # ── Fallback: keyword scoring (якщо немає векторів або їх не порахувати) ──
+    # ── Fallback: keyword scoring ──
     if top is None:
         candidates = []
         for clip in all_clips:
@@ -1905,7 +1905,6 @@ def search_clips(segment_text: str, movie_name: str = None,
     if not gemini_validate or not top:
         return top
 
-    # Gemini validation: оцінюємо топ-10, фільтруємо >= 0.85
     validated = []
     for clip in top[:10]:
         gem_score = validate_clip(clip["file"], segment_text)

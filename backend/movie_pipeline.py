@@ -706,7 +706,7 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     except Exception as e:
         print(f"[movie_pipeline] Embedding pre-cache failed (will fall back to per-call): {e}", flush=True)
 
-    PARALLEL_RANK = 4
+    PARALLEL_RANK = 2
     try:
         import eventlet as _ev
         _USE_EV = True
@@ -1637,7 +1637,6 @@ def produce_batch(prepare_id: str, movie_name: str, language: str,
             results.append({"index": i + 1, "status": "ok", **result})
             log(f"Video {i + 1}/{count} done: {result['output_path']}")
 
-            # Оновлюємо глобальний пул використаних кліпів з повернутих used_ids
             returned_ids = result.get("used_ids", [])
             for cid in returned_ids:
                 if cid:
