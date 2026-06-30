@@ -50,7 +50,7 @@
     "character_mentioned_bonus": 0.4,
     "main_character_bonus": 0.4,
     "wrong_character_penalty": -0.2,
-    "no_relevant_character_penalty": -0.4,
+    "no_relevant_character_penalty": -0.6,
     "character_bonus_cap": 0.7,
     "scene_penalties": {
       "credits": -1.0,
@@ -80,7 +80,7 @@
       "trust"
     ],
     "main_character_target_ratio": 0.68,
-    "generic_main_character_margin": 0.12,
+    "generic_main_character_margin": 0.25,
     "other_character_margin": 0.18
   }
 }

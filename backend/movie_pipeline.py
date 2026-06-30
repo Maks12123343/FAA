@@ -720,6 +720,14 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     GOOD_SCORE = 0.70
     MAX_ROUNDS = 5
     BATCH_SIZE = 10
+    MAIN_CHAR_INJECT = 4
+
+    main_char_set = _normalized_character_names(main_characters or [])
+    main_char_clips = [
+        c for c in all_movie_clips
+        if _clip_has_any_character(c, main_char_set)
+        and os.path.exists(c.get("file", ""))
+    ]
 
     def _rank_one(seg_idx: int):
         seg = segments[seg_idx]
@@ -744,6 +752,17 @@ def _select_clips_for_segments(segments: list, movie_name: str,
 
             if not cands:
                 break
+
+            # Inject main character clips if missing from candidates
+            has_main = any(_clip_has_any_character(c, main_char_set) for c in cands)
+            if not has_main and main_char_clips:
+                available_main = [
+                    c for c in main_char_clips
+                    if c.get("id", c.get("file", "")) not in seen_ids
+                ]
+                if available_main:
+                    injected = random.sample(available_main, min(MAIN_CHAR_INJECT, len(available_main)))
+                    cands.extend(injected)
 
             for c in cands:
                 seen_ids.add(c.get("id", c.get("file", "")))
