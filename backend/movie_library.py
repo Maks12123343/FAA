@@ -1402,24 +1402,30 @@ def rank_clips_by_text(
 
     rules_block = "\n".join(rule_lines)
 
-    prompt = _TEXT_RANK_PROMPT.format(
-        n=len(candidates),
-        main_char_note="\n" + rules_block + "\n",
-        prev_text=(prev_text or "—").strip()[:300],
-        current_text=(segment_text or "").strip()[:400],
-        next_text=(next_text or "—").strip()[:300],
-        candidates_block=block,
-    )
+    # Build the prompt for the optional LLM ranker (kept for reference / fallback,
+    # but we don't actually call Pioneer/GigaCoder here anymore — too unreliable
+    # under load. Base scores come from Vertex cosine similarity instead.)
+    _ = _TEXT_RANK_PROMPT  # noqa: prompt template still used elsewhere
+    _ = rules_block, block
 
-    base_scores = _call_text_ranker(prompt)
-    if base_scores is None:
-        print(f"[ranker] _call_text_ranker returned None — API or parsing failed (candidates={len(candidates)})", flush=True)
-        base_scores = [0.5] * len(candidates)
-    elif len(base_scores) < len(candidates):
-        print(f"[ranker] returned {len(base_scores)} scores for {len(candidates)} candidates — padding", flush=True)
-        base_scores = [0.5] * len(candidates)
-    elif all(float(s) <= 0.0001 for s in base_scores):
-        print("[ranker] returned all-zero scores; using neutral fallback scores", flush=True)
+    # Base scores from Vertex cosine similarity between the segment and each
+    # clip's stored embedding. No external LLM call — just math on cached vectors.
+    from backend import embeddings as _emb
+    seg_vec = _emb.embed_text(segment_text or "")
+    base_scores: list = []
+    if seg_vec:
+        for c in candidates:
+            emb = c.get("embedding")
+            if emb:
+                # Map cosine [-1..1] → [0..1] so it lines up with the modifier scale
+                sim = _emb.cosine(seg_vec, emb)
+                base_scores.append(max(0.0, min(1.0, (sim + 1.0) / 2.0)))
+            else:
+                base_scores.append(0.5)
+    else:
+        # Vertex didn't return a vector — fall back to neutral so modifiers
+        # (main_character bonus, scene penalties) still rank candidates.
+        print(f"[ranker] No Vertex vector for segment, using neutral base scores", flush=True)
         base_scores = [0.5] * len(candidates)
 
     # Step 2: detect mentioned characters in current segment
