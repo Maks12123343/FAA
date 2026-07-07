@@ -427,4 +427,84 @@ socket.on('produce_done', data => {
 
 socket.on('all_done', () => {
   _producing = false;
-  docume
+  document.getElementById('produceBtn').disabled = false;
+  log('All languages finished!', 'done');
+});
+
+socket.on('error', data => {
+  _stopPolling();
+  log('ERROR: ' + data.message, 'error');
+  document.getElementById('prepareBtn').disabled = false;
+  if (!_producing) {
+    document.getElementById('produceBtn').disabled = false;
+  }
+});
+
+// Initialize on page load
+onNicheChange();
+
+// Check if a job is stuck on page load
+fetch('/api/status').then(r=>r.json()).then(d=>{
+  if(d.job_running){
+    log('A job is running: ' + (d.last_msg||'(no status)'));
+    log('If stuck, click Reset below.');
+    document.getElementById('prepareBtn').disabled = true;
+    _startPolling();
+  }
+});
+</script>
+{% endblock %}
+ById('produceBtn').disabled = false;
+  log('All languages finished!', 'done');
+});
+
+socket.on('error', data => {
+  _stopPolling();
+  log('ERROR: ' + data.message, 'error');
+  document.getElementById('prepareBtn').disabled = false;
+  if (!_producing) {
+    document.getElementById('produceBtn').disabled = false;
+  }
+});
+
+// Initialize on page load
+onNicheChange();
+
+// Check if a job is stuck on page load
+fetch('/api/status').then(r=>r.json()).then(d=>{
+  if(d.job_running){
+    log('A job is running: ' + (d.last_msg||'(no status)'));
+    log('If stuck, click Reset below.');
+    document.getElementById('prepareBtn').disabled = true;
+    _startPolling();
+  }
+});
+</script>
+{% endblock %}
+tById('produceBtn').disabled = false;
+  log('All languages finished!', 'done');
+});
+
+socket.on('error', data => {
+  _stopPolling();
+  log('ERROR: ' + data.message, 'error');
+  document.getElementById('prepareBtn').disabled = false;
+  if (!_producing) {
+    document.getElementById('produceBtn').disabled = false;
+  }
+});
+
+// Initialize on page load
+onNicheChange();
+
+// Check if a job is stuck on page load
+fetch('/api/status').then(r=>r.json()).then(d=>{
+  if(d.job_running){
+    log('A job is running: ' + (d.last_msg||'(no status)'));
+    log('If stuck, click Reset below.');
+    document.getElementById('prepareBtn').disabled = true;
+    _startPolling();
+  }
+});
+</script>
+{% endblock %}
