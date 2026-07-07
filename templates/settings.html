@@ -17,33 +17,54 @@
 </div>
 
 <div class="card">
-  <h2>Voice Profiles</h2>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <h2 style="margin:0">Voice Profiles</h2>
+    <button type="button" class="btn btn-primary" onclick="openAddLangModal()">+ Add Language</button>
+  </div>
   <p style="color:#aaa;font-size:13px;margin-bottom:20px">
     Set voice_id for each language. Leave empty to disable that language.
   </p>
-  {% set langs = [
-    ('en','English'),('pl','Polish'),('de','German'),('fr','French'),
-    ('es','Spanish'),('it','Italian'),('pt','Portuguese'),
-    ('uk','Ukrainian'),('ru','Russian'),('tr','Turkish')
-  ] %}
-  {% for code, label in langs %}
-  {% set profile = settings.voice_profiles.get(code, {}) %}
-  <div style="border:1px solid #2a2a2a;border-radius:8px;padding:16px;margin-bottom:12px">
-    <div style="font-weight:600;margin-bottom:12px">{{ label }} ({{ code }})</div>
-    <div class="grid-2">
-      <div class="field"><label>Voice Name</label>
-        <input type="text" id="vname_{{ code }}" value="{{ profile.get('name','') }}"></div>
-      <div class="field"><label>Voice ID</label>
-        <input type="text" id="vid_{{ code }}" value="{{ profile.get('voice_id','') }}"></div>
+  <div id="voiceProfilesContainer">
+    {% for code, profile in settings.voice_profiles.items() %}
+    <div class="voice-profile-card" data-lang-code="{{ code }}"
+         style="border:1px solid #2a2a2a;border-radius:8px;padding:16px;margin-bottom:12px;position:relative">
+      <button type="button" onclick="removeLanguage('{{ code }}')"
+              style="position:absolute;top:12px;right:12px;background:#7f1d1d;color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px">Remove</button>
+      <div style="font-weight:600;margin-bottom:12px" class="lang-title">{{ profile.get('name','') or code|upper }} ({{ code }})</div>
+      <div class="grid-2">
+        <div class="field"><label>Voice Name</label>
+          <input type="text" class="vname" data-code="{{ code }}" value="{{ profile.get('name','') }}"></div>
+        <div class="field"><label>Voice ID</label>
+          <input type="text" class="vid" data-code="{{ code }}" value="{{ profile.get('voice_id','') }}"></div>
+      </div>
+      <div class="grid-2">
+        <div class="field"><label>Stability</label>
+          <input type="text" class="vstab" data-code="{{ code }}" value="{{ profile.get('stability',0.85) }}"></div>
+        <div class="field"><label>Speed</label>
+          <input type="text" class="vspeed" data-code="{{ code }}" value="{{ profile.get('speed',1.0) }}"></div>
+      </div>
     </div>
-    <div class="grid-2">
-      <div class="field"><label>Stability ({{ profile.get('stability',0.85) }})</label>
-        <input type="text" id="vstab_{{ code }}" value="{{ profile.get('stability',0.85) }}"></div>
-      <div class="field"><label>Speed ({{ profile.get('speed',1.0) }})</label>
-        <input type="text" id="vspeed_{{ code }}" value="{{ profile.get('speed',1.0) }}"></div>
+    {% endfor %}
+  </div>
+</div>
+
+<!-- Add Language Modal -->
+<div id="addLangModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:#1a1a1a;border:1px solid #333;border-radius:10px;padding:24px;width:100%;max-width:480px">
+    <h3 style="margin-top:0">Add Language</h3>
+    <div class="field">
+      <label>Language</label>
+      <select id="newLangCode" style="width:100%;background:#111;color:#e5e5e5;border:1px solid #333;border-radius:6px;padding:8px"></select>
+    </div>
+    <div class="field">
+      <label>Voice ID (ElevenLabs)</label>
+      <input type="text" id="newLangVoiceId" placeholder="e.g. 1nUkvoDFCcCTjJk9U8mL" style="width:100%">
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+      <button type="button" class="btn" onclick="closeAddLangModal()">Cancel</button>
+      <button type="button" class="btn btn-primary" onclick="addLanguage()">Add</button>
     </div>
   </div>
-  {% endfor %}
 </div>
 
 <div class="card">
@@ -130,21 +151,102 @@
 {% endblock %}
 {% block scripts %}
 <script>
-const LANGS = ['en','pl','de','fr','es','it','pt','uk','ru','tr'];
+// Full catalog of language codes → readable names.
+// User picks from this list in the Add Language modal.
+const LANG_CATALOG = {
+  en: "English", uk: "Ukrainian", ru: "Russian",
+  de: "German", fr: "French", es: "Spanish",
+  pl: "Polish", it: "Italian", tr: "Turkish", pt: "Portuguese",
+  cs: "Czech", ro: "Romanian", hu: "Hungarian", sv: "Swedish",
+  nl: "Dutch", ja: "Japanese", ko: "Korean", zh: "Chinese",
+  ar: "Arabic", he: "Hebrew", fa: "Persian",
+  fi: "Finnish", no: "Norwegian", da: "Danish", is: "Icelandic",
+  el: "Greek", bg: "Bulgarian", sr: "Serbian", hr: "Croatian",
+  sk: "Slovak", sl: "Slovenian", lt: "Lithuanian", lv: "Latvian", et: "Estonian",
+  id: "Indonesian", ms: "Malay", vi: "Vietnamese", th: "Thai",
+  hi: "Hindi", bn: "Bengali", ur: "Urdu", ta: "Tamil",
+  sw: "Swahili", af: "Afrikaans", tl: "Filipino",
+  ka: "Georgian", az: "Azerbaijani", kk: "Kazakh", uz: "Uzbek",
+};
+
+function openAddLangModal() {
+  const sel = document.getElementById('newLangCode');
+  sel.innerHTML = '';
+  const existing = new Set(
+    Array.from(document.querySelectorAll('.voice-profile-card')).map(c => c.dataset.langCode)
+  );
+  const options = Object.entries(LANG_CATALOG)
+    .filter(([code, _]) => !existing.has(code))
+    .sort((a, b) => a[1].localeCompare(b[1]));
+  if (!options.length) {
+    alert('All languages from the catalog are already added.');
+    return;
+  }
+  for (const [code, name] of options) {
+    const opt = document.createElement('option');
+    opt.value = code;
+    opt.textContent = `${name} (${code})`;
+    sel.appendChild(opt);
+  }
+  document.getElementById('newLangVoiceId').value = '';
+  document.getElementById('addLangModal').style.display = 'flex';
+}
+
+function closeAddLangModal() {
+  document.getElementById('addLangModal').style.display = 'none';
+}
+
+function addLanguage() {
+  const code = document.getElementById('newLangCode').value;
+  const voiceId = document.getElementById('newLangVoiceId').value.trim();
+  if (!code) return;
+  const name = LANG_CATALOG[code] || code.toUpperCase();
+  const container = document.getElementById('voiceProfilesContainer');
+  const card = document.createElement('div');
+  card.className = 'voice-profile-card';
+  card.dataset.langCode = code;
+  card.style.cssText = 'border:1px solid #2a2a2a;border-radius:8px;padding:16px;margin-bottom:12px;position:relative';
+  card.innerHTML = `
+    <button type="button" onclick="removeLanguage('${code}')"
+            style="position:absolute;top:12px;right:12px;background:#7f1d1d;color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px">Remove</button>
+    <div style="font-weight:600;margin-bottom:12px">${name} (${code})</div>
+    <div class="grid-2">
+      <div class="field"><label>Voice Name</label>
+        <input type="text" class="vname" data-code="${code}" value="${name} Voice"></div>
+      <div class="field"><label>Voice ID</label>
+        <input type="text" class="vid" data-code="${code}" value="${voiceId.replace(/"/g,'&quot;')}"></div>
+    </div>
+    <div class="grid-2">
+      <div class="field"><label>Stability</label>
+        <input type="text" class="vstab" data-code="${code}" value="0.85"></div>
+      <div class="field"><label>Speed</label>
+        <input type="text" class="vspeed" data-code="${code}" value="1"></div>
+    </div>
+  `;
+  container.appendChild(card);
+  closeAddLangModal();
+}
+
+function removeLanguage(code) {
+  if (!confirm(`Remove language "${code}"?`)) return;
+  const card = document.querySelector(`.voice-profile-card[data-lang-code="${code}"]`);
+  if (card) card.remove();
+}
 
 function saveSettings() {
+  // Collect voice_profiles from DOM (dynamic — any added language is included)
   const voice_profiles = {};
-  LANGS.forEach(code => {
+  document.querySelectorAll('.voice-profile-card').forEach(card => {
+    const code = card.dataset.langCode;
     voice_profiles[code] = {
-      name: document.getElementById('vname_' + code).value,
-      voice_id: document.getElementById('vid_' + code).value,
-      stability: parseFloat(document.getElementById('vstab_' + code).value) || 0.85,
+      name: card.querySelector('.vname').value,
+      voice_id: card.querySelector('.vid').value,
+      stability: parseFloat(card.querySelector('.vstab').value) || 0.85,
       similarity_boost: 0.75,
-      speed: parseFloat(document.getElementById('vspeed_' + code).value) || 1.0,
+      speed: parseFloat(card.querySelector('.vspeed').value) || 1.0,
     };
   });
 
-  // Pioneer keys: split by newline, filter empty
   const pioneer_api_keys = document.getElementById('pioneer_api_keys').value
     .split('\n').map(k => k.trim()).filter(k => k.length > 0);
 
@@ -172,6 +274,7 @@ function saveSettings() {
     fps:               parseInt(document.getElementById('fps').value) || 30,
     clip_score_threshold: parseFloat(document.getElementById('clip_score_threshold').value) || 0.85,
     voice_profiles,
+    voice_profiles_replace: true,   // signals backend to REPLACE profiles (not merge)
   };
 
   fetch('/api/settings', {
