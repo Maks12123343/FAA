@@ -129,11 +129,16 @@ def save_settings():
     if not data:
         return jsonify({"error": "No data provided"}), 400
     settings = config.load_settings()
+    # If client asks to fully replace voice_profiles (e.g. after Add/Remove language),
+    # take the incoming dict as-is instead of merging.
+    replace_voice = bool(data.pop("voice_profiles_replace", False))
     # Deep merge: for dict-valued keys (like voice_profiles), merge instead of overwrite
     for key, value in data.items():
         if key not in config.DEFAULT_SETTINGS:
             continue
-        if isinstance(value, dict) and isinstance(settings.get(key), dict):
+        if key == "voice_profiles" and replace_voice and isinstance(value, dict):
+            settings[key] = value
+        elif isinstance(value, dict) and isinstance(settings.get(key), dict):
             settings[key].update(value)
         else:
             settings[key] = value
@@ -1077,5 +1082,3 @@ if __name__ == "__main__":
     host = os.environ.get("FAA_HOST", "127.0.0.1")
     port = int(os.environ.get("FAA_PORT", "5050"))
     socketio.run(app, host=host, port=port, debug=False)
-
-# end of app.py

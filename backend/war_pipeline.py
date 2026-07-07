@@ -418,16 +418,16 @@ Return ONLY a JSON array, no markdown, no commentary:
 """
 
 _LANGUAGE_NAMES = {
-    "en": "English",
-    "uk": "Ukrainian",
-    "ru": "Russian",
-    "de": "German",
-    "fr": "French",
-    "es": "Spanish",
-    "pl": "Polish",
-    "it": "Italian",
-    "tr": "Turkish",
-    "pt": "Portuguese",
+    "en": "English", "uk": "Ukrainian", "ru": "Russian", "de": "German",
+    "fr": "French", "es": "Spanish", "pl": "Polish", "it": "Italian",
+    "tr": "Turkish", "pt": "Portuguese", "cs": "Czech", "ro": "Romanian",
+    "hu": "Hungarian", "sv": "Swedish", "ja": "Japanese", "nl": "Dutch",
+    "no": "Norwegian", "da": "Danish", "fi": "Finnish", "el": "Greek",
+    "bg": "Bulgarian", "hr": "Croatian", "sr": "Serbian", "sk": "Slovak",
+    "sl": "Slovenian", "et": "Estonian", "lv": "Latvian", "lt": "Lithuanian",
+    "ko": "Korean", "zh": "Chinese", "ar": "Arabic", "he": "Hebrew",
+    "hi": "Hindi", "id": "Indonesian", "vi": "Vietnamese", "th": "Thai",
+    "ms": "Malay", "fa": "Persian", "ur": "Urdu", "bn": "Bengali",
 }
 
 
