@@ -79,7 +79,7 @@
 </div>
 
 <div class="card">
-  <h2>Pioneer.ai (Gemini proxy — безкоштовний)</h2>
+  <h2>Pioneer.ai (Gemini proxy)</h2>
   <p style="color:#aaa;font-size:13px;margin-bottom:16px">
     OpenAI-compatible API. Якщо ключі є — використовується замість Vertex AI. Можна додати кілька ключів для паралельної валідації.
   </p>
@@ -130,7 +130,7 @@
   <div class="grid-2">
     <div class="field"><label>Stock Max Duration (sec)</label>
       <input type="text" id="stock_max_duration" value="{{ settings.stock_max_duration }}"></div>
-    <div class="field"><label>Competitor Clip Ratio (0–1)</label>
+    <div class="field"><label>Competitor Clip Ratio (0-1)</label>
       <input type="text" id="competitor_ratio" value="{{ settings.competitor_ratio }}"></div>
   </div>
   <div class="grid-2">
@@ -155,7 +155,6 @@
 {% endblock %}
 {% block scripts %}
 <script>
-// Simple HTML-escape for user-typed values inserted into innerHTML.
 function _esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
                   .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
@@ -181,4 +180,101 @@ function addLanguage() {
   if (!nameRaw) { alert('Please enter a language name (e.g. Swedish).'); return; }
   if (!codeRaw) { alert('Please enter a language code (e.g. sv).'); return; }
   if (!/^[a-z]{2,5}$/.test(codeRaw)) {
-    
+    alert('Language code must be 2-5 lowercase letters (e.g. sv, hu, zh).');
+    return;
+  }
+
+  const existing = new Set(
+    Array.from(document.querySelectorAll('.voice-profile-card')).map(c => c.dataset.langCode)
+  );
+  if (existing.has(codeRaw)) {
+    alert('Language "' + codeRaw + '" is already added. Edit the existing card or remove it first.');
+    return;
+  }
+
+  const container = document.getElementById('voiceProfilesContainer');
+  const card = document.createElement('div');
+  card.className = 'voice-profile-card';
+  card.dataset.langCode = codeRaw;
+  card.style.cssText = 'border:1px solid #2a2a2a;border-radius:8px;padding:16px;margin-bottom:12px;position:relative';
+  card.innerHTML =
+    '<button type="button" onclick="removeLanguage(\'' + _esc(codeRaw) + '\')" ' +
+      'style="position:absolute;top:12px;right:12px;background:#7f1d1d;color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px">Remove</button>' +
+    '<div style="font-weight:600;margin-bottom:12px">' + _esc(nameRaw) + ' (' + _esc(codeRaw) + ')</div>' +
+    '<div class="grid-2">' +
+      '<div class="field"><label>Voice Name</label>' +
+        '<input type="text" class="vname" data-code="' + _esc(codeRaw) + '" value="' + _esc(nameRaw + ' Voice') + '"></div>' +
+      '<div class="field"><label>Voice ID</label>' +
+        '<input type="text" class="vid" data-code="' + _esc(codeRaw) + '" value="' + _esc(voiceId) + '"></div>' +
+    '</div>' +
+    '<div class="grid-2">' +
+      '<div class="field"><label>Stability</label>' +
+        '<input type="text" class="vstab" data-code="' + _esc(codeRaw) + '" value="0.85"></div>' +
+      '<div class="field"><label>Speed</label>' +
+        '<input type="text" class="vspeed" data-code="' + _esc(codeRaw) + '" value="1"></div>' +
+    '</div>';
+  container.appendChild(card);
+  closeAddLangModal();
+}
+
+function removeLanguage(code) {
+  if (!confirm('Remove language "' + code + '"?')) return;
+  const card = document.querySelector('.voice-profile-card[data-lang-code="' + code + '"]');
+  if (card) card.remove();
+}
+
+function saveSettings() {
+  const voice_profiles = {};
+  document.querySelectorAll('.voice-profile-card').forEach(card => {
+    const code = card.dataset.langCode;
+    voice_profiles[code] = {
+      name: card.querySelector('.vname').value,
+      voice_id: card.querySelector('.vid').value,
+      stability: parseFloat(card.querySelector('.vstab').value) || 0.85,
+      similarity_boost: 0.75,
+      speed: parseFloat(card.querySelector('.vspeed').value) || 1.0,
+    };
+  });
+
+  const pioneer_api_keys = document.getElementById('pioneer_api_keys').value
+    .split('\n').map(k => k.trim()).filter(k => k.length > 0);
+
+  const data = {
+    pioneer_api_keys,
+    pioneer_model:     document.getElementById('pioneer_model').value,
+    pioneer_api_url:   document.getElementById('pioneer_api_url').value,
+    claude_api_key:    document.getElementById('claude_api_key').value,
+    claude_model:      document.getElementById('claude_model').value,
+    tts_api_key:       document.getElementById('tts_api_key').value,
+    tts_api_url:       document.getElementById('tts_api_url').value,
+    youtube_api_key:   document.getElementById('youtube_api_key').value,
+    youtube_api_key_2: document.getElementById('youtube_api_key_2').value,
+    youtube_api_key_3: document.getElementById('youtube_api_key_3').value,
+    stocks_dir:        document.getElementById('stocks_dir').value,
+    vertex_project_id: document.getElementById('vertex_project_id').value,
+    vertex_location:   document.getElementById('vertex_location').value,
+    gemini_model:      document.getElementById('gemini_model').value,
+    clip_min_duration: parseFloat(document.getElementById('clip_min_duration').value) || 2,
+    clip_max_duration: parseFloat(document.getElementById('clip_max_duration').value) || 5,
+    stock_max_duration: parseFloat(document.getElementById('stock_max_duration').value) || 6,
+    competitor_ratio:  parseFloat(document.getElementById('competitor_ratio').value) || 0.65,
+    output_width:      parseInt(document.getElementById('output_width').value) || 1920,
+    output_height:     parseInt(document.getElementById('output_height').value) || 1080,
+    fps:               parseInt(document.getElementById('fps').value) || 30,
+    clip_score_threshold: parseFloat(document.getElementById('clip_score_threshold').value) || 0.85,
+    voice_profiles,
+    voice_profiles_replace: true,
+  };
+
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data)
+  }).then(() => {
+    const msg = document.getElementById('saveMsg');
+    msg.style.display = 'inline';
+    setTimeout(() => msg.style.display = 'none', 2000);
+  });
+}
+</script>
+{% endblock %}
