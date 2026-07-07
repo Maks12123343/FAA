@@ -198,9 +198,14 @@ async function onNicheChange() {
   try {
     const r = await fetch('/api/niche/info?niche=' + encodeURIComponent(niche));
     const data = await r.json();
-    const isMovie = data.pipeline_type === 'movie' || (data.movie_library && data.movie_library.length > 0);
+    const isLibrary = data.pipeline_type === 'library';
+    const isMovie = !isLibrary && (data.pipeline_type === 'movie' || (data.movie_library && data.movie_library.length > 0));
 
-    if (isMovie) {
+    if (isLibrary) {
+      // Library pipeline (war-style): clips come from pre-indexed library, no Step 2 needed
+      document.getElementById('standardClipBlock').style.display = 'none';
+      document.getElementById('movieClipBlock').style.display = 'none';
+    } else if (isMovie) {
       document.getElementById('standardClipBlock').style.display = 'none';
       document.getElementById('movieClipBlock').style.display = '';
       loadMovies();
@@ -376,7 +381,10 @@ socket.on('prepare_done', data => {
   document.getElementById('transcriptPreview').textContent = data.transcript || '';
 
   // Show correct Step 2 block based on pipeline type
-  if (currentPipelineType === 'movie') {
+  if (currentPipelineType === 'library') {
+    document.getElementById('standardClipBlock').style.display = 'none';
+    document.getElementById('movieClipBlock').style.display = 'none';
+  } else if (currentPipelineType === 'movie') {
     document.getElementById('standardClipBlock').style.display = 'none';
     document.getElementById('movieClipBlock').style.display = '';
     loadMovies();
@@ -387,7 +395,9 @@ socket.on('prepare_done', data => {
 
   document.getElementById('phase2Card').style.display = 'block';
 
-  if (currentPipelineType === 'movie') {
+  if (currentPipelineType === 'library') {
+    log('Prepare done. Select languages and click Start Production (clips come from the pre-indexed library).', 'done');
+  } else if (currentPipelineType === 'movie') {
     log('Prepare done. Select a movie and languages, then click Start Production.', 'done');
   } else {
     log('Prepare done. Add YouTube URLs (optional) and select languages, then click Start Production.', 'done');
@@ -417,30 +427,4 @@ socket.on('produce_done', data => {
 
 socket.on('all_done', () => {
   _producing = false;
-  document.getElementById('produceBtn').disabled = false;
-  log('All languages finished!', 'done');
-});
-
-socket.on('error', data => {
-  _stopPolling();
-  log('ERROR: ' + data.message, 'error');
-  document.getElementById('prepareBtn').disabled = false;
-  if (!_producing) {
-    document.getElementById('produceBtn').disabled = false;
-  }
-});
-
-// Initialize on page load
-onNicheChange();
-
-// Check if a job is stuck on page load
-fetch('/api/status').then(r=>r.json()).then(d=>{
-  if(d.job_running){
-    log('A job is running: ' + (d.last_msg||'(no status)'));
-    log('If stuck, click Reset below.');
-    document.getElementById('prepareBtn').disabled = true;
-    _startPolling();
-  }
-});
-</script>
-{% endblock %}
+  docume

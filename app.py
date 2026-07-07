@@ -14,7 +14,7 @@ from flask_socketio import SocketIO, emit
 import config
 from backend import pipeline, media_library, clip_sourcer
 from backend import stocks_library, competitor_finder
-from backend import movie_library, movie_pipeline
+from backend import movie_library, movie_pipeline, war_pipeline
 from backend import writer as writer_backend
 
 app = Flask(__name__)
@@ -180,7 +180,27 @@ def api_prepare():
             eventlet.sleep(0)
 
         try:
-            if pipeline_type == "movie" or movie_names:
+            if pipeline_type == "library":
+                # Library pipeline (war-style, batched Pioneer + Vertex cosine)
+                if not source_url:
+                    raise ValueError("Library pipeline requires a source YouTube URL. Please paste a URL in Step 1.")
+                result = war_pipeline.prepare(source_url, emit=_emit)
+                # Store niche pipeline type for later produce
+                prepare_dir = os.path.join(config.PROJECTS_DIR, f"_prepare_{result['prepare_id']}")
+                state_path = os.path.join(prepare_dir, "state.json")
+                if os.path.exists(state_path):
+                    with open(state_path, encoding="utf-8") as f:
+                        state = json.load(f)
+                    state["_niche_pipeline_type"] = "library"
+                    state["_niche"] = niche
+                    with open(state_path, "w", encoding="utf-8") as f:
+                        json.dump(state, f, ensure_ascii=False, indent=2)
+                socketio.emit("prepare_done", {
+                    **result,
+                    "pipeline_type": "library",
+                    "niche": niche,
+                })
+            elif pipeline_type == "movie" or movie_names:
                 # Movie pipeline: just transcribe source URL
                 if not source_url:
                     raise ValueError("Movie pipeline requires a source YouTube URL. Please paste a URL in Step 1.")
@@ -243,11 +263,13 @@ def api_produce():
     state_path = os.path.join(prepare_dir, "state.json")
     pipeline_type = "standard"
     movie_names = []
+    niche_for_library = ""
     if os.path.exists(state_path):
         with open(state_path, encoding="utf-8") as f:
             state = json.load(f)
         pipeline_type = state.get("_niche_pipeline_type", "standard")
         movie_names = state.get("_movie_names", [])
+        niche_for_library = state.get("_niche", "")
 
     with _job_lock:
         if _job_active:
@@ -267,7 +289,29 @@ def api_produce():
             eventlet.sleep(0)
 
         try:
-            if pipeline_type == "movie" or movie_names:
+            if pipeline_type == "library":
+                # Library pipeline (war-style)
+                if not niche_for_library:
+                    socketio.emit("error", {"message": "Library pipeline: missing niche in prepare state."})
+                    return
+                for lang in languages:
+                    try:
+                        socketio.emit("progress", {"step": "produce", "message": f"Starting language: {lang}"})
+                        eventlet.sleep(0)
+                        result = war_pipeline.produce(
+                            prepare_id=prepare_id,
+                            niche=niche_for_library,
+                            language=lang,
+                            emit=_emit,
+                            test_mode=test_mode,
+                        )
+                        socketio.emit("produce_done", result)
+                    except Exception as e:
+                        import traceback
+                        print(f"[app] ERROR in library produce [{lang}]: {e}\n{traceback.format_exc()}", flush=True)
+                        socketio.emit("error", {"message": f"[{lang}] {e}"})
+                socketio.emit("all_done", {})
+            elif pipeline_type == "movie" or movie_names:
                 # Movie pipeline
                 _movie = movie_name if movie_name else (movie_names[0] if movie_names else "")
                 if not _movie:
@@ -1019,7 +1063,7 @@ def api_job_reset():
 
 if __name__ == "__main__":
     if not _AUTH_USER or not _AUTH_PASS:
-        print("[app] WARNING: FAA_USER/FAA_PASS not set — site is open without password!", flush=True)
+        print("[app] WARNING: FAA_USER/FAA_PASS not set - site is open without password!", flush=True)
     os.makedirs(config.LIBRARY_DIR, exist_ok=True)
     os.makedirs(config.NICHES_DIR,  exist_ok=True)
     os.makedirs(config.PROJECTS_DIR, exist_ok=True)
