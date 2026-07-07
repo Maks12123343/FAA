@@ -22,15 +22,21 @@ def call_pioneer(system: str, messages: list, timeout: int = 180, max_retries: i
     import requests as _req
     settings = config.load_settings()
 
-    # Build key list: rewrite key first (if available and requested), then regular keys
+    # Build key list:
+    # - rewrite mode: use ONLY rewrite key (regular keys don't have Opus access,
+    #   and rewrite is a paid-per-key model — fallback to gemini keys is wrong)
+    # - regular mode: use regular keys with round-robin
     rewrite_key = settings.get("pioneer_rewrite_key", "").strip()
     regular_keys = settings.get("pioneer_api_keys", [])
     if isinstance(regular_keys, str):
         regular_keys = [k.strip() for k in regular_keys.split(",") if k.strip()]
 
     if use_rewrite_model and rewrite_key:
-        api_keys = [rewrite_key] + regular_keys
+        api_keys = [rewrite_key]
         model = settings.get("pioneer_rewrite_model", "claude-opus-4-8")
+    elif use_rewrite_model and not rewrite_key:
+        # Explicitly asked for rewrite model but no rewrite key — fail clearly
+        raise RuntimeError("No pioneer_rewrite_key configured (rewrite requires dedicated Opus key).")
     else:
         api_keys = regular_keys
         model = settings.get("pioneer_model", "gemini-3.5-flash")
