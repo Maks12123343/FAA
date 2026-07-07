@@ -34,8 +34,6 @@ from backend.rewriter import rewrite_all
 from backend.aligner import _get_duration
 from backend.movie_pipeline import (
     _segments_from_audio,
-    _plan_text_overlays,
-    _build_text_overlays,
     _prepare_movie_clip,
     _build_movie_video,
     make_uniq_params_for_language,
@@ -362,6 +360,195 @@ def _select_clips_semantic(segments: list, seg_categories: list, clips: list, em
     return selected
 
 
+# ── War-specific text overlay planning ───────────────────────────────────────
+#
+# Стиль плашки (референс — жовтий бокс "Crimean Peninsula"):
+#   голуба суцільна підложка + жирний білий/чорний текст, лівий низ,
+#   ~2 сек, лише коли у сегменті згадується ІМЕНОВАНИЙ об'єкт:
+#     • конкретне місце (Bakhmut, Crimea, Kursk region, Kyiv)
+#     • назва зброї / техніки (HIMARS, T-90, Bayraktar, Storm Shadow)
+#     • назва операції / підрозділу (Operation Overlord, 47th Brigade)
+#     • конкретна дата чи цифра втрат (24.02.2022, 500,000 casualties)
+# НЕ вибирати емоційні фрази, гасла, загальні терміни ("war", "soldiers").
+
+_WAR_OVERLAY_PROMPT = """\
+You are planning MINIMAL text overlays for a documentary-style war/history video.
+The video has a voiceover narration. Below are the script segments with timestamps.
+
+Script segments:
+{segments_json}
+
+Select ONLY segments that mention a SPECIFIC NAMED ENTITY worth pinning on screen:
+  1. Geographic locations — cities, regions, rivers, oblasts (Bakhmut, Crimea, Kursk, Dnipro River)
+  2. Weapon systems / military tech (HIMARS, T-90, Bayraktar TB2, Storm Shadow, Iskander)
+  3. Named military units or operations (47th Mechanized Brigade, Wagner Group, Operation Overlord)
+  4. Concrete dates or casualty numbers (February 24 2022, 500,000 troops, 3 million refugees)
+  5. Named people that are pivotal to the moment (Zelensky, Prigozhin) — sparingly, max 1-2 per video
+
+STRICT RULES:
+- Select AT MOST 8-12 overlays for the entire video. Fewer is better than more.
+- No two overlays within 15 seconds of each other.
+- Do NOT select emotional phrases, slogans, generic terms ("war", "soldiers", "battle"), rhetorical questions.
+- Text must be the ENTITY NAME itself — 1-4 words, Title Case, in the target language: {language_name}.
+- If a segment mentions multiple entities, pick the MOST important one and skip the rest.
+- Return an empty array [] if nothing qualifies. Do NOT invent overlays.
+
+Return ONLY a JSON array, no markdown, no commentary:
+[
+  {{"segment_index": 3, "text": "Bakhmut"}},
+  {{"segment_index": 17, "text": "HIMARS"}},
+  {{"segment_index": 42, "text": "24.02.2022"}}
+]
+"""
+
+_LANGUAGE_NAMES = {
+    "en": "English",
+    "uk": "Ukrainian",
+    "ru": "Russian",
+    "de": "German",
+    "fr": "French",
+    "es": "Spanish",
+    "pl": "Polish",
+    "it": "Italian",
+    "tr": "Turkish",
+    "pt": "Portuguese",
+}
+
+
+def _plan_text_overlays_war(segments_with_times: list, language: str, emit=None) -> list:
+    """
+    War-specific overlay planner: highlight ONLY named entities (places, tech,
+    numbers, dates). Uses Pioneer rewrite key (Claude Opus). Returns [] on
+    failure — video will just render without overlays.
+    """
+    import urllib.request
+
+    if not segments_with_times:
+        return []
+
+    settings = config.load_settings()
+    lang_name = _LANGUAGE_NAMES.get(language, language)
+
+    seg_data = [
+        {
+            "index": s["index"],
+            "start": round(s["start"], 1),
+            "text": s["text"][:160],
+        }
+        for s in segments_with_times
+    ]
+    prompt = _WAR_OVERLAY_PROMPT.format(
+        segments_json=json.dumps(seg_data, ensure_ascii=False, indent=2),
+        language_name=lang_name,
+    )
+
+    def _post(url: str, key: str, model: str, ua: bool = False) -> str | None:
+        payload = json.dumps({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You return JSON only. No markdown, no commentary."},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 1024,
+        }).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {key}",
+        }
+        if ua:
+            headers["User-Agent"] = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+            headers["Accept"] = "application/json"
+        try:
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            return body["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"[war_pipeline] War overlay API failed: {e}", flush=True)
+            return None
+
+    text = None
+    pio_url = settings.get("pioneer_api_url", "")
+    pio_key = settings.get("pioneer_rewrite_key", "")
+    pio_model = settings.get("pioneer_rewrite_model", "claude-opus-4-8")
+    if pio_url and pio_key:
+        text = _post(pio_url, pio_key, pio_model, ua=False)
+
+    if not text:
+        gc_url = settings.get("gigacoder_api_url", "")
+        gc_key = settings.get("gigacoder_rewrite_key", "")
+        gc_model = settings.get("gigacoder_rewrite_model", "claude-opus-4-8")
+        if gc_url and gc_key:
+            text = _post(gc_url, gc_key, gc_model, ua=True)
+
+    if not text:
+        return []
+
+    try:
+        text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+        text = re.sub(r"\s*```$", "", text)
+        m = re.search(r"\[.*\]", text, re.DOTALL)
+        plan = json.loads(m.group() if m else text)
+        if isinstance(plan, list):
+            # Жорстка пост-фільтрація: ≤12 overlays, spacing ≥15s
+            plan = [p for p in plan if isinstance(p, dict) and "segment_index" in p and "text" in p]
+            plan.sort(key=lambda p: p["segment_index"])
+            seg_map = {s["index"]: s for s in segments_with_times}
+            filtered = []
+            last_start = -999.0
+            for p in plan:
+                seg = seg_map.get(p["segment_index"])
+                if not seg:
+                    continue
+                if seg["start"] - last_start < 15.0:
+                    continue
+                filtered.append(p)
+                last_start = seg["start"]
+                if len(filtered) >= 12:
+                    break
+            print(f"[war_pipeline] War overlays: {len(filtered)} entities (from {len(plan)} raw)", flush=True)
+            return filtered
+    except Exception as e:
+        print(f"[war_pipeline] War overlay parsing failed: {e}", flush=True)
+    return []
+
+
+def _build_text_overlays_war(plan: list, segments_with_times: list) -> list:
+    """
+    Побудова overlay-об'єктів у форматі text_renderer.apply_text_overlays.
+    Стиль плашки: голуба суцільна підложка (#4EA8FF, повна непрозорість),
+    жирний білий текст, лівий низ, ~2 сек.
+    """
+    seg_map = {s["index"]: s for s in segments_with_times}
+    overlays = []
+    for item in plan:
+        idx = item.get("segment_index")
+        seg = seg_map.get(idx)
+        if not seg:
+            continue
+        text = (item.get("text") or "").strip()[:40]
+        if not text:
+            continue
+        start = seg["start"] + 0.2
+        seg_dur = max(0.4, seg["end"] - seg["start"])
+        dur = round(min(seg_dur - 0.2, 2.6), 2)
+        if dur < 1.0:
+            continue
+        overlays.append({
+            "text":     text,
+            "start":    round(start, 2),
+            "duration": dur,
+            "position": "bottom-left",
+            "size":     52,
+            "color":    "white",
+            "bg_color": "0x4EA8FF@1.0",
+        })
+    return overlays
+
+
 # ── Main entry points ─────────────────────────────────────────────────────────
 
 def prepare(source_url: str, emit=None) -> dict:
@@ -421,169 +608,4 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         state = json.load(f)
 
     transcript = state["transcript"]
-    source_title = state.get("source_title", "")
-
-    # Читаємо ніші-конфіг щоб дістати список категорій
-    niche_path = os.path.join(config.NICHES_DIR, f"{niche}.json")
-    with open(niche_path, encoding="utf-8") as f:
-        niche_cfg = json.load(f)
-    categories = list((niche_cfg.get("categories") or {}).keys())
-    if not categories:
-        raise RuntimeError(f"Niche '{niche}' has no categories defined")
-    log("config", f"Categories: {categories}")
-
-    # Проект
-    proj_id = f"{niche}_{language}_{int(time.time())}"
-    proj_dir = os.path.join(config.PROJECTS_DIR, proj_id)
-    os.makedirs(proj_dir, exist_ok=True)
-
-    # ── Rewrite ────────────────────────────────────────────────────────────────
-    script_path = os.path.join(proj_dir, "script.txt")
-    meta_path = os.path.join(proj_dir, "metadata.json")
-    if os.path.exists(script_path):
-        with open(script_path, encoding="utf-8") as f:
-            script = f.read()
-        log("rewrite", f"Script cached ({len(script)} chars)")
-    else:
-        log("rewrite", "Rewriting script (chunked, dedicated rewrite key)...")
-        result = rewrite_all(
-            transcript=transcript,
-            language=language,
-            source_title=source_title,
-            source_description=state.get("source_description", ""),
-            source_tags=state.get("source_tags", []),
-            test_mode=test_mode,
-        )
-        script = result["script"]
-        if len(script.split()) < 100:
-            raise RuntimeError(f"Script too short: {len(script.split())} words")
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(script)
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump({k: v for k, v in result.items() if k != "script"}, f, ensure_ascii=False, indent=2)
-        log("rewrite", f"Script done: {len(script)} chars")
-
-    # ── TTS ────────────────────────────────────────────────────────────────────
-    audio_path = os.path.join(proj_dir, "voiceover.mp3")
-    if not os.path.exists(audio_path):
-        log("tts", "Generating voiceover...")
-        tts.generate(script, language, audio_path)
-        log("tts", "Voiceover done.")
-    else:
-        log("tts", "Voiceover cached.")
-
-    audio_dur = _get_duration(audio_path)
-    log("tts", f"Audio duration: {audio_dur:.1f}s")
-    if audio_dur < MIN_AUDIO_DURATION:
-        raise RuntimeError(f"Voiceover too short: {audio_dur:.1f}s (min {MIN_AUDIO_DURATION}s)")
-
-    # ── Segments (Whisper 2-5s) ────────────────────────────────────────────────
-    segments = _segments_from_audio(audio_path, audio_dur)
-    log("segments", f"{len(segments)} segments, last ends at {segments[-1]['end']:.1f}s")
-
-    # ── Text overlays (те саме що movie_pipeline) ──────────────────────────────
-    log("overlays", "Planning text overlays...")
-    overlay_plan = _plan_text_overlays(segments, emit=emit)
-    text_overlays = _build_text_overlays(overlay_plan, segments)
-    log("overlays", f"Planned {len(text_overlays)} text overlays.")
-
-    # ── Load library index ─────────────────────────────────────────────────────
-    log("library", f"Loading library index for '{niche}'...")
-    clips = _load_library_index(niche)
-    log("library", f"Library ready: {len(clips)} valid clips")
-
-    # ── Categorize segments (BATCHED Pioneer) ─────────────────────────────────
-    clips_cache = os.path.join(proj_dir, "clips.json")
-    if os.path.exists(clips_cache):
-        with open(clips_cache, encoding="utf-8") as f:
-            clip_data = json.load(f)
-        clip_data = [c for c in clip_data if os.path.exists(c.get("file", ""))]
-        log("clips", f"Clips cached: {len(clip_data)}")
-    else:
-        log("categorize", "Starting Pioneer batched categorization...")
-        seg_cats = _categorize_all_segments(segments, categories, emit=emit)
-        log("categorize", "Categorization done.")
-
-        # ── Semantic clip selection (cosine within category) ──────────────────
-        log("clips", "Selecting clips via cosine similarity within categories...")
-        clip_data = _select_clips_semantic(segments, seg_cats, clips, emit=emit)
-        if not clip_data:
-            raise RuntimeError("No clips selected — check library index and embeddings")
-
-        with open(clips_cache, "w", encoding="utf-8") as f:
-            json.dump(clip_data, f, ensure_ascii=False)
-        log("clips", f"Selected {len(clip_data)} clips.")
-
-    # ── Prepare clips (normalize + uniqualize, parallel 4 workers) ────────────
-    log("clips", "Preparing clips (normalize + uniqualize)...")
-    uniq_params = make_uniq_params_for_language(language, proj_id)
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        prepared = []
-        completed_count = [0]
-        count_lock = threading.Lock()
-
-        def _prepare_one(args):
-            i, cd = args
-            out = os.path.join(tmp_dir, f"clip_{i:04d}.mp4")
-            ok = _prepare_movie_clip(
-                cd["file"], out, uniq_params,
-                max_dur=cd["duration"],
-                effect="none",
-                speed=1.0,
-            )
-            with count_lock:
-                completed_count[0] += 1
-                n = completed_count[0]
-                if emit and (n % 5 == 0 or n == len(clip_data)):
-                    try:
-                        pct = int(n / len(clip_data) * 100)
-                        emit("clips", f"Preparing clip {n}/{len(clip_data)} ({pct}%)")
-                    except Exception:
-                        pass
-            return (i, out) if ok else None
-
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(_prepare_one, (i, cd)) for i, cd in enumerate(clip_data)]
-            for f in as_completed(futures):
-                r = f.result()
-                if r:
-                    prepared.append(r)
-
-        prepared.sort(key=lambda x: x[0])
-        prepared = [out for _, out in prepared]
-
-        if not prepared:
-            raise RuntimeError("No clips survived preparation.")
-
-        log("montage", f"Assembling {len(prepared)} clips ({audio_dur:.1f}s audio)...")
-        if emit:
-            emit("montage", "Assembling video segments...")
-        output_path = os.path.join(proj_dir, f"{proj_id}.mp4")
-        _build_movie_video(
-            clips=prepared,
-            audio_path=audio_path,
-            output_path=output_path,
-            text_overlays=text_overlays,
-            proj_id=proj_id,
-            emit=emit,
-        )
-
-    log("done", f"Video ready: {output_path}")
-
-    meta = {}
-    if os.path.exists(meta_path):
-        with open(meta_path, encoding="utf-8") as f:
-            meta = json.load(f)
-
-    return {
-        "project_id": proj_id,
-        "project_dir": proj_dir,
-        "output_path": output_path,
-        "audio_dur": round(audio_dur, 1),
-        "clips_used": len(prepared),
-        "title": meta.get("title", source_title),
-        "all_titles": meta.get("titles", []),
-        "description": meta.get("description", ""),
-        "tags": meta.get("tags", []),
-    }
+    source
