@@ -53,8 +53,12 @@
   <div style="background:#1a1a1a;border:1px solid #333;border-radius:10px;padding:24px;width:100%;max-width:480px">
     <h3 style="margin-top:0">Add Language</h3>
     <div class="field">
-      <label>Language</label>
-      <select id="newLangCode" style="width:100%;background:#111;color:#e5e5e5;border:1px solid #333;border-radius:6px;padding:8px"></select>
+      <label>Language Name</label>
+      <input type="text" id="newLangName" placeholder="e.g. Swedish" style="width:100%">
+    </div>
+    <div class="field">
+      <label>Language Code (ISO 639-1, 2 letters)</label>
+      <input type="text" id="newLangCode" placeholder="e.g. sv" maxlength="5" style="width:100%;text-transform:lowercase">
     </div>
     <div class="field">
       <label>Voice ID (ElevenLabs)</label>
@@ -151,45 +155,18 @@
 {% endblock %}
 {% block scripts %}
 <script>
-// Full catalog of language codes → readable names.
-// User picks from this list in the Add Language modal.
-const LANG_CATALOG = {
-  en: "English", uk: "Ukrainian", ru: "Russian",
-  de: "German", fr: "French", es: "Spanish",
-  pl: "Polish", it: "Italian", tr: "Turkish", pt: "Portuguese",
-  cs: "Czech", ro: "Romanian", hu: "Hungarian", sv: "Swedish",
-  nl: "Dutch", ja: "Japanese", ko: "Korean", zh: "Chinese",
-  ar: "Arabic", he: "Hebrew", fa: "Persian",
-  fi: "Finnish", no: "Norwegian", da: "Danish", is: "Icelandic",
-  el: "Greek", bg: "Bulgarian", sr: "Serbian", hr: "Croatian",
-  sk: "Slovak", sl: "Slovenian", lt: "Lithuanian", lv: "Latvian", et: "Estonian",
-  id: "Indonesian", ms: "Malay", vi: "Vietnamese", th: "Thai",
-  hi: "Hindi", bn: "Bengali", ur: "Urdu", ta: "Tamil",
-  sw: "Swahili", af: "Afrikaans", tl: "Filipino",
-  ka: "Georgian", az: "Azerbaijani", kk: "Kazakh", uz: "Uzbek",
-};
+// Simple HTML-escape for user-typed values inserted into innerHTML.
+function _esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                  .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
 
 function openAddLangModal() {
-  const sel = document.getElementById('newLangCode');
-  sel.innerHTML = '';
-  const existing = new Set(
-    Array.from(document.querySelectorAll('.voice-profile-card')).map(c => c.dataset.langCode)
-  );
-  const options = Object.entries(LANG_CATALOG)
-    .filter(([code, _]) => !existing.has(code))
-    .sort((a, b) => a[1].localeCompare(b[1]));
-  if (!options.length) {
-    alert('All languages from the catalog are already added.');
-    return;
-  }
-  for (const [code, name] of options) {
-    const opt = document.createElement('option');
-    opt.value = code;
-    opt.textContent = `${name} (${code})`;
-    sel.appendChild(opt);
-  }
+  document.getElementById('newLangName').value = '';
+  document.getElementById('newLangCode').value = '';
   document.getElementById('newLangVoiceId').value = '';
   document.getElementById('addLangModal').style.display = 'flex';
+  setTimeout(() => document.getElementById('newLangName').focus(), 50);
 }
 
 function closeAddLangModal() {
@@ -197,95 +174,11 @@ function closeAddLangModal() {
 }
 
 function addLanguage() {
-  const code = document.getElementById('newLangCode').value;
+  const nameRaw = document.getElementById('newLangName').value.trim();
+  const codeRaw = document.getElementById('newLangCode').value.trim().toLowerCase();
   const voiceId = document.getElementById('newLangVoiceId').value.trim();
-  if (!code) return;
-  const name = LANG_CATALOG[code] || code.toUpperCase();
-  const container = document.getElementById('voiceProfilesContainer');
-  const card = document.createElement('div');
-  card.className = 'voice-profile-card';
-  card.dataset.langCode = code;
-  card.style.cssText = 'border:1px solid #2a2a2a;border-radius:8px;padding:16px;margin-bottom:12px;position:relative';
-  card.innerHTML = `
-    <button type="button" onclick="removeLanguage('${code}')"
-            style="position:absolute;top:12px;right:12px;background:#7f1d1d;color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px">Remove</button>
-    <div style="font-weight:600;margin-bottom:12px">${name} (${code})</div>
-    <div class="grid-2">
-      <div class="field"><label>Voice Name</label>
-        <input type="text" class="vname" data-code="${code}" value="${name} Voice"></div>
-      <div class="field"><label>Voice ID</label>
-        <input type="text" class="vid" data-code="${code}" value="${voiceId.replace(/"/g,'&quot;')}"></div>
-    </div>
-    <div class="grid-2">
-      <div class="field"><label>Stability</label>
-        <input type="text" class="vstab" data-code="${code}" value="0.85"></div>
-      <div class="field"><label>Speed</label>
-        <input type="text" class="vspeed" data-code="${code}" value="1"></div>
-    </div>
-  `;
-  container.appendChild(card);
-  closeAddLangModal();
-}
 
-function removeLanguage(code) {
-  if (!confirm(`Remove language "${code}"?`)) return;
-  const card = document.querySelector(`.voice-profile-card[data-lang-code="${code}"]`);
-  if (card) card.remove();
-}
-
-function saveSettings() {
-  // Collect voice_profiles from DOM (dynamic — any added language is included)
-  const voice_profiles = {};
-  document.querySelectorAll('.voice-profile-card').forEach(card => {
-    const code = card.dataset.langCode;
-    voice_profiles[code] = {
-      name: card.querySelector('.vname').value,
-      voice_id: card.querySelector('.vid').value,
-      stability: parseFloat(card.querySelector('.vstab').value) || 0.85,
-      similarity_boost: 0.75,
-      speed: parseFloat(card.querySelector('.vspeed').value) || 1.0,
-    };
-  });
-
-  const pioneer_api_keys = document.getElementById('pioneer_api_keys').value
-    .split('\n').map(k => k.trim()).filter(k => k.length > 0);
-
-  const data = {
-    pioneer_api_keys,
-    pioneer_model:     document.getElementById('pioneer_model').value,
-    pioneer_api_url:   document.getElementById('pioneer_api_url').value,
-    claude_api_key:    document.getElementById('claude_api_key').value,
-    claude_model:      document.getElementById('claude_model').value,
-    tts_api_key:       document.getElementById('tts_api_key').value,
-    tts_api_url:       document.getElementById('tts_api_url').value,
-    youtube_api_key:   document.getElementById('youtube_api_key').value,
-    youtube_api_key_2: document.getElementById('youtube_api_key_2').value,
-    youtube_api_key_3: document.getElementById('youtube_api_key_3').value,
-    stocks_dir:        document.getElementById('stocks_dir').value,
-    vertex_project_id: document.getElementById('vertex_project_id').value,
-    vertex_location:   document.getElementById('vertex_location').value,
-    gemini_model:      document.getElementById('gemini_model').value,
-    clip_min_duration: parseFloat(document.getElementById('clip_min_duration').value) || 2,
-    clip_max_duration: parseFloat(document.getElementById('clip_max_duration').value) || 5,
-    stock_max_duration: parseFloat(document.getElementById('stock_max_duration').value) || 6,
-    competitor_ratio:  parseFloat(document.getElementById('competitor_ratio').value) || 0.65,
-    output_width:      parseInt(document.getElementById('output_width').value) || 1920,
-    output_height:     parseInt(document.getElementById('output_height').value) || 1080,
-    fps:               parseInt(document.getElementById('fps').value) || 30,
-    clip_score_threshold: parseFloat(document.getElementById('clip_score_threshold').value) || 0.85,
-    voice_profiles,
-    voice_profiles_replace: true,   // signals backend to REPLACE profiles (not merge)
-  };
-
-  fetch('/api/settings', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(data)
-  }).then(() => {
-    const msg = document.getElementById('saveMsg');
-    msg.style.display = 'inline';
-    setTimeout(() => msg.style.display = 'none', 2000);
-  });
-}
-</script>
-{% endblock %}
+  if (!nameRaw) { alert('Please enter a language name (e.g. Swedish).'); return; }
+  if (!codeRaw) { alert('Please enter a language code (e.g. sv).'); return; }
+  if (!/^[a-z]{2,5}$/.test(codeRaw)) {
+    
