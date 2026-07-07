@@ -32,6 +32,22 @@ from backend import tts, api_client
 from backend.transcriber import get_transcript
 from backend.rewriter import rewrite_all
 from backend.aligner import _get_duration
+import urllib.request as _urlreq
+
+def _download_thumbnail(video_id: str, dst_path: str) -> bool:
+    """Download max-res YouTube thumbnail. Returns True on success."""
+    for name in ("maxresdefault", "sddefault", "hqdefault"):
+        url = f"https://i.ytimg.com/vi/{video_id}/{name}.jpg"
+        try:
+            with _urlreq.urlopen(url, timeout=15) as r:
+                data = r.read()
+            if len(data) > 2000:
+                with open(dst_path, "wb") as f:
+                    f.write(data)
+                return True
+        except Exception:
+            continue
+    return False
 from backend.movie_pipeline import (
     _segments_from_audio,
     _prepare_movie_clip,
@@ -561,6 +577,21 @@ def prepare(source_url: str, emit=None) -> dict:
     prepare_id = f"war_{int(time.time())}"
     prepare_dir = os.path.join(config.PROJECTS_DIR, f"_prepare_{prepare_id}")
     os.makedirs(prepare_dir, exist_ok=True)
+    # ---- download YouTube thumbnail for library pipeline ----
+    try:
+        _m = re.search(r"(?:v=|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})", source_url or "")
+        _vid = _m.group(1) if _m else ""
+        if _vid:
+            _thumb_dst = os.path.join(prepare_dir, "thumbnail.jpg")
+            if _download_thumbnail(_vid, _thumb_dst):
+                print(f"[war_pipeline:prepare] thumbnail saved: {_thumb_dst}", flush=True)
+            else:
+                print(f"[war_pipeline:prepare] thumbnail download failed for vid={_vid}", flush=True)
+        else:
+            print(f"[war_pipeline:prepare] no video_id in URL: {source_url}", flush=True)
+    except Exception as _e:
+        print(f"[war_pipeline:prepare] thumbnail step error: {_e!r}", flush=True)
+    # ---- end thumbnail download ----
 
     log("transcribe", "Fetching transcript...")
     result = get_transcript(source_url)
@@ -608,4 +639,195 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         state = json.load(f)
 
     transcript = state["transcript"]
-    source
+    source_title = state.get("source_title", "")
+
+    # Читаємо ніші-конфіг щоб дістати список категорій
+    niche_path = os.path.join(config.NICHES_DIR, f"{niche}.json")
+    with open(niche_path, encoding="utf-8") as f:
+        niche_cfg = json.load(f)
+    categories = list((niche_cfg.get("categories") or {}).keys())
+    if not categories:
+        raise RuntimeError(f"Niche '{niche}' has no categories defined")
+    log("config", f"Categories: {categories}")
+
+    # Проект
+    proj_id = f"{niche}_{language}_{int(time.time())}"
+    proj_dir = os.path.join(config.PROJECTS_DIR, proj_id)
+    os.makedirs(proj_dir, exist_ok=True)
+
+    # ── Rewrite ────────────────────────────────────────────────────────────────
+    script_path = os.path.join(proj_dir, "script.txt")
+    meta_path = os.path.join(proj_dir, "metadata.json")
+    if os.path.exists(script_path):
+        with open(script_path, encoding="utf-8") as f:
+            script = f.read()
+        log("rewrite", f"Script cached ({len(script)} chars)")
+    else:
+        log("rewrite", "Rewriting script (chunked, dedicated rewrite key)...")
+        result = rewrite_all(
+            transcript=transcript,
+            language=language,
+            source_title=source_title,
+            source_description=state.get("source_description", ""),
+            source_tags=state.get("source_tags", []),
+            test_mode=test_mode,
+        )
+        script = result["script"]
+        if len(script.split()) < 100:
+            raise RuntimeError(f"Script too short: {len(script.split())} words")
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(script)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump({k: v for k, v in result.items() if k != "script"}, f, ensure_ascii=False, indent=2)
+        log("rewrite", f"Script done: {len(script)} chars")
+
+        # ---- thumbnail analysis (library pipeline only) ----
+        _thumb_prompt = None
+        try:
+            from backend import thumbnail as _thumb_mod
+            _thumb_path = os.path.join(prepare_dir, "thumbnail.jpg")
+            if not os.path.exists(_thumb_path):
+                for _root, _dirs, _files in os.walk(prepare_dir):
+                    if "thumbnail.jpg" in _files:
+                        _thumb_path = os.path.join(_root, "thumbnail.jpg")
+                        break
+            if os.path.exists(_thumb_path):
+                _thumb_result = _thumb_mod.analyze_and_rewrite(_thumb_path, language, emit=emit)
+                _thumb_out = os.path.join(proj_dir, "thumbnail_prompt.txt")
+                with open(_thumb_out, "w", encoding="utf-8") as _f:
+                    _f.write(_thumb_result["prompt"])
+                _thumb_prompt = _thumb_result["prompt"]
+                if emit:
+                    emit("thumbnail_prompt", _thumb_prompt)
+                print(f"[war_pipeline] thumbnail prompt saved: {_thumb_out}", flush=True)
+            else:
+                print(f"[war_pipeline] no thumbnail.jpg found under {prepare_dir}", flush=True)
+        except Exception as _e:
+            print(f"[war_pipeline] thumbnail step failed: {_e!r}", flush=True)
+        # ---- end thumbnail ----
+
+    # ── TTS ────────────────────────────────────────────────────────────────────
+    audio_path = os.path.join(proj_dir, "voiceover.mp3")
+    if not os.path.exists(audio_path):
+        log("tts", "Generating voiceover...")
+        tts.generate(script, language, audio_path)
+        log("tts", "Voiceover done.")
+    else:
+        log("tts", "Voiceover cached.")
+
+    audio_dur = _get_duration(audio_path)
+    log("tts", f"Audio duration: {audio_dur:.1f}s")
+    if audio_dur < MIN_AUDIO_DURATION:
+        raise RuntimeError(f"Voiceover too short: {audio_dur:.1f}s (min {MIN_AUDIO_DURATION}s)")
+
+    # ── Segments (Whisper 2-5s) ────────────────────────────────────────────────
+    segments = _segments_from_audio(audio_path, audio_dur)
+    log("segments", f"{len(segments)} segments, last ends at {segments[-1]['end']:.1f}s")
+
+    # ── Text overlays (те саме що movie_pipeline) ──────────────────────────────
+    log("overlays", "Planning text overlays...")
+    overlay_plan = _plan_text_overlays_war(segments, language, emit=emit)
+    text_overlays = _build_text_overlays_war(overlay_plan, segments)
+    log("overlays", f"Planned {len(text_overlays)} text overlays.")
+
+    # ── Load library index ─────────────────────────────────────────────────────
+    log("library", f"Loading library index for '{niche}'...")
+    clips = _load_library_index(niche)
+    log("library", f"Library ready: {len(clips)} valid clips")
+
+    # ── Categorize segments (BATCHED Pioneer) ─────────────────────────────────
+    clips_cache = os.path.join(proj_dir, "clips.json")
+    if os.path.exists(clips_cache):
+        with open(clips_cache, encoding="utf-8") as f:
+            clip_data = json.load(f)
+        clip_data = [c for c in clip_data if os.path.exists(c.get("file", ""))]
+        log("clips", f"Clips cached: {len(clip_data)}")
+    else:
+        log("categorize", "Starting Pioneer batched categorization...")
+        seg_cats = _categorize_all_segments(segments, categories, emit=emit)
+        log("categorize", "Categorization done.")
+
+        # ── Semantic clip selection (cosine within category) ──────────────────
+        log("clips", "Selecting clips via cosine similarity within categories...")
+        clip_data = _select_clips_semantic(segments, seg_cats, clips, emit=emit)
+        if not clip_data:
+            raise RuntimeError("No clips selected — check library index and embeddings")
+
+        with open(clips_cache, "w", encoding="utf-8") as f:
+            json.dump(clip_data, f, ensure_ascii=False)
+        log("clips", f"Selected {len(clip_data)} clips.")
+
+    # ── Prepare clips (normalize + uniqualize, parallel 4 workers) ────────────
+    log("clips", "Preparing clips (normalize + uniqualize)...")
+    uniq_params = make_uniq_params_for_language(language, proj_id)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        prepared = []
+        completed_count = [0]
+        count_lock = threading.Lock()
+
+        def _prepare_one(args):
+            i, cd = args
+            out = os.path.join(tmp_dir, f"clip_{i:04d}.mp4")
+            ok = _prepare_movie_clip(
+                cd["file"], out, uniq_params,
+                max_dur=cd["duration"],
+                effect="none",
+                speed=1.0,
+            )
+            with count_lock:
+                completed_count[0] += 1
+                n = completed_count[0]
+                if emit and (n % 5 == 0 or n == len(clip_data)):
+                    try:
+                        pct = int(n / len(clip_data) * 100)
+                        emit("clips", f"Preparing clip {n}/{len(clip_data)} ({pct}%)")
+                    except Exception:
+                        pass
+            return (i, out) if ok else None
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(_prepare_one, (i, cd)) for i, cd in enumerate(clip_data)]
+            for f in as_completed(futures):
+                r = f.result()
+                if r:
+                    prepared.append(r)
+
+        prepared.sort(key=lambda x: x[0])
+        prepared = [out for _, out in prepared]
+
+        if not prepared:
+            raise RuntimeError("No clips survived preparation.")
+
+        log("montage", f"Assembling {len(prepared)} clips ({audio_dur:.1f}s audio)...")
+        if emit:
+            emit("montage", "Assembling video segments...")
+        output_path = os.path.join(proj_dir, f"{proj_id}.mp4")
+        _build_movie_video(
+            clips=prepared,
+            audio_path=audio_path,
+            output_path=output_path,
+            text_overlays=text_overlays,
+            proj_id=proj_id,
+            emit=emit,
+        )
+
+    log("done", f"Video ready: {output_path}")
+
+    meta = {}
+    if os.path.exists(meta_path):
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+
+    return {
+        "project_id": proj_id,
+        "project_dir": proj_dir,
+        "thumbnail_prompt": _thumb_prompt,
+        "output_path": output_path,
+        "audio_dur": round(audio_dur, 1),
+        "clips_used": len(prepared),
+        "title": meta.get("title", source_title),
+        "all_titles": meta.get("titles", []),
+        "description": meta.get("description", ""),
+        "tags": meta.get("tags", []),
+    }
