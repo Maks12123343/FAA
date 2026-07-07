@@ -24,26 +24,20 @@ def _load_prompt(path: str, language: str) -> str:
 from backend import api_client
 
 
-def _call_claude(system: str, messages: list, timeout: int = 180) -> tuple:
-    """Call Pioneer Opus first, GigaCoder Opus as fallback."""
-    try:
-        return api_client.call_pioneer(
-            system,
-            messages,
-            timeout=timeout,
-            max_retries=1,
-        )
-    except Exception as e:
-        print(f"[rewriter] Pioneer failed ({e}), falling back to GigaCoder Opus", flush=True)
-        return api_client.call_gigacoder_opus(
-            system,
-            messages,
-            timeout=max(timeout, 300),
-            max_retries=1,
-        )
+def _call_claude(system: str, messages: list, timeout: int = 300) -> tuple:
+    """Call Pioneer only — no fallback. Rewrite key is dedicated."""
+    return api_client.call_pioneer(
+        system,
+        messages,
+        timeout=timeout,
+        max_retries=1,
+    )
 
 
 # ── Script rewrite ────────────────────────────────────────────────────────────
+
+NUM_CHUNKS = 3  # Скільки частин на які розбити transcript
+
 
 def _extract_code_block(text: str) -> str:
     if not text:
@@ -52,39 +46,156 @@ def _extract_code_block(text: str) -> str:
     return m.group(1).strip() if m else text.strip()
 
 
+def _split_into_chunks(transcript: str, num_chunks: int = NUM_CHUNKS) -> list:
+    """
+    Розбити transcript на num_chunks приблизно рівні частини.
+    Ділимо по межі речення (крапка/! /?), щоб не рвати фрази посередині.
+    """
+    if num_chunks < 2:
+        return [transcript]
+
+    total = len(transcript)
+    target_size = total / num_chunks
+    # Всі позиції кінців речень
+    sentence_ends = [m.end() for m in re.finditer(r"[.!?](?:\s|$)", transcript)]
+    if not sentence_ends:
+        # Немає розділових знаків — ділимо по пробілах
+        sentence_ends = [m.end() for m in re.finditer(r"\s+", transcript)]
+
+    chunks = []
+    start = 0
+    for i in range(1, num_chunks):
+        target_pos = int(target_size * i)
+        # Знаходимо найближчий кінець речення до цільової позиції
+        best = min(sentence_ends, key=lambda e: abs(e - target_pos))
+        if best > start and best < total:
+            chunks.append(transcript[start:best].strip())
+            start = best
+        # інакше пропускаємо (буде злиття з наступним)
+    chunks.append(transcript[start:].strip())
+    return [c for c in chunks if c]
+
+
+def _get_summary(text: str, language: str, timeout: int = 120) -> str:
+    """
+    Швидкий summary у 2-3 реченнях — щоб наступний chunk знав контекст.
+    """
+    system = (
+        "You write brief 2-3 sentence summaries of transcript chunks. "
+        "Focus on: who is involved, what happened, key facts. "
+        "Reply with summary text only, no preamble."
+    )
+    user_msg = f"Language: {language}\n\nSummarize in 2-3 sentences:\n\n{text}"
+    try:
+        result, _ = _call_claude(system, [{"role": "user", "content": user_msg}], timeout=timeout)
+        return result.strip()[:600]
+    except Exception as e:
+        print(f"[rewriter] Summary failed ({e}), using first 300 chars", flush=True)
+        return text[:300]
+
+
+def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
+                   system_prompt: str, prev_summary: str = "",
+                   prev_tail: str = "", feedback: str = "",
+                   timeout: int = 300) -> str:
+    """
+    Переписати один chunk з контекстом попереднього.
+    position: "first" / "middle" / "last".
+    """
+    ctx_lines = [
+        f"Target language: {language}",
+        f"Original video title: {video_title}",
+        f"This is a CHUNK of a longer script. Position: {position.upper()} chunk.",
+    ]
+    if position == "first":
+        ctx_lines.append("Write a strong opening hook. Do NOT close/summarize — the script continues.")
+    elif position == "middle":
+        ctx_lines.append("Continue smoothly from the previous chunk. Do NOT re-introduce or close.")
+    elif position == "last":
+        ctx_lines.append("Continue smoothly and write a strong closing that wraps up the story.")
+
+    if prev_summary:
+        ctx_lines.append(f"\nCONTEXT FROM PREVIOUS CHUNKS (do NOT rewrite this, just use for continuity):\n{prev_summary}")
+    if prev_tail:
+        ctx_lines.append(f"\nEND OF PREVIOUS REWRITTEN CHUNK (continue seamlessly from here):\n...{prev_tail}")
+    if feedback:
+        ctx_lines.append(f"\nPREVIOUS ATTEMPT FEEDBACK:\n{feedback}")
+
+    ctx_lines.append(f"\nCHUNK TO REWRITE:\n{chunk}")
+
+    user_msg = "\n".join(ctx_lines)
+    messages = [{"role": "user", "content": user_msg}]
+    result = ""
+    part = 1
+    while True:
+        text, stop = _call_claude(system_prompt, messages, timeout=timeout)
+        result += ("\n\n" if result else "") + _extract_code_block(text)
+        if stop != "max_tokens":
+            break
+        messages.append({"role": "assistant", "content": text})
+        messages.append({"role": "user", "content": "Continue from where you left off."})
+        part += 1
+        if part > 3:
+            break
+    return result
+
+
 def _rewrite_script(transcript: str, language: str, video_title: str,
                     feedback: str = "", test_mode: bool = False) -> str:
+    """
+    Rewrite transcript у NUM_CHUNKS частин.
+    Кожна частина шле окремий запит з коротким контекстом попередніх.
+    Після кожного chunk беремо summary + tail для наступного.
+    """
     prompt_file = REWRITE_PROMPT_TEST_FILE if test_mode else REWRITE_PROMPT_FILE
     system = _load_prompt(prompt_file, language)
-    user_msg = f"Target language: {language}\nOriginal video title: {video_title}\n"
-    if feedback:
-        user_msg += (
-            f"\nPREVIOUS ATTEMPT FEEDBACK (fix these issues in this rewrite):\n{feedback}\n"
+
+    chunks = _split_into_chunks(transcript, NUM_CHUNKS)
+    print(f"[rewriter] Split transcript into {len(chunks)} chunks: "
+          f"{[len(c) for c in chunks]} chars", flush=True)
+
+    rewritten_parts = []
+    prev_summary = ""
+    prev_tail = ""
+
+    for i, chunk in enumerate(chunks):
+        if i == 0:
+            position = "first"
+        elif i == len(chunks) - 1:
+            position = "last"
+        else:
+            position = "middle"
+
+        print(f"[rewriter] Chunk {i+1}/{len(chunks)} ({position}, {len(chunk)} chars)...", flush=True)
+        part = _rewrite_chunk(
+            chunk=chunk,
+            position=position,
+            language=language,
+            video_title=video_title,
+            system_prompt=system,
+            prev_summary=prev_summary,
+            prev_tail=prev_tail,
+            feedback=feedback if i == 0 else "",  # feedback тільки в перший
+            timeout=300,
         )
-    user_msg += f"\n{transcript}"
+        print(f"[rewriter]   → rewrote to {len(part)} chars", flush=True)
+        rewritten_parts.append(part)
 
-    print("[rewriter] Rewriting script...", flush=True)
-    messages    = [{"role": "user", "content": user_msg}]
-    full_script = ""
-    part_num    = 1
+        # Готуємо контекст для наступного chunk
+        if i < len(chunks) - 1:
+            # summary всього що вже переписано (компактно)
+            combined_so_far = "\n\n".join(rewritten_parts)
+            # Беремо summary тільки якщо накопичили багато — інакше просто перші 500 chars
+            if len(combined_so_far) > 2000:
+                prev_summary = _get_summary(combined_so_far[-3000:], language)
+            else:
+                prev_summary = combined_so_far[:500]
+            # Останні 2-3 речення попереднього chunk — для плавного переходу
+            sents = re.split(r"(?<=[.!?])\s+", part.strip())
+            prev_tail = " ".join(sents[-3:])[:400]
 
-    while True:
-        text, stop_reason = _call_claude(system, messages, timeout=300)
-        full_script += ("\n\n" if full_script else "") + _extract_code_block(text)
-
-        if stop_reason != "max_tokens":
-            print(f"[rewriter] Script done in {part_num} part(s) ({len(full_script)} chars)", flush=True)
-            break
-
-        print(f"[rewriter] Limit reached, continuing (part {part_num + 1})...", flush=True)
-        messages.append({"role": "assistant", "content": text})
-        messages.append({"role": "user",      "content": "Continue from where you left off."})
-        part_num += 1
-
-        if part_num > 5:
-            print("[rewriter] Warning: reached 5-part limit, stopping.", flush=True)
-            break
-
+    full_script = "\n\n".join(rewritten_parts)
+    print(f"[rewriter] Script done in {len(chunks)} chunk(s) ({len(full_script)} chars)", flush=True)
     return full_script
 
 
