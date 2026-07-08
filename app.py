@@ -56,6 +56,7 @@ _job_lock = threading.Lock()
 _job_active = False
 _job_last_msg = ""
 _job_started_at = 0.0
+MAX_LANGUAGE_ATTEMPTS = 3
 
 _ID_RE = re.compile(r'^[a-z0-9_\-]{1,64}$')
 
@@ -293,29 +294,98 @@ def api_produce():
             socketio.emit("progress", {"step": step, "message": msg})
             eventlet.sleep(0)
 
+        def _produce_one_language(lang, attempt):
+            _emit("produce", f"Starting language: {lang} (attempt {attempt}/{MAX_LANGUAGE_ATTEMPTS})")
+            if pipeline_type == "library":
+                return war_pipeline.produce(
+                    prepare_id=prepare_id,
+                    niche=niche_for_library,
+                    language=lang,
+                    emit=_emit,
+                    test_mode=test_mode,
+                )
+            if pipeline_type == "movie" or movie_names:
+                return movie_pipeline.produce(
+                    prepare_id=prepare_id,
+                    movie_name=_movie,
+                    language=lang,
+                    emit=_emit,
+                    test_mode=test_mode,
+                    main_character=main_character,
+                )
+            return pipeline.produce(
+                prepare_id=prepare_id,
+                youtube_urls=youtube_urls,
+                language=lang,
+                emit=_emit,
+            )
+
+        def _produce_languages_with_retry():
+            pending = list(languages)
+            failed_errors = {}
+            failed_after_retries = []
+
+            for attempt in range(1, MAX_LANGUAGE_ATTEMPTS + 1):
+                if attempt > 1:
+                    _emit(
+                        "retry",
+                        f"Retry pass {attempt}/{MAX_LANGUAGE_ATTEMPTS}: {', '.join(pending)}",
+                    )
+
+                next_pending = []
+                for lang in pending:
+                    try:
+                        result = _produce_one_language(lang, attempt)
+                        socketio.emit("produce_done", result)
+                        if attempt > 1:
+                            _emit("retry", f"{lang} succeeded on attempt {attempt}/{MAX_LANGUAGE_ATTEMPTS}")
+                    except Exception as e:
+                        import traceback
+                        tb = traceback.format_exc()
+                        failed_errors[lang] = str(e)
+                        print(
+                            f"[app] ERROR in {pipeline_type} produce [{lang}] "
+                            f"attempt {attempt}/{MAX_LANGUAGE_ATTEMPTS}: {e}\n{tb}",
+                            flush=True,
+                        )
+                        if attempt < MAX_LANGUAGE_ATTEMPTS:
+                            next_pending.append(lang)
+                            _emit(
+                                "retry",
+                                f"{lang} failed on attempt {attempt}/{MAX_LANGUAGE_ATTEMPTS}: "
+                                f"{e}. Will retry after this pass.",
+                            )
+                        else:
+                            failed_after_retries.append(lang)
+                            socketio.emit("error", {
+                                "message": f"[{lang}] failed after {MAX_LANGUAGE_ATTEMPTS} attempts: {e}"
+                            })
+
+                pending = next_pending
+                if not pending:
+                    break
+
+            if failed_after_retries:
+                _emit(
+                    "retry",
+                    "Failed after retries: "
+                    + ", ".join(f"{lang}: {failed_errors.get(lang, '')}" for lang in failed_after_retries),
+                )
+            else:
+                _emit("done", "All selected languages finished.")
+
+            socketio.emit("all_done", {
+                "failed_languages": failed_after_retries,
+                "max_attempts": MAX_LANGUAGE_ATTEMPTS,
+            })
+
         try:
             if pipeline_type == "library":
                 # Library pipeline (war-style)
                 if not niche_for_library:
                     socketio.emit("error", {"message": "Library pipeline: missing niche in prepare state."})
                     return
-                for lang in languages:
-                    try:
-                        socketio.emit("progress", {"step": "produce", "message": f"Starting language: {lang}"})
-                        eventlet.sleep(0)
-                        result = war_pipeline.produce(
-                            prepare_id=prepare_id,
-                            niche=niche_for_library,
-                            language=lang,
-                            emit=_emit,
-                            test_mode=test_mode,
-                        )
-                        socketio.emit("produce_done", result)
-                    except Exception as e:
-                        import traceback
-                        print(f"[app] ERROR in library produce [{lang}]: {e}\n{traceback.format_exc()}", flush=True)
-                        socketio.emit("error", {"message": f"[{lang}] {e}"})
-                socketio.emit("all_done", {})
+                _produce_languages_with_retry()
             elif pipeline_type == "movie" or movie_names:
                 # Movie pipeline
                 _movie = movie_name if movie_name else (movie_names[0] if movie_names else "")
@@ -323,41 +393,10 @@ def api_produce():
                     _emit("error", "No movie selected for movie pipeline. Index a movie first.")
                     socketio.emit("error", {"message": "No movie selected for movie pipeline. Index a movie first."})
                     return
-                for lang in languages:
-                    try:
-                        socketio.emit("progress", {"step": "produce", "message": f"Starting language: {lang}"})
-                        eventlet.sleep(0)
-                        result = movie_pipeline.produce(
-                            prepare_id = prepare_id,
-                            movie_name = _movie,
-                            language   = lang,
-                            emit=_emit,
-                            test_mode=test_mode,
-                            main_character=main_character,
-                        )
-                        socketio.emit("produce_done", result)
-                    except Exception as e:
-                        import traceback
-                        print(f"[app] ERROR in movie produce [{lang}]: {e}\n{traceback.format_exc()}", flush=True)
-                        socketio.emit("error", {"message": f"[{lang}] {e}"})
+                _produce_languages_with_retry()
             else:
                 # Standard pipeline
-                for lang in languages:
-                    try:
-                        socketio.emit("progress", {"step": "produce", "message": f"Starting language: {lang}"})
-                        eventlet.sleep(0)
-                        result = pipeline.produce(
-                            prepare_id   = prepare_id,
-                            youtube_urls = youtube_urls,
-                            language     = lang,
-                            emit=_emit,
-                        )
-                        socketio.emit("produce_done", result)
-                    except Exception as e:
-                        import traceback
-                        print(f"[app] ERROR in produce [{lang}]: {e}\n{traceback.format_exc()}", flush=True)
-                        socketio.emit("error", {"message": f"[{lang}] {e}"})
-            socketio.emit("all_done", {})
+                _produce_languages_with_retry()
         finally:
             with _job_lock:
                 _job_active = False
