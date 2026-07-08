@@ -658,6 +658,7 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
     # ── Rewrite ────────────────────────────────────────────────────────────────
     script_path = os.path.join(proj_dir, "script.txt")
     meta_path = os.path.join(proj_dir, "metadata.json")
+    _thumb_prompt = ""
     if os.path.exists(script_path):
         with open(script_path, encoding="utf-8") as f:
             script = f.read()
@@ -681,8 +682,17 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
             json.dump({k: v for k, v in result.items() if k != "script"}, f, ensure_ascii=False, indent=2)
         log("rewrite", f"Script done: {len(script)} chars")
 
-        # ---- thumbnail analysis (library pipeline only) ----
-        _thumb_prompt = None
+    # ---- thumbnail analysis (library pipeline only) ----
+    _thumb_out = os.path.join(proj_dir, "thumbnail_prompt.txt")
+    if os.path.exists(_thumb_out):
+        try:
+            with open(_thumb_out, encoding="utf-8") as _f:
+                _thumb_prompt = _f.read()
+            log("thumbnail", f"Prompt cached ({len(_thumb_prompt)} chars)")
+        except Exception as _e:
+            print(f"[war_pipeline] thumbnail prompt cache read failed: {_e!r}", flush=True)
+            _thumb_prompt = ""
+    else:
         try:
             from backend import thumbnail as _thumb_mod
             _thumb_path = os.path.join(prepare_dir, "thumbnail.jpg")
@@ -692,19 +702,28 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
                         _thumb_path = os.path.join(_root, "thumbnail.jpg")
                         break
             if os.path.exists(_thumb_path):
-                _thumb_result = _thumb_mod.analyze_and_rewrite(_thumb_path, language, emit=emit)
-                _thumb_out = os.path.join(proj_dir, "thumbnail_prompt.txt")
-                with open(_thumb_out, "w", encoding="utf-8") as _f:
-                    _f.write(_thumb_result["prompt"])
-                _thumb_prompt = _thumb_result["prompt"]
-                if emit:
-                    emit("thumbnail_prompt", _thumb_prompt)
-                print(f"[war_pipeline] thumbnail prompt saved: {_thumb_out}", flush=True)
+                _meta_for_thumb = {}
+                if os.path.exists(meta_path):
+                    with open(meta_path, encoding="utf-8") as _mf:
+                        _meta_for_thumb = json.load(_mf)
+                _thumb_result = _thumb_mod.analyze_and_rewrite(
+                    _thumb_path,
+                    language,
+                    title=_meta_for_thumb.get("title", source_title),
+                    emit=emit,
+                )
+                _thumb_prompt = (_thumb_result.get("prompt") or "").strip()
+                if _thumb_prompt:
+                    with open(_thumb_out, "w", encoding="utf-8") as _f:
+                        _f.write(_thumb_prompt)
+                    if emit:
+                        emit("thumbnail_prompt", _thumb_prompt)
+                    print(f"[war_pipeline] thumbnail prompt saved: {_thumb_out}", flush=True)
             else:
                 print(f"[war_pipeline] no thumbnail.jpg found under {prepare_dir}", flush=True)
         except Exception as _e:
             print(f"[war_pipeline] thumbnail step failed: {_e!r}", flush=True)
-        # ---- end thumbnail ----
+    # ---- end thumbnail ----
 
     # ── TTS ────────────────────────────────────────────────────────────────────
     audio_path = os.path.join(proj_dir, "voiceover.mp3")
@@ -830,4 +849,5 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         "all_titles": meta.get("titles", []),
         "description": meta.get("description", ""),
         "tags": meta.get("tags", []),
+        "tags_raw": meta.get("tags_raw", ""),
     }

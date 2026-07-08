@@ -414,11 +414,24 @@ socket.on('produce_done', data => {
         <div style="color:#aaa;font-size:12px;margin-bottom:6px">All title options:</div>
         ${data.all_titles.map((t,i) => `<div style="font-size:13px;margin:3px 0"><b>${i+1}.</b> ${escHtml(t)}</div>`).join('')}
       </div>` : '';
+  const tagsText = data.tags_raw || (Array.isArray(data.tags) ? data.tags.join(', ') : (data.tags || ''));
+  const tagsHtml = tagsText
+    ? `<div style="color:#9ca3af;font-size:12px;margin-bottom:10px;word-break:break-word"><b>Tags:</b> ${escHtml(tagsText)}</div>`
+    : '';
+  const thumbnailPromptHtml = data.thumbnail_prompt
+    ? `<div style="margin:12px 0;padding:12px;background:#111827;border:1px solid #374151;border-radius:8px">
+        <div style="color:#a78bfa;font-size:12px;font-weight:700;margin-bottom:6px">Thumbnail prompt:</div>
+        <div class="thumbnail-prompt-text" style="color:#e5e7eb;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word">${escHtml(data.thumbnail_prompt)}</div>
+        <button type="button" class="btn" style="margin-top:8px;padding:5px 10px;font-size:11px" onclick="navigator.clipboard.writeText(this.parentElement.querySelector('.thumbnail-prompt-text').textContent)">Copy Prompt</button>
+      </div>`
+    : '';
   card.innerHTML = `
     <h2 style="color:#22c55e">&#10003; Video Ready</h2>
     <div style="font-size:16px;font-weight:700;margin-bottom:8px">${escHtml(data.title)}</div>
     <div style="color:#aaa;font-size:13px;margin-bottom:8px">${escHtml(data.description)}</div>
+    ${tagsHtml}
     ${titlesHtml}
+    ${thumbnailPromptHtml}
     <a class="btn btn-success" href="/api/download/${safeId}">Download Video</a>
   `;
   wrap.appendChild(card);
