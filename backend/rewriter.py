@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
@@ -24,13 +25,13 @@ def _load_prompt(path: str, language: str) -> str:
 from backend import api_client
 
 
-def _call_claude(system: str, messages: list, timeout: int = 300) -> tuple:
+def _call_claude(system: str, messages: list, timeout: int = 300, max_retries: int = 1) -> tuple:
     """Call Pioneer only — no fallback. Rewrite key is dedicated."""
     return api_client.call_pioneer(
         system,
         messages,
         timeout=timeout,
-        max_retries=1,
+        max_retries=max_retries,
     )
 
 
@@ -376,25 +377,121 @@ def _parse_metadata_output(text: str) -> dict:
     }
 
 
+MAX_METADATA_ATTEMPTS = 3
+
+
+def _call_metadata_part(system: str, label: str, user_msg: str, required_marker: str) -> str:
+    last_err = None
+    for attempt in range(1, MAX_METADATA_ATTEMPTS + 1):
+        try:
+            print(f"[rewriter]   -> {label} attempt {attempt}/{MAX_METADATA_ATTEMPTS}...", flush=True)
+            raw, _ = _call_claude(
+                system,
+                [{"role": "user", "content": user_msg}],
+                timeout=180,
+                max_retries=2,
+            )
+            if raw and required_marker.lower() in raw.lower():
+                return raw
+            last_err = f"missing marker {required_marker}"
+            print(f"[rewriter]   {label} invalid metadata response ({last_err})", flush=True)
+        except Exception as e:
+            last_err = str(e)
+            print(
+                f"[rewriter]   {label} failed attempt {attempt}/{MAX_METADATA_ATTEMPTS}: {e}",
+                flush=True,
+            )
+        if attempt < MAX_METADATA_ATTEMPTS:
+            time.sleep(5 * attempt)
+    raise RuntimeError(f"Metadata {label} failed after {MAX_METADATA_ATTEMPTS} attempts: {last_err}")
+
+
 def _rewrite_metadata(
     language: str,
     source_title: str,
     source_description: str,
     source_tags: list,
 ) -> dict:
-    system = _load_prompt(METADATA_PROMPT_FILE, language)
+    """
+    Generate metadata in 3 SEPARATE Opus calls (title / description / tags).
+    Splitting keeps each prompt small enough that Opus responds well under
+    CloudFront's ~60s upstream timeout — a single combined call was hitting HTTP 504.
 
+    Each call uses the SAME rewrite tone: minimal changes to the competitor's
+    text, translated precisely into the video's language, kept SEO-relevant.
+    """
+    system_full = _load_prompt(METADATA_PROMPT_FILE, language)
     tags_str = ", ".join(source_tags) if source_tags else ""
-    user_msg = (
-        f"Target language: {language}\n\n"
-        f"COMPETITOR'S TITLE:\n{source_title}\n\n"
-        f"COMPETITOR'S DESCRIPTION:\n{source_description}\n\n"
-        f"COMPETITOR'S TAGS:\n{tags_str}"
+
+    # Shared style guidance used in every mini-call.
+    style = (
+        f"You are rewriting a YouTube video's metadata for a {language} audience.\n"
+        f"Rewrite MINIMALLY — preserve the competitor's structure, hooks, and SEO angles.\n"
+        f"Translate the text into {language} (natural, native-sounding).\n"
+        f"Do NOT invent content. Only rephrase.\n"
     )
 
-    print("[rewriter] Generating metadata...", flush=True)
-    raw, _ = _call_claude(system, [{"role": "user", "content": user_msg}])
-    result = _parse_metadata_output(raw)
+    print("[rewriter] Generating metadata (3 separate Opus calls)...", flush=True)
+
+    # ── Call 1: titles (5 options) ────────────────────────────────────────────
+    title_user = (
+        f"{style}\n"
+        f"COMPETITOR'S TITLE:\n{source_title}\n\n"
+        f"Produce 5 alternative titles for the same video, rewritten into {language}.\n"
+        f"Each title: 40-70 chars, keeps the hook, avoids clickbait exaggeration.\n\n"
+        f"Reply STRICTLY in this format (no other text):\n"
+        f"### Optimized Titles:\n"
+        f"1. Title in {language} — Ukrainian translation\n"
+        f"2. Title in {language} — Ukrainian translation\n"
+        f"3. Title in {language} — Ukrainian translation\n"
+        f"4. Title in {language} — Ukrainian translation\n"
+        f"5. Title in {language} — Ukrainian translation\n"
+    )
+    print("[rewriter]   → titles...", flush=True)
+    titles_raw = _call_metadata_part(system_full, "titles", title_user, "### Optimized Titles:")
+
+    # ── Call 2: description ───────────────────────────────────────────────────
+    desc_user = (
+        f"{style}\n"
+        f"COMPETITOR'S DESCRIPTION:\n{source_description}\n\n"
+        f"Rewrite this description into {language}. Keep the same length and structure.\n"
+        f"Preserve any hashtags / CTA lines but translate them.\n\n"
+        f"Reply STRICTLY in this format (no other text):\n"
+        f"### Optimized Description:\n"
+        f"<the rewritten description here>\n"
+    )
+    print("[rewriter]   → description...", flush=True)
+    desc_raw = _call_metadata_part(system_full, "description", desc_user, "### Optimized Description:")
+
+    # ── Call 3: tags ──────────────────────────────────────────────────────────
+    tags_user = (
+        f"{style}\n"
+        f"COMPETITOR'S TAGS:\n{tags_str}\n\n"
+        f"Rewrite these tags for a {language}-speaking audience. Target ~490-500 chars total.\n"
+        f"Mix {language} and universal English tags (names, weapon models). Comma-separated.\n\n"
+        f"Reply STRICTLY in this format (no other text):\n"
+        f"### Optimized Tags:\n"
+        f"tag1, tag2, tag3, ...\n"
+    )
+    print("[rewriter]   → tags...", flush=True)
+    tags_raw_resp = _call_metadata_part(system_full, "tags", tags_user, "### Optimized Tags:")
+
+    # Combine the three fragments into the format _parse_metadata_output expects.
+    combined = (
+        f"{titles_raw.strip()}\n\n"
+        f"{desc_raw.strip()}\n\n"
+        f"{tags_raw_resp.strip()}\n"
+    )
+    result = _parse_metadata_output(combined)
+    missing = []
+    if not result.get("titles"):
+        missing.append("titles")
+    if not result.get("description"):
+        missing.append("description")
+    if not result.get("tags"):
+        missing.append("tags")
+    if missing:
+        raise RuntimeError("Metadata parse missing: " + ", ".join(missing))
     print(f"[rewriter] Metadata done — {len(result['titles'])} title options", flush=True)
     return result
 
