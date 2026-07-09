@@ -358,6 +358,14 @@ function escHtml(s) {
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function safeUrl(u) { return /^https?:\/\//.test(u) ? u : '#'; }
+function copyText(text, btn) {
+  navigator.clipboard.writeText(String(text || '')).then(() => {
+    if (!btn) return;
+    const old = btn.textContent;
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = old; }, 1200);
+  });
+}
 
 socket.on('prepare_done', data => {
   _stopPolling();
@@ -420,6 +428,10 @@ socket.on('produce_done', data => {
   const langBadge = langText
     ? `<div style="position:absolute;top:14px;right:14px;background:#1f2937;border:1px solid #4b5563;color:#e5e7eb;border-radius:6px;padding:5px 9px;font-size:11px;font-weight:800;letter-spacing:0">${escHtml(langText)}</div>`
     : '';
+  const copyBtn = (label, value) => {
+    const encoded = encodeURIComponent(String(value || ''));
+    return `<button type="button" class="btn" style="padding:4px 8px;font-size:11px;line-height:1.2" onclick="copyText(decodeURIComponent('${encoded}'), this)">Copy ${escHtml(label)}</button>`;
+  };
   const titlesHtml = (data.all_titles||[]).length > 1
     ? `<div style="margin-bottom:12px">
         <div style="color:#aaa;font-size:12px;margin-bottom:6px">All title options:</div>
@@ -427,13 +439,16 @@ socket.on('produce_done', data => {
       </div>` : '';
   const tagsText = data.tags_raw || (Array.isArray(data.tags) ? data.tags.join(', ') : (data.tags || ''));
   const tagsHtml = tagsText
-    ? `<div style="color:#9ca3af;font-size:12px;margin-bottom:10px;word-break:break-word"><b>Tags:</b> ${escHtml(tagsText)}</div>`
+    ? `<div style="color:#9ca3af;font-size:12px;margin-bottom:10px;word-break:break-word">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><b>Tags:</b> ${copyBtn('Tags', tagsText)}</div>
+        <div>${escHtml(tagsText)}</div>
+      </div>`
     : '';
   const thumbnailPromptHtml = data.thumbnail_prompt
     ? `<div style="margin:12px 0;padding:12px;background:#111827;border:1px solid #374151;border-radius:8px">
         <div style="color:#a78bfa;font-size:12px;font-weight:700;margin-bottom:6px">Thumbnail prompt:</div>
         <div class="thumbnail-prompt-text" style="color:#e5e7eb;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word">${escHtml(data.thumbnail_prompt)}</div>
-        <button type="button" class="btn" style="margin-top:8px;padding:5px 10px;font-size:11px" onclick="navigator.clipboard.writeText(this.parentElement.querySelector('.thumbnail-prompt-text').textContent)">Copy Prompt</button>
+        <button type="button" class="btn" style="margin-top:8px;padding:5px 10px;font-size:11px" onclick="copyText(this.parentElement.querySelector('.thumbnail-prompt-text').textContent, this)">Copy Prompt</button>
       </div>`
     : '';
   const timings = data.timings || {};
@@ -446,8 +461,17 @@ socket.on('produce_done', data => {
   card.innerHTML = `
     ${langBadge}
     <h2 style="color:#22c55e;padding-right:110px">&#10003; Video Ready</h2>
-    <div style="font-size:16px;font-weight:700;margin-bottom:8px">${escHtml(data.title)}</div>
-    <div style="color:#aaa;font-size:13px;margin-bottom:8px">${escHtml(data.description)}</div>
+    <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:8px">
+      <div style="font-size:16px;font-weight:700;flex:1">${escHtml(data.title)}</div>
+      ${copyBtn('Title', data.title)}
+    </div>
+    <div style="color:#aaa;font-size:13px;margin-bottom:8px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <b style="color:#9ca3af">Description</b>
+        ${copyBtn('Description', data.description)}
+      </div>
+      <div>${escHtml(data.description)}</div>
+    </div>
     ${tagsHtml}
     ${titlesHtml}
     ${thumbnailPromptHtml}
