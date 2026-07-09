@@ -38,6 +38,14 @@ Important:
 - Do not invent dramatic wording that is not supported by the source.
 - Keep the topic, entities, and location recognizable.
 - Geo adjustment is allowed, but only as a light localization tweak.
+- Do not aggressively shorten titles. Preserve the original title structure,
+  order of ideas, capitalized emphasis, and ending hook.
+- If the source title ends with a curiosity hook such as "Then THIS Happened",
+  "And THIS Happened", "What Happened Next", or a similar phrase, every title
+  option must keep that ending hook translated naturally into {language}.
+- Aim to stay under 100 characters for the target-language title when possible.
+  If a direct translation is too long, compress only the least important words;
+  do not remove the ending hook or the main SEO entities.
 
 ## DESCRIPTION RULES
 
