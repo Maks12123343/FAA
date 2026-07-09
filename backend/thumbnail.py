@@ -10,28 +10,26 @@ from backend import api_client
 THUMBNAIL_ATTEMPTS = 3
 
 ANALYSIS_PROMPT = """
-Look at this YouTube thumbnail and describe it for creating a similar but unique thumbnail.
+Analyze the provided competitor YouTube thumbnail as a visual reference only.
+Do not verify facts and do not claim that the scene is real.
 
-Cover these points:
-1. Main subject/event: what must be the focal point.
-2. Supporting subjects: secondary objects, people, vehicles, annotations, text.
-3. Camera and framing: angle, distance, crop tightness, subject scale.
-4. Main-hook geometry: approximate position and size as frame percentages, including center point, width/height, and frame area.
-5. Composition: where the main subject is placed and how much of the frame it fills.
-6. Geographic/environmental context: climate, terrain, vegetation, architecture, road/ground type, and regional feel.
-7. Attack direction: if a drone, missile, aircraft, weapon, or vehicle is visible, describe its direction relative to the explosion/target.
-8. Lighting and realism: daylight/night, color style, photo/news/cinematic/AI look.
-9. Annotation/text style: circles, arrows, outlines, labels, large text, or no text.
+Describe the visible thumbnail strategy in compact detail:
+1. Main subject/event and what must be the focal point.
+2. Camera angle, perspective, crop tightness, and camera distance.
+3. Main-hook geometry: approximate position and size as frame percentages.
+4. Explosion/fire/smoke scale, placement, shape, density, debris direction, and visual intensity.
+5. Drone/aircraft/weapon details if visible: type, shape, size, angle, position, highlight circle/arrow, and flight direction relative to the blast or target.
+6. Military base or location details: buildings, hangars, roads, fences, vehicles, soldiers, damage, dust, and debris.
+7. Broad environment and regional feel: climate, terrain, vegetation, architecture, road/ground type.
+8. Lighting, weather, color palette, realism level, and clickability.
+9. Visible text, arrows, circles, labels, outlines, or other thumbnail effects.
 10. What must stay similar.
-11. What must change to avoid copying.
-12. What to avoid.
+11. What can change to avoid direct copying.
 
-Be strict about realism level. If it looks like a real news/drone/photo still,
-say that clearly and warn against glossy AI poster style.
-Be strict about subject scale. Do not describe a thumbnail as a generic wide
-landscape when the main hook is large and readable.
-Do not recommend moving the main subject/event to a different side of the frame
-as an anti-copying change. Only secondary details should move.
+Be strict about scale. If the main hook is large and close, say that clearly.
+Do not describe it as a distant wide landscape or survey shot.
+Be strict about realism. If it looks like a real news/photo/drone still, say
+that clearly and warn against CGI, movie-poster, game-render, or glossy AI style.
 """.strip()
 
 REWRITE_SYSTEM = (
@@ -111,7 +109,9 @@ def analyze_and_rewrite(image_path: str, language: str, title: str = "", emit=No
 
     _emit(emit, "Writing thumbnail generation prompt...")
     rewrite_prompt = f"""
-Based on this competitor thumbnail analysis, write ONE final image-generation prompt.
+Use the competitor thumbnail analysis as a visual reference only. Do not verify facts and do not make factual claims.
+
+Create ONE English image-generation prompt for a new YouTube thumbnail.
 
 Video title:
 {title or '(unknown)'}
@@ -125,32 +125,16 @@ Competitor analysis:
 {analysis}
 
 Universal rules:
-- Preserve the competitor thumbnail's visual strategy, not the exact image.
-- The main subject/event must be large, sharp, and immediately readable at small YouTube thumbnail size.
-- If the competitor's key hook is an explosion, destroyed object, face, vehicle, weapon, map, drone, building, fire, injury, or other action, keep that hook as the clear focal point.
-- The main visual hook must match the competitor's intensity and scale. Do not weaken it, shrink it, push it into the distance, or make it a background detail.
-- Lock the main-hook geometry to the competitor thumbnail: keep the same approximate frame position, same quadrant, same visual center, same foreground/midground depth, and same pixel footprint. Uniqueness must come from details, not from moving or shrinking the hook.
-- If the analysis gives approximate percentages for the main hook, repeat those percentages in the final prompt and do not contradict them.
-- Do not move the main hook to a different side as a variation.
-- Preserve logical attack direction. If a drone, missile, aircraft, weapon, or vehicle is shown as the implied cause of the explosion, orient it so it visually points, flies, or aims toward the explosion/target, not away from it or randomly sideways.
-- For drone-attack thumbnails, the drone nose/body direction should clearly suggest movement toward the blast or target area.
-- Use a thumbnail-optimized crop around the main hook, not a distant surveillance/archive wide shot.
-- If the competitor image is aerial, keep it as a medium-height aerial thumbnail crop or close aerial thumbnail crop, not a high-altitude survey/map view.
-- When the reference explosion/fireball occupies a large part of the thumbnail, keep a similar pixel footprint in the new image, roughly one-third to one-half of the frame height when appropriate.
-- Never ask for a wide-angle, panoramic, high-altitude, full-compound survey, map-like view, distant view, or landscape-first aerial photo.
-- The final prompt must start with the main hook and its locked geometry, not with the landscape or general setting.
-- Do not include more empty fields, forest, sky, horizon, or background space than the competitor thumbnail.
-- If the competitor has a huge explosion, the final prompt must explicitly ask for a huge foreground/midground explosion that is as large and readable as the reference, not a small fire on a distant building.
-- If the hook is explosion, fire, smoke, or destruction, keep it similarly powerful and visually dominant: a large bright fireball, thick dark smoke, visible debris or damaged objects, strong contrast, and clear surrounding vehicles/buildings for scale. It should feel intense but still realistic, like the reference image, not fantasy CGI.
-- Preserve the competitor's realism level. If it looks like a real photo, news still, drone image, CCTV image, or screenshot, keep that look. Do not turn it into glossy AI art or a cinematic movie poster.
-- Preserve the broad layout: similar subject placement, similar scale, similar background amount, similar lighting/time of day, similar annotation logic.
-- Preserve the competitor thumbnail's broad geographic and environmental context: same climate, terrain, vegetation, architecture, road/ground type, and regional feel. Do not move the scene into a clearly different biome or country style.
-- If the reference looks like a temperate Eastern European/Russian military-industrial zone with green forests, fields, concrete roads, hangars, barracks, and military vehicles, do not turn it into a desert, Middle Eastern base, tropical area, mountains, or American-style compound.
-- Change exact secondary details so it is not a copy: smoke texture, debris shape, vehicle arrangement, building details, annotation stroke, or color accent.
-- Do not add giant text unless the competitor clearly uses large text. If the competitor thumbnail has no visible words, the new thumbnail should have no visible words.
-- Do not add visible words, numbers, dates, timestamps, coordinates, altitude readouts, camera telemetry, watermarks, UI text, or small technical overlays unless the competitor thumbnail clearly has them.
-- For drone thumbnails, avoid weapon-sight crosshairs, red targeting reticles, HUD overlays, surveillance readouts, LAT/LON/ALT labels, and date/time stamps. A simple YouTube-style circle or arrow around the drone is allowed only if the competitor uses that type of annotation.
-- Avoid making every channel variant look the same, but vary only secondary details. Keep the main-hook geometry, camera scale, and composition locked.
+- Preserve the reference thumbnail's core visual strategy, not the exact image.
+- Preserve the same main visual hook, camera angle, perspective, approximate camera distance, hook position, explosion/fireball scale, drone position logic, broad military/industrial environment, realism level, and YouTube clickability.
+- The main hook must stay large, sharp, and readable at small thumbnail size.
+- If the reference has a large explosion, describe a similarly large, powerful, bright explosion with thick smoke, debris, visible damage, and nearby buildings or vehicles for scale. Do not shrink the explosion, push it into the distance, or turn it into a small fire.
+- If the reference has a drone, keep it airborne and oriented toward the explosion or target area. Do not place the drone on the ground, flying away, or randomly sideways.
+- Preserve any important simple highlight element from the reference, such as a circle or arrow around the drone, but change the exact style slightly.
+- Keep the same broad environment. If the reference looks like a temperate Russian or Eastern European military-industrial area, keep that regional feel: concrete roads, hangars, military buildings, green or gray terrain, utilitarian base layout. Do not turn it into desert, tropical, American, Middle Eastern, mountain, or cinematic fantasy scenery.
+- Change only secondary details: building arrangement, vehicle positions, smoke texture, debris pattern, drone angle slightly, annotation style, color accents, and background layout details.
+- The image must look like a realistic detailed news/photo-style thumbnail, not CGI, not a movie poster, not a game render, not anime, not a painting, not glossy AI art.
+- Avoid flags, readable text, logos, watermarks, timestamps, coordinates, HUD overlays, UI elements, gore, blood, blurry details, distorted people, or deformed vehicles unless the reference clearly has a specific simple annotation.
 
 Output only the final image-generation prompt. No explanation.
 """.strip()
