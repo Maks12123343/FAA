@@ -244,7 +244,8 @@ async function doProduce() {
 socket.on('produce_done', d => {
   logTo('produce-log', `Done: ${d.project_id}`, 'done');
   document.getElementById('result-block').style.display = '';
-  document.getElementById('result-title').textContent = d.title || d.project_id;
+  const lang = d.language ? ` [${String(d.language).toUpperCase()}]` : '';
+  document.getElementById('result-title').textContent = `${d.title || d.project_id}${lang}`;
   document.getElementById('result-download').href = `/api/movies/download/${d.project_id}`;
   document.getElementById('btn-produce').disabled = false;
 });

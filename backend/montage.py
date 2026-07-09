@@ -8,6 +8,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
+from backend.video_finalize import finalize_mp4
 
 FFMPEG  = config.FFMPEG
 FFPROBE = config.FFPROBE
@@ -137,8 +138,8 @@ def _concat_clip_list(clip_paths: list, output: str):
 
 
 _XFADE_TRANSITIONS = [
-    "fade", "fadeblack", "dissolve", "hblur",
-    "fadegrays", "smoothleft", "smoothright", "fadewhite",
+    "fade", "fadeblack", "dissolve", "hblur", "fadegrays",
+    "smoothleft", "smoothright",
 ]
 
 
@@ -179,7 +180,10 @@ def _xfade_join(segment_files: list, output: str, fade_dur: float = 0.35):
         cumulative += durations[i - 1] - fade_dur
         out_label = f"x{i}" if i < n - 1 else "vout"
         offset = max(0.0, cumulative)
-        transition = _XFADE_TRANSITIONS[(i - 1) % len(_XFADE_TRANSITIONS)]
+        if random.random() < 0.85:
+            transition = random.choice(["fade", "dissolve", "fadeblack", "hblur", "fadegrays"])
+        else:
+            transition = random.choice(_XFADE_TRANSITIONS)
         filters.append(
             f"[{prev_label}][{i}:v]xfade=transition={transition}"
             f":duration={fade_dur:.2f}:offset={offset:.3f}[{out_label}]"
@@ -206,9 +210,9 @@ def _build_concat(clip_items: list, output: str, width: int, height: int, fps: i
     clip_max  = float(settings.get("clip_max_duration", 6))
     workers   = min(multiprocessing.cpu_count(), 2)
 
-    GROUP_MIN = 3
-    GROUP_MAX = 6
-    FADE_DUR  = 0.35
+    GROUP_MIN = 5
+    GROUP_MAX = 8
+    FADE_DUR  = 0.28
 
     with tempfile.TemporaryDirectory() as tmp:
         args = [(i, item, tmp, width, height, fps, clip_max, uniq_params)
@@ -468,6 +472,8 @@ def assemble(
     else:
         import shutil
         shutil.copy2(with_audio, output_path)
+
+    finalize_mp4(output_path, fade_in=0.8)
 
     print(f"[montage] Done: {output_path}", flush=True)
     return output_path

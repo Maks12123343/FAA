@@ -163,6 +163,17 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
         if emit:
             emit(step, msg)
 
+    timings = {}
+    _stage_started = time.time()
+
+    def mark_timing(name):
+        nonlocal _stage_started
+        now = time.time()
+        elapsed = round(now - _stage_started, 1)
+        timings[name] = elapsed
+        _stage_started = now
+        log("timing", f"{name}: {elapsed}s")
+
     # Load prepare state
     prepare_dir = os.path.join(config.PROJECTS_DIR, f"_prepare_{prepare_id}")
     state_path  = os.path.join(prepare_dir, "state.json")
@@ -321,6 +332,7 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
                 "Delete the clip_pool folder and re-run to re-download."
             )
         log("clips", f"Using existing pool: {len(yt_pool)} clips")
+    mark_timing("clip_pool")
 
     # -- Rewrite script (Claude) ----------------------------------------------
     script_path    = os.path.join(project_dir, "script.txt")
@@ -375,6 +387,7 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
                 f"Channel: {top_video.get('channel_url', '')}\n"
             )
         log("rewrite", f"Done: \"{title}\"")
+    mark_timing("rewrite")
 
     # -- TTS ------------------------------------------------------------------
     audio_path = os.path.join(project_dir, "voiceover.mp3")
@@ -391,6 +404,7 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
                 "The API may have failed silently or returned an empty file."
             )
         log("tts", f"Voiceover ready: {audio_dur:.0f}s")
+    mark_timing("tts")
 
     # -- Whisper: get real timestamps for clip cuts ---------------------------
     log("tts", "Segmenting voiceover with Whisper...")
@@ -404,6 +418,7 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
         with open(whisper_segs_path, "w", encoding="utf-8") as f:
             json.dump(whisper_segments, f, ensure_ascii=False, indent=2)
         log("tts", f"Whisper done: {len(whisper_segments)} segments")
+    mark_timing("whisper")
 
     # -- Pick clips -----------------------------------------------------------
     log("media", "Building clip list...")
@@ -506,15 +521,18 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
             "No clips assembled — clip pool may be empty, all clips were rejected by Gemini, "
             "or Whisper produced no segments. Check logs above."
         )
+    mark_timing("media_select")
 
     # -- Text overlays --------------------------------------------------------
     log("text", "Generating text overlays...")
     overlays = text_renderer.generate_stat_overlays(script, audio_dur)
+    mark_timing("overlays")
 
     # -- Montage --------------------------------------------------------------
     log("montage", "Assembling video...")
     output_path = os.path.join(project_dir, "output.mp4")
     montage.assemble(clips, audio_path, output_path, text_overlays=overlays, montage_style=montage_style)
+    mark_timing("montage")
 
     # -- Final validation -----------------------------------------------------
     if not os.path.exists(output_path):
@@ -542,6 +560,8 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
     return {
         "project_id":   project_id,
         "output":       output_path,
+        "language":     language,
+        "timings":      timings,
         "title":        title,
         "all_titles":   all_titles,
         "description":  description,

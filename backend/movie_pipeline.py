@@ -21,6 +21,7 @@ from backend.aligner import _split_into_chunks, _chunk_duration, _get_duration
 from backend.transcriber import get_transcript
 from backend.rewriter import rewrite_all
 from backend.text_renderer import apply_text_overlays
+from backend.video_finalize import finalize_mp4
 from backend.movie_library import (
     search_clips, get_movie_clips,
     validate_clips_batch,
@@ -951,11 +952,8 @@ def _concat_clip_list(clip_paths: list, output: str):
 
 # Розширений набір переходів — різноманітний монтаж
 _XFADE_TRANSITIONS = [
-    "fade", "fadeblack", "dissolve", "hblur",
-    "fadegrays", "smoothleft", "smoothright",
-    "wipeleft", "wiperight", "slideleft", "slideright",
-    "circlecrop", "rectcrop", "pixelize",
-    "squeezeh", "squeezev",
+    "fade", "fadeblack", "dissolve", "hblur", "fadegrays",
+    "smoothleft", "smoothright", "wipeleft", "wiperight",
 ]
 
 # Переходи що виглядають "людськими" — використовуємо частіше
@@ -970,7 +968,7 @@ def _pick_transition(i: int, rng: random.Random = None) -> str:
     Більш динамічний монтаж.
     """
     r = (rng or random).random()
-    if r < 0.50:
+    if r < 0.85:
         pool = _NATURAL_TRANSITIONS
     else:
         pool = _XFADE_TRANSITIONS
@@ -1078,8 +1076,8 @@ def _build_movie_video(clips: list, audio_path: str, output_path: str,
     rng  = random.Random(seed)
 
     # Групи: розмір варіюється 2–5 (менші групи = частіші переходи)
-    GROUP_SIZES = [2, 2, 3, 3, 3, 4, 4, 5]
-    FADE_DUR    = 0.20  # швидкий fade — максимальна динаміка
+    GROUP_SIZES = [4, 5, 5, 6, 6, 7, 8]
+    FADE_DUR    = 0.28
 
     proj_dir   = os.path.dirname(output_path)
     raw_video  = os.path.join(proj_dir, "_raw_movie.mp4")
@@ -1152,6 +1150,8 @@ def _build_movie_video(clips: list, audio_path: str, output_path: str,
     else:
         shutil.copy2(with_audio, output_path)
 
+    finalize_mp4(output_path, fade_in=0.8, emit=emit)
+
     if emit:
         emit("montage", "Video assembly complete.")
 
@@ -1223,6 +1223,17 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
         print(f"[movie_pipeline:produce:{step}] {msg}", flush=True)
         if emit:
             emit(step, msg)
+
+    timings = {}
+    _stage_started = time.time()
+
+    def mark_timing(name):
+        nonlocal _stage_started
+        now = time.time()
+        elapsed = round(now - _stage_started, 1)
+        timings[name] = elapsed
+        _stage_started = now
+        log("timing", f"{name}: {elapsed}s")
 
     prepare_dir = os.path.join(config.PROJECTS_DIR, f"_prepare_{prepare_id}")
     with open(os.path.join(prepare_dir, "state.json"), encoding="utf-8") as f:
@@ -1301,6 +1312,7 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
             json.dump({k: v for k, v in result.items() if k != "script"},
                       f, ensure_ascii=False, indent=2)
         log("rewrite", f"Script done: {len(script)} chars, {len(script.split())} words")
+    mark_timing("rewrite")
 
     # ── TTS ───────────────────────────────────────────────────────────────────
     audio_path = os.path.join(proj_dir, "voiceover.mp3")
@@ -1313,6 +1325,7 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
 
     audio_dur = _get_duration(audio_path)
     log("tts", f"Audio duration: {audio_dur:.1f}s")
+    mark_timing("tts")
 
     # Перевірка мінімальної тривалості
     if audio_dur < MIN_AUDIO_DURATION:
@@ -1325,12 +1338,14 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
     segments_with_times = _segments_from_audio(audio_path, audio_dur)
     log("segments", f"{len(segments_with_times)} segments, "
         f"last ends at {segments_with_times[-1]['end']:.1f}s")
+    mark_timing("segments")
 
     # ── Планування текстових оверлеїв ────────────────────────────────────────
     log("overlays", "Planning text overlays...")
     overlay_plan  = _plan_text_overlays(segments_with_times, emit=emit)
     text_overlays = _build_text_overlays(overlay_plan, segments_with_times)
     log("overlays", f"Planned {len(text_overlays)} text overlays.")
+    mark_timing("overlays")
 
     # ── Підбір кліпів: top-5 → Pioneer text ranking → найкращий ──────────────
     # Load niche score_rules so the ranker knows main_character / scene penalties / etc.
@@ -1371,6 +1386,7 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
         log("clips", f"Selected {len(clip_data)} clips.")
         with open(clips_cache, "w", encoding="utf-8") as f:
             json.dump(clip_data, f, ensure_ascii=False)
+    mark_timing("clip_select")
 
     # ── Нормалізація + унікалізація (тривалість = тривалість сегменту) ────────
     log("clips", "Preparing clips (normalize + uniqualize)...")
@@ -1416,6 +1432,7 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
 
         if not prepared:
             raise RuntimeError("No clips survived preparation.")
+        mark_timing("clip_prepare")
 
         log("montage", f"Assembling {len(prepared)} clips ({audio_dur:.1f}s audio)...")
         if emit:
@@ -1429,6 +1446,7 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
             proj_id       = proj_id,
             emit          = emit,
         )
+        mark_timing("montage")
 
     log("done", f"Video ready: {output_path}")
 
@@ -1449,13 +1467,16 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
     return {
         "project_id":   proj_id,
         "project_dir":  proj_dir,
+        "language":     language,
         "output_path":  output_path,
         "audio_dur":    round(audio_dur, 1),
         "clips_used":   len(prepared),
+        "timings":      timings,
         "title":        meta.get("title", source_title),
         "all_titles":   meta.get("titles", []),
         "description":  meta.get("description", ""),
         "tags":         meta.get("tags", []),
+        "tags_raw":     meta.get("tags_raw", ""),
         "used_ids":     list(used_ids_in_this_video),
     }
 
@@ -1606,6 +1627,7 @@ def produce_from_script(
     return {
         "project_id":  proj_id,
         "project_dir": proj_dir,
+        "language":    language,
         "output_path": output_path,
         "audio_dur":   round(audio_dur, 1),
         "clips_used":  len(prepared),
@@ -1613,6 +1635,7 @@ def produce_from_script(
         "titles":      meta.get("titles", []),
         "description": meta.get("description", ""),
         "tags":        meta.get("tags", []),
+        "tags_raw":    meta.get("tags_raw", ""),
     }
 
 

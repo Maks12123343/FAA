@@ -634,6 +634,17 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         if emit:
             emit(step, msg)
 
+    timings = {}
+    _stage_started = time.time()
+
+    def mark_timing(name):
+        nonlocal _stage_started
+        now = time.time()
+        elapsed = round(now - _stage_started, 1)
+        timings[name] = elapsed
+        _stage_started = now
+        log("timing", f"{name}: {elapsed}s")
+
     prepare_dir = os.path.join(config.PROJECTS_DIR, f"_prepare_{prepare_id}")
     with open(os.path.join(prepare_dir, "state.json"), encoding="utf-8") as f:
         state = json.load(f)
@@ -681,6 +692,7 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump({k: v for k, v in result.items() if k != "script"}, f, ensure_ascii=False, indent=2)
         log("rewrite", f"Script done: {len(script)} chars")
+    mark_timing("rewrite")
 
     # ---- thumbnail analysis (library pipeline only) ----
     _thumb_out = os.path.join(proj_dir, "thumbnail_prompt.txt")
@@ -724,6 +736,7 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         except Exception as _e:
             print(f"[war_pipeline] thumbnail step failed: {_e!r}", flush=True)
     # ---- end thumbnail ----
+    mark_timing("thumbnail")
 
     # ── TTS ────────────────────────────────────────────────────────────────────
     audio_path = os.path.join(proj_dir, "voiceover.mp3")
@@ -736,23 +749,27 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
 
     audio_dur = _get_duration(audio_path)
     log("tts", f"Audio duration: {audio_dur:.1f}s")
+    mark_timing("tts")
     if audio_dur < MIN_AUDIO_DURATION:
         raise RuntimeError(f"Voiceover too short: {audio_dur:.1f}s (min {MIN_AUDIO_DURATION}s)")
 
     # ── Segments (Whisper 2-5s) ────────────────────────────────────────────────
     segments = _segments_from_audio(audio_path, audio_dur)
     log("segments", f"{len(segments)} segments, last ends at {segments[-1]['end']:.1f}s")
+    mark_timing("segments")
 
     # ── Text overlays (те саме що movie_pipeline) ──────────────────────────────
     log("overlays", "Planning text overlays...")
     overlay_plan = _plan_text_overlays_war(segments, language, emit=emit)
     text_overlays = _build_text_overlays_war(overlay_plan, segments)
     log("overlays", f"Planned {len(text_overlays)} text overlays.")
+    mark_timing("overlays")
 
     # ── Load library index ─────────────────────────────────────────────────────
     log("library", f"Loading library index for '{niche}'...")
     clips = _load_library_index(niche)
     log("library", f"Library ready: {len(clips)} valid clips")
+    mark_timing("library")
 
     # ── Categorize segments (BATCHED Pioneer) ─────────────────────────────────
     clips_cache = os.path.join(proj_dir, "clips.json")
@@ -775,6 +792,7 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         with open(clips_cache, "w", encoding="utf-8") as f:
             json.dump(clip_data, f, ensure_ascii=False)
         log("clips", f"Selected {len(clip_data)} clips.")
+    mark_timing("clip_select")
 
     # ── Prepare clips (normalize + uniqualize, parallel 4 workers) ────────────
     log("clips", "Preparing clips (normalize + uniqualize)...")
@@ -817,6 +835,7 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
 
         if not prepared:
             raise RuntimeError("No clips survived preparation.")
+        mark_timing("clip_prepare")
 
         log("montage", f"Assembling {len(prepared)} clips ({audio_dur:.1f}s audio)...")
         if emit:
@@ -830,6 +849,7 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
             proj_id=proj_id,
             emit=emit,
         )
+        mark_timing("montage")
 
     log("done", f"Video ready: {output_path}")
 
@@ -841,10 +861,12 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
     return {
         "project_id": proj_id,
         "project_dir": proj_dir,
+        "language": language,
         "thumbnail_prompt": _thumb_prompt,
         "output_path": output_path,
         "audio_dur": round(audio_dur, 1),
         "clips_used": len(prepared),
+        "timings": timings,
         "title": meta.get("title", source_title),
         "all_titles": meta.get("titles", []),
         "description": meta.get("description", ""),

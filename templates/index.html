@@ -408,7 +408,18 @@ socket.on('produce_done', data => {
   const wrap = document.getElementById('resultsWrap');
   const card = document.createElement('div');
   card.className = 'card';
+  card.style.position = 'relative';
   const safeId = escHtml(data.project_id || '');
+  const langLabels = {
+    pl: 'Polish', tr: 'Turkish', cs: 'Czech', ro: 'Romanian',
+    hu: 'Hungarian', sw: 'Swedish', de: 'German', fr: 'French',
+    es: 'Spanish', it: 'Italian', pt: 'Portuguese', en: 'English'
+  };
+  const langCode = String(data.language || '').toLowerCase();
+  const langText = langCode ? `${langLabels[langCode] || langCode.toUpperCase()} · ${langCode.toUpperCase()}` : '';
+  const langBadge = langText
+    ? `<div style="position:absolute;top:14px;right:14px;background:#1f2937;border:1px solid #4b5563;color:#e5e7eb;border-radius:6px;padding:5px 9px;font-size:11px;font-weight:800;letter-spacing:0">${escHtml(langText)}</div>`
+    : '';
   const titlesHtml = (data.all_titles||[]).length > 1
     ? `<div style="margin-bottom:12px">
         <div style="color:#aaa;font-size:12px;margin-bottom:6px">All title options:</div>
@@ -425,13 +436,22 @@ socket.on('produce_done', data => {
         <button type="button" class="btn" style="margin-top:8px;padding:5px 10px;font-size:11px" onclick="navigator.clipboard.writeText(this.parentElement.querySelector('.thumbnail-prompt-text').textContent)">Copy Prompt</button>
       </div>`
     : '';
+  const timings = data.timings || {};
+  const timingEntries = Object.entries(timings);
+  const timingsHtml = timingEntries.length
+    ? `<div style="color:#9ca3af;font-size:12px;margin:10px 0;display:flex;flex-wrap:wrap;gap:6px">
+        ${timingEntries.map(([k,v]) => `<span style="background:#111827;border:1px solid #374151;border-radius:6px;padding:4px 7px">${escHtml(k)}: ${escHtml(String(v))}s</span>`).join('')}
+      </div>`
+    : '';
   card.innerHTML = `
-    <h2 style="color:#22c55e">&#10003; Video Ready</h2>
+    ${langBadge}
+    <h2 style="color:#22c55e;padding-right:110px">&#10003; Video Ready</h2>
     <div style="font-size:16px;font-weight:700;margin-bottom:8px">${escHtml(data.title)}</div>
     <div style="color:#aaa;font-size:13px;margin-bottom:8px">${escHtml(data.description)}</div>
     ${tagsHtml}
     ${titlesHtml}
     ${thumbnailPromptHtml}
+    ${timingsHtml}
     <a class="btn btn-success" href="/api/download/${safeId}">Download Video</a>
   `;
   wrap.appendChild(card);
