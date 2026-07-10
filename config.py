@@ -85,6 +85,7 @@ DEFAULT_SETTINGS = {
         "uk": {"name": "Ukrainian Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
         "ru": {"name": "Russian Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
         "tr": {"name": "Turkish Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "sv": {"name": "Swedish Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
     },
 
     # Pioneer.ai API (OpenAI-compatible — used for script writing & rewriting)

@@ -38,6 +38,7 @@ def _call_claude(system: str, messages: list, timeout: int = 300, max_retries: i
 # ── Script rewrite ────────────────────────────────────────────────────────────
 
 NUM_CHUNKS = 3  # Скільки частин на які розбити transcript
+_LAST_REWRITTEN_PARTS = []
 
 
 def _extract_code_block(text: str) -> str:
@@ -148,6 +149,9 @@ def _rewrite_script(transcript: str, language: str, video_title: str,
     Кожна частина шле окремий запит з коротким контекстом попередніх.
     Після кожного chunk беремо summary + tail для наступного.
     """
+    global _LAST_REWRITTEN_PARTS
+    _LAST_REWRITTEN_PARTS = []
+
     prompt_file = REWRITE_PROMPT_TEST_FILE if test_mode else REWRITE_PROMPT_FILE
     system = _load_prompt(prompt_file, language)
 
@@ -196,15 +200,18 @@ def _rewrite_script(transcript: str, language: str, video_title: str,
             prev_tail = " ".join(sents[-3:])[:400]
 
     full_script = "\n\n".join(rewritten_parts)
+    _LAST_REWRITTEN_PARTS = list(rewritten_parts)
     print(f"[rewriter] Script done in {len(chunks)} chunk(s) ({len(full_script)} chars)", flush=True)
     return full_script
 
 
-# Length is now relative to the original transcript:
-#   - minimum: 0.9x of original (script can't be shorter)
-#   - maximum: 1.4x of original (script can't be longer — prevents bloat)
-MIN_LENGTH_RATIO = 0.9
-MAX_LENGTH_RATIO = 1.4
+# Length is relative to the original transcript:
+#   - minimum: 0.50x of original
+#   - target:  0.55x of original
+#   - maximum: 0.60x of original
+MIN_LENGTH_RATIO = 0.50
+TARGET_LENGTH_RATIO = 0.55
+MAX_LENGTH_RATIO = 0.60
 
 
 def _length_bounds(original_length: int) -> tuple:
@@ -262,7 +269,7 @@ def _quality_check_script(script: str, transcript: str, language: str, test_mode
         f"REWRITTEN SCRIPT ({script_len} chars, {pct}% of original):\n{script_preview}\n\n"
         f"{'...[truncated]' if script_len > 4000 else ''}\n\n"
         f"Evaluate the rewritten script on these criteria:\n"
-        f"1. LENGTH: Must be between 90% and 140% of the original. "
+        f"1. LENGTH: Must be between 50% and 60% of the original, with an ideal target near 55%. "
         f"(original={orig_len} chars, rewritten={script_len} chars = {pct}%, "
         f"allowed range: {min_chars}-{max_chars} chars)\n"
         f"2. COMPLETENESS: Are all key events, facts, and narrative beats preserved?\n"
@@ -271,7 +278,7 @@ def _quality_check_script(script: str, transcript: str, language: str, test_mode
         f"4. NO REPETITION: Is it free of unnecessary repetition or filler?\n"
         f"5. LANGUAGE: Is it correctly and fluently written in {language}?\n"
         f"6. UNIQUENESS: Is it genuinely rewritten (not just synonymized)?\n\n"
-        f"Scoring: 1-10. PASSED if score >= 7 AND length is between 90% and 140% of original.\n\n"
+        f"Scoring: 1-10. PASSED if score >= 7 AND length is between 50% and 60% of original.\n\n"
         f"Reply with JSON only, no markdown:\n"
         f'{{\"score\": 8, \"passed\": true, \"issues\": [\"issue1\", \"issue2\"], '
         f'\"feedback\": \"Specific actionable feedback for improvement\"}}'
@@ -295,13 +302,13 @@ def _quality_check_script(script: str, transcript: str, language: str, test_mode
                 passed   = False
                 feedback = (
                     f"Script is too short: {script_len} chars ({pct}% of original {orig_len} chars). "
-                    f"Must be at least {min_chars} chars (90% of original). " + feedback
+                    f"Must be at least {min_chars} chars (50% of original). " + feedback
                 )
             elif script_len > max_chars:
                 passed   = False
                 feedback = (
                     f"Script is too long: {script_len} chars ({pct}% of original {orig_len} chars). "
-                    f"Must be at most {max_chars} chars (140% of original). "
+                    f"Must be at most {max_chars} chars (60% of original). "
                     f"Rewrite more concisely while preserving all key events. " + feedback
                 )
 
@@ -316,6 +323,88 @@ def _quality_check_script(script: str, transcript: str, language: str, test_mode
         print(f"[rewriter] Quality check error (skipping): {e}", flush=True)
         # Якщо check впав — не блокуємо пайплайн
         return True, ""
+
+
+def _continuity_windows(parts: list, window_chars: int = 900) -> str:
+    """Return compact boundary excerpts so the model can inspect chunk joins."""
+    windows = []
+    for i in range(len(parts) - 1):
+        left = parts[i].strip()[-window_chars:]
+        right = parts[i + 1].strip()[:window_chars]
+        windows.append(
+            f"BOUNDARY {i + 1}->{i + 2}\n"
+            f"END OF PART {i + 1}:\n{left}\n\n"
+            f"START OF PART {i + 2}:\n{right}"
+        )
+    return "\n\n---\n\n".join(windows)
+
+
+def _continuity_check_script(script: str, parts: list, language: str) -> tuple:
+    """
+    Check whether rewritten chunks join naturally. Returns (passed, feedback).
+    If the check itself fails, do not block production.
+    """
+    if len(parts) < 2:
+        return True, ""
+
+    system = (
+        "You are a strict continuity editor for long YouTube voiceover scripts. "
+        "Your job is to inspect joins between rewritten chunks and identify only real problems."
+    )
+    user_msg = (
+        f"Target language: {language}\n\n"
+        f"Inspect these chunk boundaries from one already rewritten script.\n"
+        f"Check for repeated openings, repeated summaries, abrupt transitions, duplicated facts, "
+        f"contradictions between parts, or a middle part that starts like a new video.\n"
+        f"Do NOT complain about normal topic continuation.\n\n"
+        f"{_continuity_windows(parts)}\n\n"
+        f"Reply with JSON only, no markdown:\n"
+        f'{{"passed": true, "issues": ["issue1"], "feedback": "short actionable edit instruction"}}'
+    )
+
+    try:
+        text, _ = _call_claude(system, [{"role": "user", "content": user_msg}], timeout=180)
+        text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+        text = re.sub(r"\s*```$", "", text)
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        data = json.loads(m.group() if m else text)
+        passed = bool(data.get("passed", False))
+        issues = data.get("issues", [])
+        feedback = data.get("feedback", "")
+        print(f"[rewriter] Continuity check: passed={passed}, issues={issues}", flush=True)
+        return passed, feedback
+    except Exception as e:
+        print(f"[rewriter] Continuity check error (skipping): {e}", flush=True)
+        return True, ""
+
+
+def _polish_script_continuity(script: str, language: str, min_chars: int, max_chars: int,
+                              feedback: str) -> str:
+    """
+    One full-script polish pass for chunk joins only. Keeps facts and length budget.
+    """
+    system = (
+        "You are a professional continuity editor for YouTube voiceover scripts. "
+        "You do not add facts. You only smooth transitions, remove duplicated openings, "
+        "remove repeated summaries, and make the script read as one continuous narration."
+    )
+    user_msg = (
+        f"Target language: {language}\n"
+        f"Required length: {min_chars}-{max_chars} characters. Ideal target is about "
+        f"{int((min_chars + max_chars) / 2)} characters.\n"
+        f"Continuity feedback to fix:\n{feedback}\n\n"
+        f"Polish the full script below so the chunk joins feel seamless.\n"
+        f"Rules:\n"
+        f"- Keep the same language.\n"
+        f"- Do not add new facts, claims, scenes, numbers, names, or events.\n"
+        f"- Do not remove key events.\n"
+        f"- Do not make it longer than {max_chars} characters or shorter than {min_chars} characters.\n"
+        f"- Preserve a strong opening and a strong final closing.\n"
+        f"- Output only the polished script in one code block.\n\n"
+        f"SCRIPT:\n{script}"
+    )
+    text, _ = _call_claude(system, [{"role": "user", "content": user_msg}], timeout=360)
+    return _extract_code_block(text)
 
 
 # ── Metadata rewrite ──────────────────────────────────────────────────────────
@@ -529,7 +618,8 @@ def rewrite_all(
     else:
         print(
             f"[rewriter] Length target: {min_chars}-{max_chars} chars "
-            f"(original={orig_len}, range 0.9x-1.4x)",
+            f"(original={orig_len}, target {int(TARGET_LENGTH_RATIO * 100)}%, "
+            f"range {int(MIN_LENGTH_RATIO * 100)}%-{int(MAX_LENGTH_RATIO * 100)}%)",
             flush=True,
         )
         for attempt in range(MAX_REWRITE_ATTEMPTS):
@@ -540,13 +630,32 @@ def rewrite_all(
             )
             script = _rewrite_script(transcript, language, source_title, feedback=feedback, test_mode=False)
 
-            # Hard cap on length: if model overshot 1.4x, trim at sentence boundary
+            # Hard cap on length: if model overshot 60%, trim at sentence boundary
             if len(script) > max_chars:
                 old_len = len(script)
                 script  = _trim_script(script, max_chars)
                 print(
                     f"[rewriter] Script trimmed from {old_len} to {len(script)} chars "
                     f"(max allowed: {max_chars})",
+                    flush=True,
+                )
+
+            parts = list(_LAST_REWRITTEN_PARTS) or [p for p in script.split("\n\n") if p.strip()]
+            continuity_ok, continuity_feedback = _continuity_check_script(script, parts, language)
+            if not continuity_ok:
+                print("[rewriter] Continuity polish pass...", flush=True)
+                old_len = len(script)
+                script = _polish_script_continuity(
+                    script=script,
+                    language=language,
+                    min_chars=min_chars,
+                    max_chars=max_chars,
+                    feedback=continuity_feedback,
+                )
+                if len(script) > max_chars:
+                    script = _trim_script(script, max_chars)
+                print(
+                    f"[rewriter] Continuity polish done: {old_len} -> {len(script)} chars",
                     flush=True,
                 )
 

@@ -14,6 +14,10 @@ def _get_voice_profile(language: str) -> dict:
     settings = config.load_settings()
     profiles = settings.get("voice_profiles", {})
     profile = profiles.get(language)
+    if not profile and language == "sv":
+        legacy = profiles.get("sw")
+        if legacy and "swedish" in legacy.get("name", "").lower():
+            profile = legacy
     if not profile:
         raise ValueError(f"No voice profile configured for language: {language}")
     if not profile.get("voice_id"):

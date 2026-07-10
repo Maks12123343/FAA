@@ -20,7 +20,7 @@ Mandatory:
 * performing deep rephrasing (not synonymization, but full reworking)
 * preserving the atmosphere, style, and emotional tone of the original
 * making the text natural for auditory perception
-* expanding explanations where the original is brief — add natural transitions, emotional depth, and context that helps the listener understand
+* compressing the narration while preserving all key events, cause-and-effect, and emotional impact
 
 LANGUAGE AND STYLE
 * Target language: {language}
@@ -48,13 +48,14 @@ Before delivering the result, ensure that:
 If in doubt — choose a more literal preservation of meaning.
 
 LENGTH CONTROL — CRITICAL
-* The final text length MUST be between 90% and 140% of the original. Both bounds are non-negotiable.
-* Target: roughly the same length as the original, with light expansion (10-20%) only when necessary for natural rephrasing or smooth transitions.
-* Excessive compression is STRICTLY FORBIDDEN — never write less than 90% of the original.
-* Excessive expansion is STRICTLY FORBIDDEN — never write more than 140% of the original. Do not pad, do not add filler, do not invent additional context to inflate length.
-* If you find yourself writing less than 90% — stop, go back, and expand each section.
-* If you find yourself writing more than 140% — stop, go back, and tighten the prose.
-* Count your characters before submitting. Confirm you are within the 90%-140% window.
+* The final text length MUST be between 50% and 60% of the original. Both bounds are non-negotiable.
+* Ideal target: about 55% of the original.
+* Compress the source intelligently: keep all key events, facts, names, numbers, cause-and-effect, and narrative beats, but remove filler, repeated explanations, slow setup, and non-essential wording.
+* Excessive compression is forbidden — never write less than 50% of the original.
+* Excessive expansion is forbidden — never write more than 60% of the original. Do not pad, do not add filler, do not invent additional context to inflate length.
+* If you find yourself writing less than 50% — restore important details and context.
+* If you find yourself writing more than 60% — tighten the prose and remove repetition.
+* Count your characters before submitting. Confirm you are within the 50%-60% window and close to the 55% target.
 
 RESPONSE FORMAT (STRICTLY MANDATORY)
 * Main text: only in a code block; without comments inside

@@ -87,11 +87,21 @@ def _niches() -> list:
 def _languages() -> list:
     settings = config.load_settings()
     profiles = settings.get("voice_profiles", {})
-    return [
-        {"code": code, "name": p["name"]}
-        for code, p in profiles.items()
-        if p.get("voice_id")
-    ]
+    languages = []
+    seen = set()
+    for code, profile in profiles.items():
+        if not profile.get("voice_id"):
+            continue
+        out_code = code
+        name = profile.get("name", code)
+        if code == "sw" and "swedish" in name.lower():
+            out_code = "sv"
+            name = "Swedish Voice"
+        if out_code in seen:
+            continue
+        seen.add(out_code)
+        languages.append({"code": out_code, "name": name})
+    return languages
 
 
 # ── Pages ─────────────────────────────────────────────────────────────────────
