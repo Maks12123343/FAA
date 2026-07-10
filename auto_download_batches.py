@@ -14,6 +14,7 @@ DEFAULT_HOST = "91.150.160.38"
 DEFAULT_PORT = "11655"
 DEFAULT_USER = "root"
 DEFAULT_REMOTE_PROJECTS = "/workspace/FAA/projects"
+DEFAULT_REMOTE_LOG = "/tmp/faa.log"
 DEFAULT_NICHE = "russia_ukraine_war"
 DEFAULT_LANGUAGES = ["pl", "tr", "cs", "ro", "hu", "sv"]
 
@@ -93,6 +94,56 @@ print("FAA_JSON_END")
 """
 
 
+REMOTE_PROJECT_INFO_SCRIPT = r"""
+import json
+import os
+import re
+
+mp4 = __MP4_PATH__
+niche = __NICHE__
+languages = set(__LANGUAGES__)
+project_dir = os.path.dirname(mp4)
+project_id = os.path.basename(project_dir)
+expected_mp4 = os.path.join(project_dir, project_id + ".mp4")
+meta = os.path.join(project_dir, "metadata.json")
+script = os.path.join(project_dir, "script.txt")
+pattern = re.compile(r"^" + re.escape(niche) + r"_(?P<lang>[a-z]{2,5})_(?P<ts>\d+)$")
+m = pattern.match(project_id)
+
+item = None
+if m and os.path.realpath(mp4) == os.path.realpath(expected_mp4):
+    lang = m.group("lang")
+    if (not languages or lang in languages) and os.path.exists(mp4) and os.path.exists(meta) and os.path.exists(script):
+        try:
+            size = os.path.getsize(mp4)
+            mtime = max(os.path.getmtime(project_dir), os.path.getmtime(mp4), os.path.getmtime(meta))
+            if size >= 1024 * 1024:
+                title = ""
+                try:
+                    with open(meta, encoding="utf-8") as f:
+                        title = str(json.load(f).get("title", ""))
+                except Exception:
+                    pass
+                item = {
+                    "project_id": project_id,
+                    "project_dir": project_dir,
+                    "language": lang,
+                    "timestamp": int(m.group("ts")),
+                    "mtime": float(mtime),
+                    "mp4": mp4,
+                    "metadata": meta,
+                    "size": int(size),
+                    "title": title,
+                }
+        except OSError:
+            pass
+
+print("FAA_JSON_START")
+print(json.dumps(item, ensure_ascii=False))
+print("FAA_JSON_END")
+"""
+
+
 def _run(cmd, *, input_text=None, timeout=None):
     return subprocess.run(
         cmd,
@@ -151,6 +202,60 @@ def scan_ready_projects(args) -> list:
     return _extract_json(result.stdout)
 
 
+def fetch_remote_log(args) -> str:
+    cmd = _ssh_base(args) + [f"tail -n {int(args.log_tail)} {args.remote_log} 2>/dev/null || true"]
+    result = _run(cmd, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "remote log read failed").strip())
+    return result.stdout or ""
+
+
+def ready_paths_from_log(text: str) -> list:
+    paths = []
+    seen = set()
+    patterns = [
+        r"Video ready:\s+(/workspace/FAA/projects/\S+?\.mp4)",
+        r"Final polish done in [^:]+:\s+(/workspace/FAA/projects/\S+?\.mp4)",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            path = match.group(1).strip().rstrip(".,;")
+            if path not in seen:
+                seen.add(path)
+                paths.append(path)
+    return paths
+
+
+def project_info_from_mp4(args, mp4_path: str) -> dict | None:
+    script = (
+        REMOTE_PROJECT_INFO_SCRIPT
+        .replace("__MP4_PATH__", repr(mp4_path))
+        .replace("__NICHE__", repr(args.niche))
+        .replace("__LANGUAGES__", repr(args.languages))
+    )
+    cmd = _ssh_base(args) + ["python3 -"]
+    result = _run(cmd, input_text=script, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "project info failed").strip())
+    return _extract_json(result.stdout)
+
+
+def ready_projects_from_log(args) -> list:
+    items = []
+    seen = set()
+    for mp4_path in ready_paths_from_log(fetch_remote_log(args)):
+        item = project_info_from_mp4(args, mp4_path)
+        if not item:
+            continue
+        pid = item["project_id"]
+        if pid in seen:
+            continue
+        seen.add(pid)
+        items.append(item)
+    items.sort(key=lambda x: (x["mtime"], x["timestamp"]))
+    return items
+
+
 def load_state(path: Path) -> dict:
     if not path.exists():
         return {"downloaded": {}, "ignored": {}, "active_batch": None}
@@ -175,14 +280,14 @@ def save_state(path: Path, state: dict) -> None:
     tmp.replace(path)
 
 
-def latest_per_language(items: list, languages: list, downloaded: dict) -> list:
+def latest_per_language(items: list, languages: list, downloaded: dict, ignored: dict) -> list:
     selected = []
     seen = set()
     for item in items:
         lang = item["language"]
         if lang not in languages or lang in seen:
             continue
-        if item["project_id"] in downloaded:
+        if item["project_id"] in downloaded or item["project_id"] in ignored:
             seen.add(lang)
             continue
         selected.append(item)
@@ -319,9 +424,40 @@ def maybe_close_batch(args, state: dict) -> None:
 
 
 def run_once(args, state: dict, initial: bool) -> int:
+    if args.mode == "log":
+        queue = all_new_ready(
+            ready_projects_from_log(args),
+            args.languages,
+            state["downloaded"],
+            state.get("ignored", {}),
+        )
+        if args.dry_run:
+            print("[dry-run] ready projects from log:")
+            for item in queue:
+                print(f"[dry-run] {item['language']}: {item['project_id']} ({item['size']} bytes)")
+            return 0
+        if not queue:
+            print("[log] no new Video ready lines")
+            return 0
+        print("[log] ready to download: " + ", ".join(x["project_id"] for x in queue))
+        count = 0
+        for item in queue:
+            try:
+                if download_project(args, state, item):
+                    count += 1
+            except Exception as e:
+                print(f"[error] {item['project_id']}: {e}", file=sys.stderr)
+        maybe_close_batch(args, state)
+        return count
+
     items = scan_ready_projects(args)
     if initial and args.latest_per_language:
-        queue = latest_per_language(items, args.languages, state["downloaded"])
+        queue = latest_per_language(
+            items,
+            args.languages,
+            state["downloaded"],
+            state.get("ignored", {}),
+        )
         if args.dry_run:
             print("[dry-run] latest ready per language:")
             for item in queue:
@@ -370,13 +506,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", default=DEFAULT_PORT)
     parser.add_argument("--user", default=DEFAULT_USER)
     parser.add_argument("--remote-projects", default=DEFAULT_REMOTE_PROJECTS)
+    parser.add_argument("--remote-log", default=DEFAULT_REMOTE_LOG)
     parser.add_argument("--niche", default=DEFAULT_NICHE)
+    parser.add_argument(
+        "--mode",
+        choices=["log", "scan"],
+        default="log",
+        help="log = download exact projects from /tmp/faa.log Video ready lines; scan = scan newest ready folders.",
+    )
     parser.add_argument(
         "--languages",
         default=",".join(DEFAULT_LANGUAGES),
         help="Comma-separated languages to download. Default: pl,tr,cs,ro,hu,sv",
     )
     parser.add_argument("--poll", type=int, default=180, help="Seconds between scans in watch mode.")
+    parser.add_argument("--log-tail", type=int, default=1200, help="Remote log lines to inspect in log mode.")
     parser.add_argument("--once", action="store_true", help="Scan once and exit.")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be downloaded, without downloading.")
     parser.add_argument(
@@ -403,7 +547,10 @@ def parse_args() -> argparse.Namespace:
 def mark_existing_ignored(args, state: dict) -> None:
     if state.get("new_only_initialized"):
         return
-    items = scan_ready_projects(args)
+    if args.mode == "log":
+        items = ready_projects_from_log(args)
+    else:
+        items = scan_ready_projects(args)
     if args.dry_run:
         print(f"[dry-run][new-only] would ignore existing ready projects: {len(items)}")
         return
