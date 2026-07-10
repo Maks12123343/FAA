@@ -1109,14 +1109,13 @@ def _build_movie_video(clips: list, audio_path: str, output_path: str,
             raise RuntimeError("No segments created during assembly")
 
         if emit:
-            emit("montage", f"Joining {len(seg_files)} segments...")
+            emit("montage", f"Joining {len(seg_files)} segments (fast concat, no transitions)...")
 
         assembled = os.path.join(tmp, "_assembled.mp4")
         if len(seg_files) == 1:
             shutil.copy2(seg_files[0], assembled)
         else:
-            # Між деякими групами — різний fade_dur для динаміки
-            _xfade_join(seg_files, assembled, FADE_DUR, rng=rng)
+            _concat_clip_list(seg_files, assembled)
 
         # Перевіряємо чи відео покриває аудіо; якщо ні — лупимо
         assembled_dur = _get_duration(assembled)
