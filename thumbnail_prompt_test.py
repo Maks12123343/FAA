@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from backend import api_client
 
 
-DEFAULT_LANGUAGES = ["pl", "tr", "cs", "ro", "hu", "sw"]
+DEFAULT_LANGUAGES = ["pl", "tr", "cs", "ro", "hu", "sv"]
 
 ANALYSIS_SYSTEM = (
     "You are a precise YouTube thumbnail analyst. You describe what is visible "
@@ -263,7 +263,7 @@ def main() -> int:
     parser.add_argument(
         "--languages",
         default="",
-        help="Comma-separated target languages, or 'all' for pl,tr,cs,ro,hu,sw.",
+        help="Comma-separated target languages, or 'all' for pl,tr,cs,ro,hu,sv.",
     )
     parser.add_argument("--variants", type=int, default=3, help="How many prompt variants to generate")
     parser.add_argument("--out", default="", help="Output directory. Default: thumbnail_tests/<video_id>_<time>")

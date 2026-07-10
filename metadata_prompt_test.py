@@ -10,7 +10,7 @@ from backend import channel_scanner
 from backend import rewriter
 
 
-DEFAULT_LANGUAGES = ["pl", "tr", "cs", "ro", "hu", "sw"]
+DEFAULT_LANGUAGES = ["pl", "tr", "cs", "ro", "hu", "sv"]
 DEFAULT_OUT_DIR = r"D:\youtube\запаска 1"
 
 
@@ -86,7 +86,7 @@ def main() -> int:
     parser.add_argument(
         "--languages",
         default="all",
-        help="Comma-separated target languages, or 'all' for pl,tr,cs,ro,hu,sw.",
+        help="Comma-separated target languages, or 'all' for pl,tr,cs,ro,hu,sv.",
     )
     parser.add_argument(
         "--out-dir",

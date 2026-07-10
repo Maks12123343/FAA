@@ -420,7 +420,7 @@ socket.on('produce_done', data => {
   const safeId = escHtml(data.project_id || '');
   const langLabels = {
     pl: 'Polish', tr: 'Turkish', cs: 'Czech', ro: 'Romanian',
-    hu: 'Hungarian', sw: 'Swedish', de: 'German', fr: 'French',
+    hu: 'Hungarian', sv: 'Swedish', sw: 'Swahili', de: 'German', fr: 'French',
     es: 'Spanish', it: 'Italian', pt: 'Portuguese', en: 'English'
   };
   const langCode = String(data.language || '').toLowerCase();
