@@ -12,6 +12,7 @@ from flask import Flask, render_template, request, jsonify, send_file, Response,
 from flask_socketio import SocketIO, emit
 
 import config
+from backend import languages as lang_utils
 from backend import pipeline, media_library, clip_sourcer
 from backend import stocks_library, competitor_finder
 from backend import movie_library, movie_pipeline, war_pipeline
@@ -92,15 +93,12 @@ def _languages() -> list:
     for code, profile in profiles.items():
         if not profile.get("voice_id"):
             continue
-        out_code = code
-        name = profile.get("name", code)
-        if code == "sw" and "swedish" in name.lower():
-            out_code = "sv"
-            name = "Swedish Voice"
+        out_code = lang_utils.canonical_language_code(code, profile)
+        name = lang_utils.full_language_name(code, profile)
         if out_code in seen:
             continue
         seen.add(out_code)
-        languages.append({"code": out_code, "name": name})
+        languages.append({"code": out_code, "name": f"{name} Voice"})
     return languages
 
 
@@ -346,6 +344,9 @@ def api_produce():
                 for lang in pending:
                     try:
                         result = _produce_one_language(lang, attempt)
+                        if isinstance(result, dict):
+                            result.setdefault("language", lang)
+                            result["language_name"] = lang_utils.configured_language_name(lang)
                         socketio.emit("produce_done", result)
                         if attempt > 1:
                             _emit("retry", f"{lang} succeeded on attempt {attempt}/{MAX_LANGUAGE_ATTEMPTS}")

@@ -8,6 +8,7 @@ import hashlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
+from backend import languages as lang_utils
 
 
 def _cache_path(project_dir: str) -> str:
@@ -15,7 +16,8 @@ def _cache_path(project_dir: str) -> str:
 
 
 def _is_english(language: str) -> bool:
-    return language.lower().startswith("en")
+    value = (language or "").strip().lower()
+    return value.startswith("en") or value == "english"
 
 
 def translate_sections(section_texts: list, language: str, project_dir: str = None, emit=None) -> list:
@@ -47,7 +49,8 @@ def translate_sections(section_texts: list, language: str, project_dir: str = No
             except Exception:
                 pass
 
-    print(f"[translator] Translating {len(section_texts)} sections from '{language}' to English...", flush=True)
+    language_name = lang_utils.configured_language_name(language)
+    print(f"[translator] Translating {len(section_texts)} sections from '{language_name}' to English...", flush=True)
     if emit:
         emit("translate", f"Translating {len(section_texts)} sections to English for clip matching...")
 
@@ -76,6 +79,7 @@ def _batch_translate(texts: list, source_lang: str, emit=None) -> list:
     import urllib.request
 
     settings = config.load_settings()
+    source_lang_name = lang_utils.configured_language_name(source_lang)
     api_keys = settings.get("pioneer_api_keys", [])
     if isinstance(api_keys, str):
         api_keys = [k.strip() for k in api_keys.split(",") if k.strip()]
@@ -92,7 +96,7 @@ def _batch_translate(texts: list, source_lang: str, emit=None) -> list:
     for batch_idx, batch in enumerate(batches):
         numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(batch))
         prompt = (
-            f"Translate these {len(batch)} text segments from {source_lang} to English. "
+            f"Translate these {len(batch)} text segments from {source_lang_name} to English. "
             f"Keep the same numbering. Output ONLY the translations, one per line, numbered.\n\n"
             f"{numbered}"
         )

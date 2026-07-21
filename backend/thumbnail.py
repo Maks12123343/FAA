@@ -6,6 +6,7 @@ import os
 import time
 
 from backend import api_client
+from backend import languages as lang_utils
 
 THUMBNAIL_ATTEMPTS = 3
 
@@ -108,6 +109,7 @@ def analyze_and_rewrite(image_path: str, language: str, title: str = "", emit=No
     )
 
     _emit(emit, "Writing thumbnail generation prompt...")
+    language_name = lang_utils.configured_language_name(language)
     rewrite_prompt = f"""
 Use the competitor thumbnail analysis as a visual reference only. Do not verify facts and do not make factual claims.
 
@@ -117,7 +119,7 @@ Video title:
 {title or '(unknown)'}
 
 Target language for any visible thumbnail text:
-{language}
+{language_name}
 
 Write the final image-generation prompt in English only. The target language applies only to visible thumbnail text, and only if visible text is truly needed.
 

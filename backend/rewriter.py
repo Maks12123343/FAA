@@ -6,6 +6,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
+from backend import languages as lang_utils
 
 REWRITE_PROMPT_FILE      = os.path.join(config.DATA_DIR, "rewrite_prompt.txt")
 REWRITE_PROMPT_TEST_FILE = os.path.join(config.DATA_DIR, "rewrite_prompt_test.txt")
@@ -606,6 +607,7 @@ def rewrite_all(
     Returns: {script, title, titles, description, tags}
     test_mode: uses short prompt (~750 words), skips expand + quality check.
     """
+    language_name = lang_utils.configured_language_name(language)
     script   = ""
     feedback = ""
     orig_len = len(transcript)
@@ -613,7 +615,7 @@ def rewrite_all(
 
     if test_mode:
         print("[rewriter] TEST MODE: using short prompt (~750 words), skipping quality check", flush=True)
-        script = _rewrite_script(transcript, language, source_title, test_mode=True)
+        script = _rewrite_script(transcript, language_name, source_title, test_mode=True)
         print(f"[rewriter] TEST MODE: script done ({len(script)} chars)", flush=True)
     else:
         print(
@@ -628,7 +630,7 @@ def rewrite_all(
                 + (f" (feedback: {feedback[:80]}...)" if feedback else ""),
                 flush=True,
             )
-            script = _rewrite_script(transcript, language, source_title, feedback=feedback, test_mode=False)
+            script = _rewrite_script(transcript, language_name, source_title, feedback=feedback, test_mode=False)
 
             # Hard cap on length: if model overshot 60%, trim at sentence boundary
             if len(script) > max_chars:
@@ -641,13 +643,13 @@ def rewrite_all(
                 )
 
             parts = list(_LAST_REWRITTEN_PARTS) or [p for p in script.split("\n\n") if p.strip()]
-            continuity_ok, continuity_feedback = _continuity_check_script(script, parts, language)
+            continuity_ok, continuity_feedback = _continuity_check_script(script, parts, language_name)
             if not continuity_ok:
                 print("[rewriter] Continuity polish pass...", flush=True)
                 old_len = len(script)
                 script = _polish_script_continuity(
                     script=script,
-                    language=language,
+                    language=language_name,
                     min_chars=min_chars,
                     max_chars=max_chars,
                     feedback=continuity_feedback,
@@ -659,7 +661,7 @@ def rewrite_all(
                     flush=True,
                 )
 
-            passed, feedback = _quality_check_script(script, transcript, language, test_mode=False)
+            passed, feedback = _quality_check_script(script, transcript, language_name, test_mode=False)
             if passed:
                 print(f"[rewriter] Quality check PASSED on attempt {attempt + 1}", flush=True)
                 break
@@ -672,7 +674,7 @@ def rewrite_all(
                     print("[rewriter] WARNING: all attempts failed quality check, using last result", flush=True)
 
     meta = _rewrite_metadata(
-        language           = language,
+        language           = language_name,
         source_title       = source_title,
         source_description = source_description,
         source_tags        = source_tags or [],
@@ -692,7 +694,7 @@ def rewrite_all(
 # ── Legacy wrappers ───────────────────────────────────────────────────────────
 
 def rewrite(transcript: str, language: str, video_title: str) -> str:
-    return _rewrite_script(transcript, language, video_title)
+    return _rewrite_script(transcript, lang_utils.configured_language_name(language), video_title)
 
 def generate_title(script: str, language: str, original_title: str) -> str:
     return original_title
