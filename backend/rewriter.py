@@ -317,6 +317,68 @@ def _compress_until_in_bounds(
     return script
 
 
+def _compress_parts_to_bounds(
+    parts: list,
+    transcript: str,
+    language: str,
+    min_chars: int,
+    max_chars: int,
+    feedback: str = "",
+) -> tuple:
+    """Compress rewritten chunks separately so the API does not receive one huge prompt."""
+    clean_parts = [p.strip() for p in parts if p and p.strip()]
+    if not clean_parts:
+        return "", []
+
+    current_total = sum(len(p) for p in clean_parts)
+    target_total = int(len(transcript) * TARGET_LENGTH_RATIO)
+    compressed = []
+
+    system = (
+        "You are a senior voiceover editor. You compress one part of a longer "
+        "script while preserving facts, logic, and natural narration."
+    )
+
+    for idx, part in enumerate(clean_parts, start=1):
+        share = len(part) / max(current_total, 1)
+        part_target = max(600, int(target_total * share))
+        part_min = max(400, int(min_chars * share))
+        part_max = max(part_min + 200, int(max_chars * share))
+        position = "first" if idx == 1 else "last" if idx == len(clean_parts) else "middle"
+        user_msg = (
+            f"Target language: {language}\n"
+            f"This is part {idx}/{len(clean_parts)} of one longer voiceover script. "
+            f"Position: {position.upper()}.\n"
+            f"Compress this part to about {part_target} characters. "
+            f"Hard range for this part: {part_min}-{part_max} characters.\n\n"
+            f"Rules:\n"
+            f"- Do not simply delete the ending of this part.\n"
+            f"- Preserve all key events, names, numbers, cause-and-effect, and narrative beats.\n"
+            f"- Remove filler, repeated explanations, slow setup, and non-essential wording.\n"
+            f"- Do not add new facts, new claims, or new scenes.\n"
+            f"- Keep the part natural for voiceover.\n"
+            f"- If this is the first part, preserve the opening hook.\n"
+            f"- If this is the last part, preserve the final closing thought.\n"
+            f"- Output only the compressed part in one code block.\n"
+        )
+        if feedback:
+            user_msg += f"\nPrevious quality feedback to respect:\n{feedback}\n"
+        user_msg += f"\nPART TO COMPRESS:\n{part}"
+
+        print(
+            f"[rewriter] Compressing part {idx}/{len(clean_parts)} "
+            f"({len(part)} chars -> target {part_target})",
+            flush=True,
+        )
+        text, _ = _call_claude(system, [{"role": "user", "content": user_msg}], timeout=300)
+        compressed_part = _extract_code_block(text)
+        compressed.append(compressed_part)
+
+    script = "\n\n".join(compressed).strip()
+    print(f"[rewriter] Chunk compression total: {current_total} -> {len(script)} chars", flush=True)
+    return script, compressed
+
+
 # ── Quality check ─────────────────────────────────────────────────────────────
 
 def _quality_check_script(script: str, transcript: str, language: str, test_mode: bool = False) -> tuple:
@@ -712,20 +774,41 @@ def rewrite_all(
             # If the model overshot 60%, compress the whole script with an LLM
             # pass instead of cutting off sentences from the end.
             was_compressed = False
+            parts = list(_LAST_REWRITTEN_PARTS) or [p for p in script.split("\n\n") if p.strip()]
             if len(script) > max_chars:
-                script = _compress_until_in_bounds(
-                    script=script,
-                    transcript=transcript,
-                    language=language_name,
-                    min_chars=min_chars,
-                    max_chars=max_chars,
-                    feedback=feedback,
-                )
+                if len(parts) > 1:
+                    script, parts = _compress_parts_to_bounds(
+                        parts=parts,
+                        transcript=transcript,
+                        language=language_name,
+                        min_chars=min_chars,
+                        max_chars=max_chars,
+                        feedback=feedback,
+                    )
+                    if len(script) > max_chars:
+                        script, parts = _compress_parts_to_bounds(
+                            parts=parts,
+                            transcript=transcript,
+                            language=language_name,
+                            min_chars=min_chars,
+                            max_chars=max_chars,
+                            feedback=(
+                                "The previous compression is still too long. "
+                                "Compress more aggressively but keep the ending and key facts."
+                            ),
+                        )
+                else:
+                    script = _compress_until_in_bounds(
+                        script=script,
+                        transcript=transcript,
+                        language=language_name,
+                        min_chars=min_chars,
+                        max_chars=max_chars,
+                        feedback=feedback,
+                    )
+                    parts = [script]
                 was_compressed = True
 
-            parts = [script] if was_compressed else (
-                list(_LAST_REWRITTEN_PARTS) or [p for p in script.split("\n\n") if p.strip()]
-            )
             continuity_ok, continuity_feedback = _continuity_check_script(script, parts, language_name)
             if not continuity_ok:
                 print("[rewriter] Continuity polish pass...", flush=True)
