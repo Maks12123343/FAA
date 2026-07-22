@@ -11,6 +11,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
+from backend import languages as lang_utils
 
 MIN_SCRIPT_LENGTH = 20000
 
@@ -140,6 +141,7 @@ def generate_script(topic: str, language: str,
     If feedback is provided, it's included as correction instructions.
     Returns the full script text.
     """
+    language = lang_utils.configured_language_name(language)
     auto_notes = _psychology_movie_appendix(topic, style_notes)
     combined_style = style_notes.strip()
     if auto_notes:
@@ -183,6 +185,7 @@ def generate_script(topic: str, language: str,
 
 def _expand_script(script: str, topic: str, language: str) -> str:
     """Loop until script reaches MIN_SCRIPT_LENGTH."""
+    language = lang_utils.configured_language_name(language)
     MAX_ATTEMPTS = 3
 
     for attempt in range(MAX_ATTEMPTS):
@@ -240,6 +243,7 @@ def generate_metadata(topic: str, language: str, script: str) -> dict:
     Titles include Ukrainian translations (format: "Title — Переклад").
     Tags block is 490-500 characters total.
     """
+    language = lang_utils.configured_language_name(language)
     script_preview = script[:4000]
     user_msg = (
         f"Target language: {language}\n"

@@ -241,6 +241,82 @@ def _trim_script(script: str, max_chars: int) -> str:
     return cut.rstrip()
 
 
+def _compress_script_to_bounds(
+    script: str,
+    transcript: str,
+    language: str,
+    min_chars: int,
+    max_chars: int,
+    feedback: str = "",
+) -> str:
+    """
+    Rewrite an overlong script down to the required length window.
+
+    This is intentionally not a mechanical trim: the model must compress the
+    whole narration, preserve the ending, and keep the source facts intact.
+    """
+    orig_len = len(transcript)
+    target_chars = int(orig_len * TARGET_LENGTH_RATIO)
+    system = (
+        "You are a senior voiceover editor. You compress completed scripts "
+        "without cutting off the ending, without adding facts, and without "
+        "changing the meaning."
+    )
+    user_msg = (
+        f"Target language: {language}\n"
+        f"Original transcript length: {orig_len} characters.\n"
+        f"Required final script length: {min_chars}-{max_chars} characters.\n"
+        f"Ideal target: about {target_chars} characters.\n\n"
+        f"The current rewritten script is too long: {len(script)} characters.\n"
+        f"Compress the WHOLE script to the required range.\n\n"
+        f"Rules:\n"
+        f"- Do NOT simply delete the ending.\n"
+        f"- Preserve the opening hook and the final closing thought.\n"
+        f"- Preserve all key events, names, numbers, cause-and-effect, and narrative beats.\n"
+        f"- Remove filler, repeated explanations, slow setup, and non-essential wording.\n"
+        f"- Do not add new facts, new claims, or new scenes.\n"
+        f"- Keep the result natural for voiceover.\n"
+        f"- Output only the compressed script in one code block.\n"
+    )
+    if feedback:
+        user_msg += f"\nPrevious quality feedback to respect:\n{feedback}\n"
+    user_msg += f"\nSCRIPT TO COMPRESS:\n{script}"
+
+    text, _ = _call_claude(system, [{"role": "user", "content": user_msg}], timeout=360)
+    return _extract_code_block(text)
+
+
+def _compress_until_in_bounds(
+    script: str,
+    transcript: str,
+    language: str,
+    min_chars: int,
+    max_chars: int,
+    feedback: str = "",
+    max_attempts: int = 2,
+) -> str:
+    """Try LLM compression a few times; never use blind sentence trimming."""
+    for attempt in range(1, max_attempts + 1):
+        if len(script) <= max_chars:
+            break
+        old_len = len(script)
+        print(
+            f"[rewriter] Script over length ({old_len}>{max_chars}); "
+            f"compression pass {attempt}/{max_attempts}",
+            flush=True,
+        )
+        script = _compress_script_to_bounds(
+            script=script,
+            transcript=transcript,
+            language=language,
+            min_chars=min_chars,
+            max_chars=max_chars,
+            feedback=feedback,
+        )
+        print(f"[rewriter] Compression pass {attempt}: {old_len} -> {len(script)} chars", flush=True)
+    return script
+
+
 # ── Quality check ─────────────────────────────────────────────────────────────
 
 def _quality_check_script(script: str, transcript: str, language: str, test_mode: bool = False) -> tuple:
@@ -624,6 +700,7 @@ def rewrite_all(
             f"range {int(MIN_LENGTH_RATIO * 100)}%-{int(MAX_LENGTH_RATIO * 100)}%)",
             flush=True,
         )
+        quality_passed = False
         for attempt in range(MAX_REWRITE_ATTEMPTS):
             print(
                 f"[rewriter] Rewrite attempt {attempt + 1}/{MAX_REWRITE_ATTEMPTS}"
@@ -632,17 +709,23 @@ def rewrite_all(
             )
             script = _rewrite_script(transcript, language_name, source_title, feedback=feedback, test_mode=False)
 
-            # Hard cap on length: if model overshot 60%, trim at sentence boundary
+            # If the model overshot 60%, compress the whole script with an LLM
+            # pass instead of cutting off sentences from the end.
+            was_compressed = False
             if len(script) > max_chars:
-                old_len = len(script)
-                script  = _trim_script(script, max_chars)
-                print(
-                    f"[rewriter] Script trimmed from {old_len} to {len(script)} chars "
-                    f"(max allowed: {max_chars})",
-                    flush=True,
+                script = _compress_until_in_bounds(
+                    script=script,
+                    transcript=transcript,
+                    language=language_name,
+                    min_chars=min_chars,
+                    max_chars=max_chars,
+                    feedback=feedback,
                 )
+                was_compressed = True
 
-            parts = list(_LAST_REWRITTEN_PARTS) or [p for p in script.split("\n\n") if p.strip()]
+            parts = [script] if was_compressed else (
+                list(_LAST_REWRITTEN_PARTS) or [p for p in script.split("\n\n") if p.strip()]
+            )
             continuity_ok, continuity_feedback = _continuity_check_script(script, parts, language_name)
             if not continuity_ok:
                 print("[rewriter] Continuity polish pass...", flush=True)
@@ -655,7 +738,14 @@ def rewrite_all(
                     feedback=continuity_feedback,
                 )
                 if len(script) > max_chars:
-                    script = _trim_script(script, max_chars)
+                    script = _compress_until_in_bounds(
+                        script=script,
+                        transcript=transcript,
+                        language=language_name,
+                        min_chars=min_chars,
+                        max_chars=max_chars,
+                        feedback=continuity_feedback,
+                    )
                 print(
                     f"[rewriter] Continuity polish done: {old_len} -> {len(script)} chars",
                     flush=True,
@@ -663,6 +753,7 @@ def rewrite_all(
 
             passed, feedback = _quality_check_script(script, transcript, language_name, test_mode=False)
             if passed:
+                quality_passed = True
                 print(f"[rewriter] Quality check PASSED on attempt {attempt + 1}", flush=True)
                 break
             else:
@@ -670,8 +761,17 @@ def rewrite_all(
                     f"[rewriter] Quality check FAILED on attempt {attempt + 1}: {feedback[:120]}",
                     flush=True,
                 )
-                if attempt == MAX_REWRITE_ATTEMPTS - 1:
-                    print("[rewriter] WARNING: all attempts failed quality check, using last result", flush=True)
+        if not quality_passed:
+            raise RuntimeError(
+                "Rewrite quality check failed after "
+                f"{MAX_REWRITE_ATTEMPTS} attempts. Last feedback: {feedback[:500]}"
+            )
+
+        if not (min_chars <= len(script) <= max_chars):
+            raise RuntimeError(
+                f"Rewrite length out of bounds after correction: {len(script)} chars "
+                f"(allowed {min_chars}-{max_chars})."
+            )
 
     meta = _rewrite_metadata(
         language           = language_name,

@@ -270,6 +270,18 @@ def clip_embed_text(clip: dict) -> str:
     desc = clip.get("description", "")
     if desc:
         parts.append(desc)
+    action = clip.get("action", "")
+    if action:
+        parts.append("Action: " + action)
+    setting = clip.get("setting", "")
+    if setting:
+        parts.append("Setting: " + setting.replace("_", " "))
+    camera_view = clip.get("camera_view", "")
+    if camera_view:
+        parts.append("Camera view: " + camera_view.replace("_", " "))
+    visible_objects = clip.get("visible_objects", []) or []
+    if visible_objects:
+        parts.append("Visible objects: " + ", ".join(str(v).replace("_", " ") for v in visible_objects))
     chars = clip.get("characters", []) or []
     if chars:
         parts.append("Characters: " + ", ".join(chars))

@@ -29,6 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
 from backend import tts, api_client
+from backend import languages as lang_utils
 from backend.transcriber import get_transcript
 from backend.rewriter import rewrite_all
 from backend.aligner import _get_duration
@@ -417,20 +418,6 @@ Return ONLY a JSON array, no markdown, no commentary:
 ]
 """
 
-_LANGUAGE_NAMES = {
-    "en": "English", "uk": "Ukrainian", "ru": "Russian", "de": "German",
-    "fr": "French", "es": "Spanish", "pl": "Polish", "it": "Italian",
-    "tr": "Turkish", "pt": "Portuguese", "cs": "Czech", "ro": "Romanian",
-    "hu": "Hungarian", "sv": "Swedish", "ja": "Japanese", "nl": "Dutch",
-    "no": "Norwegian", "da": "Danish", "fi": "Finnish", "el": "Greek",
-    "bg": "Bulgarian", "hr": "Croatian", "sr": "Serbian", "sk": "Slovak",
-    "sl": "Slovenian", "et": "Estonian", "lv": "Latvian", "lt": "Lithuanian",
-    "ko": "Korean", "zh": "Chinese", "ar": "Arabic", "he": "Hebrew",
-    "hi": "Hindi", "id": "Indonesian", "vi": "Vietnamese", "th": "Thai",
-    "ms": "Malay", "fa": "Persian", "ur": "Urdu", "bn": "Bengali",
-}
-
-
 def _plan_text_overlays_war(segments_with_times: list, language: str, emit=None) -> list:
     """
     War-specific overlay planner: highlight ONLY named entities (places, tech,
@@ -443,7 +430,7 @@ def _plan_text_overlays_war(segments_with_times: list, language: str, emit=None)
         return []
 
     settings = config.load_settings()
-    lang_name = _LANGUAGE_NAMES.get(language, language)
+    lang_name = lang_utils.configured_language_name(language)
 
     seg_data = [
         {
@@ -862,6 +849,7 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         "project_id": proj_id,
         "project_dir": proj_dir,
         "language": language,
+        "language_name": lang_utils.configured_language_name(language),
         "thumbnail_prompt": _thumb_prompt,
         "output_path": output_path,
         "audio_dur": round(audio_dur, 1),
