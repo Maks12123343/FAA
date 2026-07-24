@@ -68,6 +68,15 @@ def _safe_id(value: str, field: str = "id") -> str:
     return v
 
 
+def _is_inside_dir(path: str, parent: str) -> bool:
+    try:
+        real_parent = os.path.realpath(parent)
+        real_path = os.path.realpath(path)
+        return os.path.commonpath([real_parent, real_path]) == real_parent
+    except ValueError:
+        return False
+
+
 def _niches() -> list:
     niches = []
     for f in os.listdir(config.NICHES_DIR):
@@ -468,6 +477,141 @@ def library_stats():
     return jsonify(media_library.get_library_stats(niche))
 
 
+def _ready_project_paths(project_id: str, project_dir: str) -> tuple[str | None, str | None]:
+    """Return (video_path, metadata_path) for a finished project folder."""
+    candidates = [
+        os.path.join(project_dir, "output.mp4"),
+        os.path.join(project_dir, f"{project_id}.mp4"),
+    ]
+    video_path = next((p for p in candidates if os.path.exists(p)), None)
+    metadata_path = os.path.join(project_dir, "metadata.json")
+    if not os.path.exists(metadata_path):
+        metadata_path = None
+    return video_path, metadata_path
+
+
+def _infer_project_language(project_id: str, meta: dict | None = None) -> str:
+    """Project ids are usually <niche/movie>_<lang>_<timestamp>."""
+    if meta and isinstance(meta.get("language"), str):
+        return meta["language"].strip().lower()
+    m = re.search(r"_([a-z]{2,5})_\d+$", project_id)
+    return m.group(1).lower() if m else ""
+
+
+def _canonical_ready_language(language: str) -> str:
+    code = (language or "").strip().lower()
+    if code == "sw" and lang_utils.configured_language_name(code).lower() == "swedish":
+        return "sv"
+    return code
+
+
+def _load_project_meta(metadata_path: str | None) -> dict:
+    if not metadata_path:
+        return {}
+    try:
+        with open(metadata_path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _ready_project_item(project_id: str, project_dir: str) -> dict | None:
+    if not _is_inside_dir(project_dir, config.PROJECTS_DIR):
+        return None
+
+    video_path, metadata_path = _ready_project_paths(project_id, project_dir)
+    if not video_path or not metadata_path:
+        return None
+    try:
+        size = os.path.getsize(video_path)
+        if size < 1024 * 1024:
+            return None
+        mtime = max(os.path.getmtime(video_path), os.path.getmtime(metadata_path))
+    except OSError:
+        return None
+
+    meta = _load_project_meta(metadata_path)
+    thumbnail_prompt = ""
+    thumb_prompt_path = os.path.join(project_dir, "thumbnail_prompt.txt")
+    if os.path.exists(thumb_prompt_path):
+        try:
+            with open(thumb_prompt_path, encoding="utf-8") as f:
+                thumbnail_prompt = f.read().strip()
+        except Exception:
+            thumbnail_prompt = ""
+    raw_lang = _infer_project_language(project_id, meta)
+    lang = _canonical_ready_language(raw_lang)
+    return {
+        "project_id": project_id,
+        "language": lang,
+        "language_raw": raw_lang,
+        "language_name": lang_utils.configured_language_name(lang) if lang else "",
+        "title": meta.get("title", ""),
+        "all_titles": meta.get("titles", []),
+        "description": meta.get("description", ""),
+        "tags": meta.get("tags", []),
+        "tags_raw": meta.get("tags_raw", ""),
+        "thumbnail_prompt": thumbnail_prompt,
+        "video_size": size,
+        "mtime": mtime,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime)),
+        "download_url": f"/api/download/{project_id}",
+        "metadata_url": f"/api/projects/{project_id}/metadata",
+    }
+
+
+@app.route("/api/projects/ready")
+def api_ready_projects():
+    languages = {
+        x.strip().lower()
+        for x in (request.args.get("languages") or "").split(",")
+        if x.strip()
+    }
+    latest_per_language = request.args.get("latest_per_language", "0") in ("1", "true", "yes")
+
+    items = []
+    if os.path.isdir(config.PROJECTS_DIR):
+        for name in os.listdir(config.PROJECTS_DIR):
+            if name.startswith("_prepare_"):
+                continue
+            project_dir = os.path.join(config.PROJECTS_DIR, name)
+            if not os.path.isdir(project_dir):
+                continue
+            item = _ready_project_item(name, project_dir)
+            if not item:
+                continue
+            if languages and item.get("language") not in languages:
+                continue
+            items.append(item)
+
+    items.sort(key=lambda x: x.get("mtime", 0), reverse=True)
+    if latest_per_language:
+        picked = []
+        seen = set()
+        for item in items:
+            lang = item.get("language", "")
+            if lang in seen:
+                continue
+            picked.append(item)
+            seen.add(lang)
+        items = picked
+
+    return jsonify({"projects": items})
+
+
+@app.route("/api/projects/<project_id>/metadata")
+def api_project_metadata(project_id):
+    safe_id = os.path.basename(project_id)
+    project_dir = os.path.join(config.PROJECTS_DIR, safe_id)
+    if not _is_inside_dir(project_dir, config.PROJECTS_DIR):
+        return jsonify({"error": "Invalid project id"}), 400
+    item = _ready_project_item(safe_id, project_dir)
+    if not item:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(item)
+
+
 @app.route("/api/download/<project_id>")
 def download_video(project_id):
     # Sanitize: strip any directory traversal attempts
@@ -478,11 +622,11 @@ def download_video(project_id):
     output2 = os.path.join(config.PROJECTS_DIR, safe_id, f"{safe_id}.mp4")
     # Verify the resolved path is still inside PROJECTS_DIR
     if os.path.exists(output):
-        if not os.path.realpath(output).startswith(os.path.realpath(config.PROJECTS_DIR)):
+        if not _is_inside_dir(output, config.PROJECTS_DIR):
             return jsonify({"error": "Invalid project id"}), 400
         return send_file(output, as_attachment=True, download_name=f"{safe_id}.mp4")
     if os.path.exists(output2):
-        if not os.path.realpath(output2).startswith(os.path.realpath(config.PROJECTS_DIR)):
+        if not _is_inside_dir(output2, config.PROJECTS_DIR):
             return jsonify({"error": "Invalid project id"}), 400
         return send_file(output2, as_attachment=True, download_name=f"{safe_id}.mp4")
     return jsonify({"error": "Not found"}), 404
