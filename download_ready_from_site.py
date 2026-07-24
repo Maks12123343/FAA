@@ -13,7 +13,8 @@ from pathlib import Path
 
 DEFAULT_BASE_URL = "http://localhost:5050"
 DEFAULT_OUT_DIR = r"D:\youtube"
-DEFAULT_LANGUAGES = "pl,tr,cs,ro,hu,sv"
+DEFAULT_LANGUAGES = "pl,tr,cs,ro,hu,sv,fi,hr,da,bg"
+DEFAULT_INTERVAL_MINUTES = 30
 
 LANGUAGE_FOLDERS = {
     "pl": "польська мова",
@@ -22,6 +23,10 @@ LANGUAGE_FOLDERS = {
     "ro": "румунська мова",
     "hu": "угорська мова",
     "sv": "шведська мова",
+    "fi": "фінська мова",
+    "hr": "хорватська мова",
+    "da": "данська мова",
+    "bg": "болгарська мова",
     "de": "німецька мова",
     "fr": "французька мова",
     "es": "іспанська мова",
@@ -190,7 +195,7 @@ def _select_projects(args, state: dict) -> list:
     return out
 
 
-def run(args) -> int:
+def _run_once(args) -> int:
     out_dir = Path(args.out_dir)
     state_file = out_dir / ".faa_site_downloaded.json"
     state = _load_state(state_file)
@@ -242,6 +247,36 @@ def run(args) -> int:
     return 0
 
 
+def _watch(args) -> int:
+    interval = max(60, int(args.interval_minutes * 60))
+    print(
+        f"Watching {args.base_url.rstrip('/')} every {args.interval_minutes:g} minutes. "
+        "Press Ctrl+C or close this terminal to stop."
+    )
+    while True:
+        print(f"[check] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        try:
+            _run_once(args)
+        except urllib.error.URLError as e:
+            print(f"Connection error: {e}", file=sys.stderr)
+            print("Check that the site is running and the SSH tunnel is open.", file=sys.stderr)
+        except Exception as e:
+            print(f"Download check failed: {e}", file=sys.stderr)
+
+        print(f"[sleep] next check in {interval // 60} min")
+        try:
+            time.sleep(interval)
+        except KeyboardInterrupt:
+            print("Stopped.")
+            return 0
+
+
+def run(args) -> int:
+    if args.watch:
+        return _watch(args)
+    return _run_once(args)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Download ready FAA videos and metadata through the local website tunnel."
@@ -257,11 +292,20 @@ def parse_args():
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true", help="Download even if state says it was already downloaded.")
+    parser.add_argument("--watch", action="store_true", help="Keep checking for new ready videos.")
+    parser.add_argument(
+        "--interval-minutes",
+        type=float,
+        default=DEFAULT_INTERVAL_MINUTES,
+        help="How often --watch checks the site.",
+    )
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--download-timeout", type=int, default=7200)
     args = parser.parse_args()
     args.languages = [x.strip().lower() for x in args.languages.split(",") if x.strip()]
+    if args.watch and args.force:
+        parser.error("--force cannot be used with --watch because it would download the same videos repeatedly.")
     return args
 
 
