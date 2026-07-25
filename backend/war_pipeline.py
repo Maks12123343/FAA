@@ -199,7 +199,7 @@ def _categorize_batch(batch: list, categories: list, emit=None) -> dict:
                 [{"role": "user", "content": prompt}],
                 timeout=CATEGORIZE_TIMEOUT,
                 max_retries=1,
-                use_rewrite_model=True,  # dedicated rewrite key, no HTTP 0 fallback
+                use_rewrite_model=False,
             )
             parsed = _parse_categorize_response(text, batch, cat_set)
             if parsed:

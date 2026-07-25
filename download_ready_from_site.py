@@ -148,6 +148,13 @@ def _download_file(url: str, dest: Path, retries: int, timeout: int) -> None:
                 part.replace(dest)
                 return
             last_error = "empty download"
+        except KeyboardInterrupt:
+            if part.exists():
+                try:
+                    part.unlink()
+                except OSError:
+                    pass
+            raise
         except Exception as e:
             last_error = str(e)
             if part.exists():
@@ -195,9 +202,38 @@ def _select_projects(args, state: dict) -> list:
     return out
 
 
+def _state_file(args) -> Path:
+    return Path(args.out_dir) / ".faa_site_downloaded.json"
+
+
+def _mark_existing_ready(args) -> int:
+    state_file = _state_file(args)
+    state = _load_state(state_file)
+    data = _http_json(_ready_url(args), args.timeout)
+    projects = data.get("projects") or []
+    marked = 0
+    for item in projects:
+        pid = item.get("project_id")
+        if not pid or pid in state.get("downloaded", {}):
+            continue
+        state.setdefault("downloaded", {})[pid] = {
+            "language": item.get("language", ""),
+            "language_name": item.get("language_name", ""),
+            "folder": "",
+            "downloaded_at": time.time(),
+            "ignored_existing": True,
+            "title": item.get("title", ""),
+            "video_size": item.get("video_size", 0),
+        }
+        marked += 1
+    if marked:
+        _save_state(state_file, state)
+    return marked
+
+
 def _run_once(args) -> int:
     out_dir = Path(args.out_dir)
-    state_file = out_dir / ".faa_site_downloaded.json"
+    state_file = _state_file(args)
     state = _load_state(state_file)
 
     projects = _select_projects(args, state)
@@ -218,32 +254,43 @@ def _run_once(args) -> int:
     batch_dir = out_dir / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     batch_dir.mkdir(parents=True, exist_ok=True)
 
+    downloaded = 0
+    failed = 0
     for item in projects:
         pid = item["project_id"]
-        item = _project_metadata(args, pid)
-        lang_folder = _language_folder(item)
-        dest_dir = batch_dir / lang_folder
-        dest_video = dest_dir / "video.mp4"
-        dest_meta = dest_dir / "metadata.txt"
-        dest_info = dest_dir / "project.json"
+        try:
+            item = _project_metadata(args, pid)
+            lang_folder = _language_folder(item)
+            dest_dir = batch_dir / lang_folder
+            dest_video = dest_dir / "video.mp4"
+            dest_meta = dest_dir / "metadata.txt"
+            dest_info = dest_dir / "project.json"
 
-        print(f"[download] {pid} -> {dest_dir}")
-        _download_file(_video_url(args, pid), dest_video, args.retries, args.download_timeout)
-        dest_meta.write_text(_metadata_text(item), encoding="utf-8")
-        dest_info.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"[download] {pid} -> {dest_dir}")
+            _download_file(_video_url(args, pid), dest_video, args.retries, args.download_timeout)
+            dest_meta.write_text(_metadata_text(item), encoding="utf-8")
+            dest_info.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        state.setdefault("downloaded", {})[pid] = {
-            "language": item.get("language", ""),
-            "language_name": item.get("language_name", ""),
-            "folder": str(dest_dir),
-            "downloaded_at": time.time(),
-            "title": item.get("title", ""),
-            "video_size": item.get("video_size", 0),
-        }
-        _save_state(state_file, state)
-        print(f"[done] {lang_folder}")
+            state.setdefault("downloaded", {})[pid] = {
+                "language": item.get("language", ""),
+                "language_name": item.get("language_name", ""),
+                "folder": str(dest_dir),
+                "downloaded_at": time.time(),
+                "title": item.get("title", ""),
+                "video_size": item.get("video_size", 0),
+            }
+            _save_state(state_file, state)
+            downloaded += 1
+            print(f"[done] {lang_folder}")
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            failed += 1
+            print(f"[error] {pid}: {e}", file=sys.stderr)
 
-    print(f"Batch folder: {batch_dir}")
+    if downloaded:
+        print(f"Batch folder: {batch_dir}")
+    print(f"Downloaded: {downloaded}, failed: {failed}")
     return 0
 
 
@@ -253,10 +300,19 @@ def _watch(args) -> int:
         f"Watching {args.base_url.rstrip('/')} every {args.interval_minutes:g} minutes. "
         "Press Ctrl+C or close this terminal to stop."
     )
+    baseline_done = not args.watch_new_only
     while True:
         print(f"[check] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         try:
-            _run_once(args)
+            if baseline_done:
+                _run_once(args)
+            else:
+                marked = _mark_existing_ready(args)
+                print(f"[watch] ignored {marked} ready project(s) already visible at startup")
+                baseline_done = True
+        except KeyboardInterrupt:
+            print("Stopped.")
+            return 0
         except urllib.error.URLError as e:
             print(f"Connection error: {e}", file=sys.stderr)
             print("Check that the site is running and the SSH tunnel is open.", file=sys.stderr)
@@ -294,6 +350,11 @@ def parse_args():
     parser.add_argument("--force", action="store_true", help="Download even if state says it was already downloaded.")
     parser.add_argument("--watch", action="store_true", help="Keep checking for new ready videos.")
     parser.add_argument(
+        "--watch-new-only",
+        action="store_true",
+        help="With --watch, skip projects that are already ready when the script starts.",
+    )
+    parser.add_argument(
         "--interval-minutes",
         type=float,
         default=DEFAULT_INTERVAL_MINUTES,
@@ -306,12 +367,17 @@ def parse_args():
     args.languages = [x.strip().lower() for x in args.languages.split(",") if x.strip()]
     if args.watch and args.force:
         parser.error("--force cannot be used with --watch because it would download the same videos repeatedly.")
+    if args.watch_new_only and not args.watch:
+        parser.error("--watch-new-only requires --watch.")
     return args
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(run(parse_args()))
+    except KeyboardInterrupt:
+        print("Stopped.")
+        raise SystemExit(130)
     except urllib.error.URLError as e:
         print(f"Connection error: {e}", file=sys.stderr)
         print("Check that the site is running and the SSH tunnel is open.", file=sys.stderr)
