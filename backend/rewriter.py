@@ -27,12 +27,12 @@ from backend import api_client
 
 
 def _call_claude(system: str, messages: list, timeout: int = 300, max_retries: int = 1) -> tuple:
-    """Call Pioneer only — no fallback. Rewrite key is dedicated."""
-    return api_client.call_pioneer(
+    """Call Byesu rewrite model."""
+    return api_client.call_byesu_rewrite(
         system,
         messages,
         timeout=timeout,
-        max_retries=max_retries,
+        max_retries=max(1, max_retries),
     )
 
 

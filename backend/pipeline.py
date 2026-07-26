@@ -446,7 +446,7 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
     log("media", f"Session blocked clips: {len(session_blocked)} clips unavailable this session")
 
     if _skip_validation:
-        # ── Random clip selection (no Gemini/Pioneer/translation) ────────────
+        # ── Random clip selection (no Gemini/Byesu/translation) ──────────────
         log("media", "Random clip selection mode (skip_validation=true)")
         clips = _assemble_clips_random(
             yt_pool, chunks_prebuilt, audio_dur, global_used,
@@ -454,7 +454,7 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
             niche_data=_niche_data,
         )
     else:
-        # ── Full validation pipeline (Gemini + Pioneer) ─────────────────────
+        # ── Full validation pipeline (Gemini + Byesu) ───────────────────────
         # Analyze clips with Gemini (one-time, cached per clip as .analysis.json)
         with _cand_lock:
             log("media", "Analyzing clips with Gemini (cached results reused)...")
@@ -576,9 +576,6 @@ def _stock_max() -> float:
 
 def _val_fingerprint(chunk_texts_or_transcript, clips_index: list, settings: dict) -> str:
     import hashlib
-    pioneer_keys = settings.get("pioneer_api_keys", []) or []
-    if isinstance(pioneer_keys, str):
-        pioneer_keys = [k.strip() for k in pioneer_keys.split(",") if k.strip()]
     # Accept both list[str] (new: whisper chunks) and str (legacy: transcript)
     if isinstance(chunk_texts_or_transcript, list):
         text_key = " ".join(chunk_texts_or_transcript)[:1000]
@@ -597,9 +594,8 @@ def _val_fingerprint(chunk_texts_or_transcript, clips_index: list, settings: dic
         text_key,
         hashlib.md5("\n".join(sorted(clip_parts)).encode()).hexdigest(),
         settings.get("gemini_model", ""),
+        settings.get("byesu_model", ""),
         str(settings.get("clip_score_threshold", 0.85)),
-        str(settings.get("pioneer_model", "")),
-        str(len(pioneer_keys)),
     ])
     return hashlib.md5(key.encode()).hexdigest()[:16]
 

@@ -57,7 +57,7 @@ def _call_thumbnail_step(system: str, messages: list, label: str, emit=None) -> 
     for attempt in range(1, THUMBNAIL_ATTEMPTS + 1):
         try:
             _emit(emit, f"{label} attempt {attempt}/{THUMBNAIL_ATTEMPTS}...")
-            text, _ = api_client.call_pioneer(
+            text, _ = api_client.call_byesu(
                 system,
                 messages,
                 timeout=90,

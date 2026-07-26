@@ -1,132 +1,56 @@
-"""Shared Pioneer.ai API client with key rotation, retry, and timeout handling."""
-import json
+"""Shared Byesu OpenAI-compatible API client."""
+
 import os
-import time
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
 
 
-def call_pioneer(system: str, messages: list, timeout: int = 180, max_retries: int = 3,
-                 emit=None, step_label: str = "api", use_rewrite_model: bool = True) -> tuple:
-    """Call Pioneer.ai with automatic key rotation and retry.
-
-    use_rewrite_model=True (default): uses pioneer_rewrite_key + pioneer_rewrite_model (Opus)
-                                      with fallback to regular pioneer_api_keys.
-    use_rewrite_model=False: uses regular pioneer_api_keys + pioneer_model.
-
-    Returns: (text, stop_reason)
-    Raises: RuntimeError if all keys fail.
-    """
-    import requests as _req
+def _byesu_settings(use_rewrite_model: bool = True) -> tuple[str, str, str]:
     settings = config.load_settings()
-
-    # Build key list:
-    # - rewrite mode: use ONLY rewrite key (regular keys don't have Opus access,
-    #   and rewrite is a paid-per-key model — fallback to gemini keys is wrong)
-    # - regular mode: use regular keys with round-robin
-    rewrite_key = settings.get("pioneer_rewrite_key", "").strip()
-    regular_keys = settings.get("pioneer_api_keys", [])
-    if isinstance(regular_keys, str):
-        regular_keys = [k.strip() for k in regular_keys.split(",") if k.strip()]
-
-    if use_rewrite_model and rewrite_key:
-        api_keys = [rewrite_key]
-        model = settings.get("pioneer_rewrite_model", "claude-opus-4-8")
-    elif use_rewrite_model and not rewrite_key:
-        # Explicitly asked for rewrite model but no rewrite key — fail clearly
-        raise RuntimeError("No pioneer_rewrite_key configured (rewrite requires dedicated Opus key).")
-    else:
-        api_keys = regular_keys
-        model = settings.get("pioneer_model", "gemini-3.5-flash")
-
-    if not api_keys:
-        raise RuntimeError("No pioneer_api_keys configured in Settings.")
-
-    api_url = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
-
-    payload = {
-        "model":    model,
-        "messages": [{"role": "system", "content": system}] + messages,
-        "stream":   False,
-    }
-
-    last_err = None
-    for key_idx, api_key in enumerate(api_keys):
-        for attempt in range(max_retries):
-            if emit and (key_idx > 0 or attempt > 0):
-                emit(step_label, f"Pioneer API call — key {key_idx+1}/{len(api_keys)}, attempt {attempt+1}/{max_retries}")
-
-            try:
-                resp = _req.post(
-                    api_url,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {api_key}",
-                    },
-                    json=payload,
-                    timeout=timeout,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                text = data["choices"][0]["message"]["content"].strip()
-                finish = data["choices"][0]["finish_reason"]
-                stop_reason = "max_tokens" if finish == "length" else finish
-                return text, stop_reason
-
-            except _req.exceptions.Timeout:
-                last_err = f"Timeout ({timeout}s) on key {key_idx+1}, attempt {attempt+1}"
-                print(f"[api_client] {last_err}", flush=True)
-                if attempt < max_retries - 1:
-                    wait = 5 * (attempt + 1)
-                    print(f"[api_client] Retry in {wait}s...", flush=True)
-                    time.sleep(wait)
-                else:
-                    break  # Try next key
-
-            except _req.exceptions.HTTPError as e:
-                status = e.response.status_code if e.response else 0
-                # ✅ Don't include response body — may contain sensitive data
-                last_err = f"HTTP {status} on key {key_idx+1}"
-                print(f"[api_client] {last_err}", flush=True)
-                # Don't retry 4xx errors (bad request, auth)
-                if status in (400, 401, 403, 404):
-                    break  # Try next key
-                if attempt < max_retries - 1:
-                    wait = 10 * (attempt + 1)
-                    print(f"[api_client] Retry in {wait}s...", flush=True)
-                    time.sleep(wait)
-                else:
-                    break  # Try next key
-
-            except Exception as e:
-                # ✅ Don't include exception message — may contain API keys or sensitive data
-                last_err = f"{type(e).__name__} on key {key_idx+1}, attempt {attempt+1}"
-                print(f"[api_client] {last_err}", flush=True)
-                if attempt < max_retries - 1:
-                    wait = 5 * (attempt + 1)
-                    print(f"[api_client] Retry in {wait}s...", flush=True)
-                    time.sleep(wait)
-                else:
-                    break  # Try next key
-
-    raise RuntimeError(f"All Pioneer API keys failed. Last error: {last_err}")
-
-
-def call_gigacoder_opus(system: str, messages: list, timeout: int = 180, max_retries: int = 2,
-                        emit=None, step_label: str = "api") -> tuple:
-    """Call GigaCoder Opus 4.8 for rewrite. Returns (text, stop_reason). Raises on failure."""
-    import requests as _req
-    settings = config.load_settings()
-
-    api_key = settings.get("gigacoder_rewrite_key", "").strip()
+    api_key = (os.environ.get("BYESU_API_KEY") or settings.get("byesu_api_key", "")).strip()
     if not api_key:
-        raise RuntimeError("No gigacoder_rewrite_key configured")
+        raise RuntimeError("No BYESU_API_KEY env var or byesu_api_key configured in Settings.")
 
-    api_url = settings.get("gigacoder_api_url", "https://www.gigacoder.org/api/v1/chat/completions")
-    model = settings.get("gigacoder_rewrite_model", "claude-opus-4-8")
+    api_url = (
+        os.environ.get("BYESU_API_URL")
+        or settings.get("byesu_api_url")
+        or "https://byesu.com/v1/chat/completions"
+    )
+    if use_rewrite_model:
+        model = (
+            os.environ.get("BYESU_REWRITE_MODEL")
+            or settings.get("byesu_rewrite_model")
+            or os.environ.get("BYESU_MODEL")
+            or settings.get("byesu_model")
+            or "gpt-5.5"
+        )
+    else:
+        model = (
+            os.environ.get("BYESU_MODEL")
+            or settings.get("byesu_model")
+            or os.environ.get("BYESU_REWRITE_MODEL")
+            or settings.get("byesu_rewrite_model")
+            or "gpt-5.5"
+        )
+    return api_url, api_key, model
 
+
+def call_byesu(
+    system: str,
+    messages: list,
+    timeout: int = 180,
+    max_retries: int = 3,
+    emit=None,
+    step_label: str = "api",
+    use_rewrite_model: bool = True,
+) -> tuple[str, str]:
+    """Call Byesu chat completions and return (text, stop_reason)."""
+    import requests
+
+    api_url, api_key, model = _byesu_settings(use_rewrite_model=use_rewrite_model)
     payload = {
         "model": model,
         "messages": [{"role": "system", "content": system}] + messages,
@@ -135,15 +59,15 @@ def call_gigacoder_opus(system: str, messages: list, timeout: int = 180, max_ret
 
     last_err = None
     for attempt in range(max_retries):
+        if emit and attempt > 0:
+            emit(step_label, f"Byesu API call attempt {attempt + 1}/{max_retries}")
         try:
-            resp = _req.post(
+            resp = requests.post(
                 api_url,
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {api_key}",
-                    # Cloudflare on gigacoder.org blocks default Python user agents
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "User-Agent": "FAA/1.0",
                     "Accept": "application/json",
                 },
                 json=payload,
@@ -151,84 +75,44 @@ def call_gigacoder_opus(system: str, messages: list, timeout: int = 180, max_ret
             )
             resp.raise_for_status()
             data = resp.json()
-            text = data["choices"][0]["message"]["content"].strip()
-            finish = data["choices"][0]["finish_reason"]
+            choice = data["choices"][0]
+            text = choice["message"]["content"].strip()
+            finish = choice.get("finish_reason") or choice.get("native_finish_reason") or "stop"
             stop_reason = "max_tokens" if finish == "length" else finish
             return text, stop_reason
         except Exception as e:
-            # Capture HTTP status + response body for debugging instead of just type name
-            err_detail = type(e).__name__
+            detail = type(e).__name__
             try:
-                if hasattr(e, "response") and e.response is not None:
-                    err_detail += f" status={e.response.status_code}"
-                    body = e.response.text[:300]
-                    err_detail += f" body={body!r}"
+                if getattr(e, "response", None) is not None:
+                    detail += f" status={e.response.status_code}"
+                    detail += f" body={(e.response.text or '')[:500]!r}"
             except Exception:
                 pass
-            last_err = f"{err_detail} attempt {attempt+1}"
-            print(f"[api_client] GigaCoder Opus: {last_err}", flush=True)
+            last_err = f"{detail} attempt {attempt + 1}"
+            print(f"[api_client] Byesu: {last_err}", flush=True)
             if attempt < max_retries - 1:
-                time.sleep(5)
+                wait = 5 * (attempt + 1)
+                print(f"[api_client] Retry in {wait}s...", flush=True)
+                time.sleep(wait)
 
-    raise RuntimeError(f"GigaCoder Opus failed: {last_err}")
+    raise RuntimeError(f"Byesu failed: {last_err}")
 
 
-def call_gigacoder(system: str, messages: list, timeout: int = 180, max_retries: int = 2,
-                   emit=None, step_label: str = "api") -> tuple:
-    """Call GigaCoder GPT-5.4-mini. Returns (text, stop_reason). Raises on failure."""
-    import requests as _req
-    settings = config.load_settings()
-
-    api_keys = settings.get("gigacoder_api_keys", [])
-    if isinstance(api_keys, str):
-        api_keys = [k.strip() for k in api_keys.split(",") if k.strip()]
-    if not api_keys:
-        raise RuntimeError("No gigacoder_api_keys configured")
-
-    api_url = settings.get("gigacoder_api_url", "https://www.gigacoder.org/api/v1/chat/completions")
-    model = settings.get("gigacoder_model", "gpt-5.4-mini")
-
-    payload = {
-        "model": model,
-        "messages": [{"role": "system", "content": system}] + messages,
-        "stream": False,
-    }
-
-    last_err = None
-    for api_key in api_keys:
-        for attempt in range(max_retries):
-            try:
-                resp = _req.post(
-                    api_url,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {api_key}",
-                        # Cloudflare on gigacoder.org blocks default Python user agents
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                        "Accept": "application/json",
-                    },
-                    json=payload,
-                    timeout=timeout,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                text = data["choices"][0]["message"]["content"].strip()
-                finish = data["choices"][0]["finish_reason"]
-                stop_reason = "max_tokens" if finish == "length" else finish
-                return text, stop_reason
-            except Exception as e:
-                err_detail = type(e).__name__
-                try:
-                    if hasattr(e, "response") and e.response is not None:
-                        err_detail += f" status={e.response.status_code}"
-                        body = e.response.text[:300]
-                        err_detail += f" body={body!r}"
-                except Exception:
-                    pass
-                last_err = f"{err_detail} attempt {attempt+1}"
-                print(f"[api_client] GigaCoder: {last_err}", flush=True)
-                if attempt < max_retries - 1:
-                    time.sleep(5)
-
-    raise RuntimeError(f"GigaCoder failed: {last_err}")
+def call_byesu_rewrite(
+    system: str,
+    messages: list,
+    timeout: int = 180,
+    max_retries: int = 3,
+    emit=None,
+    step_label: str = "api",
+) -> tuple[str, str]:
+    """Call Byesu using the rewrite model."""
+    return call_byesu(
+        system,
+        messages,
+        timeout=timeout,
+        max_retries=max_retries,
+        emit=emit,
+        step_label=step_label,
+        use_rewrite_model=True,
+    )

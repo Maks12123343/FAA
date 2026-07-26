@@ -15,6 +15,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
+from backend import api_client
 
 FFMPEG  = config.FFMPEG
 FFPROBE = config.FFPROBE
@@ -29,39 +30,6 @@ BATCH_SIZE         = 1      # ОДИН кліп за один запит — щ�
 # Polish/German/French segments have lower similarity to English clip
 # descriptions, so we keep this low — the LLM ranker filters precision afterwards.
 SEMANTIC_MIN_SIM = 0.25
-
-# Round-robin counters for API key rotation across parallel workers.
-# Each call to _next_*_key() returns the next key in sequence, so concurrent
-# batches spread load evenly instead of hammering key #0.
-_gc_key_counter   = 0
-_gc_key_lock      = threading.Lock()
-_pio_key_counter  = 0
-_pio_key_lock     = threading.Lock()
-
-
-def _next_gigacoder_key(keys: list) -> tuple:
-    """Pick a starting key index round-robin so parallel workers spread load."""
-    global _gc_key_counter
-    if not keys:
-        return 0, []
-    with _gc_key_lock:
-        start = _gc_key_counter % len(keys)
-        _gc_key_counter += 1
-    # Build a rotated key list: starting key first, then the rest as fallbacks
-    rotated = keys[start:] + keys[:start]
-    return start, rotated
-
-
-def _next_pioneer_key(keys: list) -> tuple:
-    global _pio_key_counter
-    if not keys:
-        return 0, []
-    with _pio_key_lock:
-        start = _pio_key_counter % len(keys)
-        _pio_key_counter += 1
-    rotated = keys[start:] + keys[:start]
-    return start, rotated
-
 
 VALIDATION_THRESHOLD = 0.85  # Gemini validation score (як в FAA)
 
@@ -410,195 +378,64 @@ def _analyze_batch(items: list, movie_name: str, client, model: str) -> list:
     return results
 
 
-def _analyze_single_gigacoder(item: dict, movie_name: str) -> dict:
-    """
-    Analyze ONE clip via GigaCoder. Much more accurate than batching because
-    the model can't confuse which frames belong to which clip — there's only one.
-    Takes ~2-4s per clip but eliminates hallucinated descriptions.
-    """
+def _normalize_analysis(a: dict) -> dict:
+    a = a if isinstance(a, dict) else {}
+    a.setdefault("characters", [])
+    a.setdefault("emotion", "neutral")
+    a.setdefault("scene_type", "quiet_moment")
+    a.setdefault("themes", [])
+    a.setdefault("description", "")
+    a.setdefault("tags", [])
+    a.setdefault("is_blurry", False)
+    a.setdefault("is_static", False)
+    return a
+
+
+def _analyze_single_byesu(item: dict, movie_name: str) -> dict:
+    """Analyze one clip via Byesu."""
     import base64
-    import urllib.request
 
-    settings = config.load_settings()
-    gc_keys  = settings.get("gigacoder_api_keys", [])
-    gc_url   = settings.get("gigacoder_api_url", "https://www.gigacoder.org/api/v1/chat/completions")
-    gc_model = settings.get("gigacoder_model", "gpt-5.4-mini")
-    if not gc_keys:
-        raise RuntimeError("No gigacoder_api_keys configured")
-
-    # Build content: 3 labeled frames + analysis prompt
     content_parts = [{"type": "text", "text": "Frame 1 (start of clip):"}]
     if len(item["frames"]) >= 1:
         b64 = base64.b64encode(item["frames"][0]).decode("ascii")
-        content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        content_parts.append({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}})
     if len(item["frames"]) >= 2:
         content_parts.append({"type": "text", "text": "Frame 2 (middle of clip):"})
         b64 = base64.b64encode(item["frames"][1]).decode("ascii")
-        content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        content_parts.append({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}})
     if len(item["frames"]) >= 3:
         content_parts.append({"type": "text", "text": "Frame 3 (end of clip):"})
         b64 = base64.b64encode(item["frames"][2]).decode("ascii")
-        content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        content_parts.append({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}})
 
     content_parts.append({"type": "text", "text": _SINGLE_PROMPT.format(movie_name=movie_name)})
-
-    payload = json.dumps({
-        "model": gc_model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a precise visual analyzer. Describe ONLY what is visible in the frames. "
-                    "Never invent characters or scenes that aren't shown. "
-                    "If frames are dark, empty, or unclear, say so honestly. "
-                    "Reply with valid JSON only — no markdown, no commentary."
-                ),
-            },
-            {"role": "user", "content": content_parts},
-        ],
-        "max_tokens": 1024,
-    }).encode("utf-8")
-
-    last_err = None
-    start_idx, rotated_keys = _next_gigacoder_key(gc_keys)
-    for key in rotated_keys:
-        for attempt in range(3):
-            try:
-                req = urllib.request.Request(
-                    gc_url, data=payload,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {key}",
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                        "Accept": "application/json",
-                    },
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    body = json.loads(resp.read().decode("utf-8"))
-                text = body["choices"][0]["message"]["content"]
-                text = re.sub(r"^```(?:json)?\s*", "", text.strip())
-                text = re.sub(r"\s*```$", "", text)
-                m = re.search(r"\{.*\}", text, re.DOTALL)
-                a = json.loads(m.group() if m else text)
-                a.setdefault("characters", [])
-                a.setdefault("emotion", "neutral")
-                a.setdefault("scene_type", "quiet_moment")
-                a.setdefault("themes", [])
-                a.setdefault("description", "")
-                a.setdefault("tags", [])
-                a.setdefault("is_blurry", False)
-                a.setdefault("is_static", False)
-                return a
-            except Exception as e:
-                last_err = e
-                err_str = str(e).lower()
-                # Retry on network/DNS errors with backoff (1s, 3s, 7s)
-                is_network = any(s in err_str for s in (
-                    "lookup timed out", "11002", "timed out", "connection",
-                    "temporarily unavailable", "name or service",
-                ))
-                if is_network and attempt < 2:
-                    time.sleep([1, 3, 7][attempt])
-                    continue
-                # Other errors — break inner loop, try next key
-                break
-
-    raise RuntimeError(f"GigaCoder single-clip analyze failed: {last_err}")
+    text, _ = api_client.call_byesu(
+        "You are a precise visual analyzer. Describe ONLY what is visible in the frames. "
+        "Never invent characters or scenes that are not shown. If frames are dark, empty, "
+        "or unclear, say so honestly. Reply with valid JSON only, no markdown, no commentary.",
+        [{"role": "user", "content": content_parts}],
+        timeout=120,
+        max_retries=3,
+        step_label="movie_library",
+        use_rewrite_model=False,
+    )
+    text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+    text = re.sub(r"\s*```$", "", text)
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    return _normalize_analysis(json.loads(m.group() if m else text))
 
 
-def _analyze_batch_gigacoder(items: list, movie_name: str) -> list:
-    """
-    Analyze a batch of clips by calling _analyze_single_gigacoder on each one.
-    True batching (multiple clips in one request) caused severe hallucinations
-    because the model mixed up frames between clips. Single-clip analysis is
-    slower but accurate — and since we now process batches sequentially, total
-    throughput is the same.
-    """
+def _analyze_batch_byesu(items: list, movie_name: str) -> list:
     results = []
     for item in items:
         try:
-            a = _analyze_single_gigacoder(item, movie_name)
+            a = _analyze_single_byesu(item, movie_name)
         except Exception as e:
-            print(f"[movie_library] Single-clip analysis failed for "
-                  f"{item['clip'].get('id', '?')}: {e}", flush=True)
+            clip_id = item.get("clip", {}).get("id", "?")
+            print(f"[movie_library] Byesu single-clip analysis failed for {clip_id}: {e}", flush=True)
             raise
         results.append(a)
     return results
-
-
-def _analyze_batch_pioneer(items: list, movie_name: str) -> list:
-    """Fallback: analyze clips via Pioneer API (multimodal, base64 frames)."""
-    import base64
-    import urllib.request
-
-    settings = config.load_settings()
-    api_keys = settings.get("pioneer_api_keys", [])
-    api_url = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
-    api_model = settings.get("pioneer_model", "gemini-3.5-flash")
-    if not api_keys:
-        raise RuntimeError("No pioneer_api_keys configured")
-
-    content_parts = []
-    for i, item in enumerate(items):
-        content_parts.append({"type": "text", "text": f"CLIP {i + 1}:"})
-        for fb in item["frames"]:
-            b64 = base64.b64encode(fb).decode("ascii")
-            content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-
-    content_parts.append({"type": "text", "text": _BATCH_PROMPT})
-
-    payload = json.dumps({
-        "model": api_model,
-        "messages": [{"role": "user", "content": content_parts}],
-        "max_tokens": 4096,
-    }).encode("utf-8")
-
-    last_err = None
-    start_idx, rotated_keys = _next_pioneer_key(api_keys)
-    for offset, key in enumerate(rotated_keys):
-        for attempt in range(3):
-            try:
-                req = urllib.request.Request(
-                    api_url, data=payload,
-                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=180) as resp:
-                    body = json.loads(resp.read().decode("utf-8"))
-                text = body["choices"][0]["message"]["content"]
-                text = re.sub(r"^```(?:json)?\s*", "", text.strip())
-                text = re.sub(r"\s*```$", "", text)
-                m = re.search(r"\[.*\]", text, re.DOTALL)
-                raw = json.loads(m.group() if m else text)
-                results = []
-                for i, item in enumerate(items):
-                    a = raw[i] if i < len(raw) and isinstance(raw[i], dict) else {}
-                    a.setdefault("characters", [])
-                    a.setdefault("emotion", "neutral")
-                    a.setdefault("scene_type", "quiet_moment")
-                    a.setdefault("themes", [])
-                    a.setdefault("description", "")
-                    a.setdefault("tags", [])
-                    a.setdefault("is_blurry", False)
-                    a.setdefault("is_static", False)
-                    results.append(a)
-                return results
-            except Exception as e:
-                last_err = e
-                err_str = str(e).lower()
-                # Retry on network/DNS errors with backoff
-                is_network = any(s in err_str for s in (
-                    "lookup timed out", "11002", "timed out", "connection",
-                    "temporarily unavailable", "name or service",
-                ))
-                if is_network and attempt < 2:
-                    time.sleep([1, 3, 7][attempt])
-                    continue
-                break
-
-    raise RuntimeError(f"Pioneer analyze failed: {last_err}")
 
 
 def _analysis_cached(clip_path: str) -> dict | None:
@@ -722,9 +559,7 @@ def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
     def _process_batch(batch):
         for attempt in range(3):
             try:
-                # Pioneer is the PRIMARY analyzer (more accurate descriptions,
-                # no Cloudflare delays). GigaCoder is the fallback.
-                analyses = _analyze_batch_pioneer(batch, movie_name)
+                analyses = _analyze_batch_byesu(batch, movie_name)
                 for item, analysis in zip(batch, analyses):
                     clip = item["clip"]
                     analysis["id"]   = clip["id"]
@@ -742,23 +577,7 @@ def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
                 if is_rate and attempt < 2:
                     time.sleep(15 * (attempt + 1))
                 else:
-                    # Fallback to GigaCoder
-                    print(f"[movie_library] Pioneer failed, trying GigaCoder: {e}", flush=True)
-                    try:
-                        analyses = _analyze_batch_gigacoder(batch, movie_name)
-                        for item, analysis in zip(batch, analyses):
-                            clip = item["clip"]
-                            analysis["id"]   = clip["id"]
-                            analysis["file"] = clip["file"]
-                            _save_analysis(clip["file"], analysis)
-                            with lock:
-                                done[0] += 1
-                                results.append(analysis)
-                            if emit:
-                                emit("movie", f"Analyzed {done[0]}/{len(items)} clips...")
-                        return
-                    except Exception as fb_e:
-                        print(f"[movie_library] GigaCoder fallback also failed: {fb_e}", flush=True)
+                    print(f"[movie_library] Byesu analysis failed, using local fallback: {e}", flush=True)
                     for item in batch:
                         clip = item["clip"]
                         fallback = {
@@ -776,9 +595,7 @@ def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
 
     # Process analysis batches with bounded parallelism for the HTTP calls.
     # Frame extraction was already sequential. The remaining work is HTTP-only
-    # (Pioneer/GigaCoder API), which works fine under eventlet's monkey-patched
-    # socket. We run up to PARALLEL_API requests at a time so all 4 Pioneer keys
-    # are exercised simultaneously instead of one-by-one.
+    # (Byesu API), which works fine under eventlet's monkey-patched socket.
     PARALLEL_API = 4
     api_start    = time.time()
 
@@ -1054,25 +871,15 @@ def _format_candidates_block(candidates: list) -> str:
 
 
 def _call_text_ranker(prompt: str) -> list | None:
-    """
-    Send the ranking prompt to Pioneer (primary) → GigaCoder (fallback).
-    Returns list[float] or None on total failure.
-    """
-    import urllib.request
-    import urllib.error
-
-    settings = config.load_settings()
-
+    """Send the ranking prompt to Byesu. Returns list[float] or None on failure."""
     def _parse_scores(body_text: str, expected_n: int) -> list | None:
         if not body_text or not body_text.strip():
-            print("[ranker] EMPTY content from model (likely max_tokens too small / thinking model)", flush=True)
+            print("[ranker] EMPTY content from model", flush=True)
             return None
         try:
             text = re.sub(r"^```(?:json)?\s*", "", body_text.strip())
             text = re.sub(r"\s*```$", "", text)
-
             arr = None
-            # Shape 1: {"scores": [...]}  — find an object that has a scores key
             m = re.search(r"\{.*\}", text, re.DOTALL)
             if m:
                 try:
@@ -1081,7 +888,6 @@ def _call_text_ranker(prompt: str) -> list | None:
                         arr = data["scores"]
                 except Exception:
                     pass
-            # Shape 2: bare JSON array [0.9, 0.3, ...]
             if arr is None:
                 m2 = re.search(r"\[[^\[\]]*\]", text, re.DOTALL)
                 if m2:
@@ -1091,16 +897,13 @@ def _call_text_ranker(prompt: str) -> list | None:
                             arr = cand
                     except Exception:
                         pass
-            # Shape 3: last resort — pull all floats out of the text
             if arr is None:
                 nums = re.findall(r"-?\d*\.?\d+", text)
                 if nums:
                     arr = nums
-
             if not isinstance(arr, list) or not arr:
                 print(f"[ranker] WARNING: no scores found in response: {text[:300]!r}", flush=True)
                 return None
-
             out = []
             for x in arr[:expected_n]:
                 try:
@@ -1114,107 +917,20 @@ def _call_text_ranker(prompt: str) -> list | None:
             print(f"[ranker] PARSE FAIL ({e}): body={body_text[:300]!r}", flush=True)
             return None
 
-    expected_n = prompt.count("CLIP ")  # crude but OK — we control the prompt
-
-    # Try Pioneer first
-    pio_keys = settings.get("pioneer_api_keys", [])
-    pio_url = settings.get("pioneer_api_url", "")
-    pio_model = settings.get("pioneer_model", "gemini-3.5-flash")
-    if pio_keys and pio_url:
-        _, rotated = _next_pioneer_key(pio_keys)
-        for key in rotated:
-            for attempt in range(3):
-                try:
-                    payload = json.dumps({
-                        "model": pio_model,
-                        "messages": [
-                            {"role": "system", "content": "You rank clip candidates for a narration. Reply with strict JSON only, e.g. {\"scores\":[0.9,0.3]}. No prose, no reasoning."},
-                            {"role": "user", "content": prompt},
-                        ],
-                        "max_tokens": 2000,
-                        "temperature": 0,
-                        "response_format": {"type": "json_object"},
-                    }).encode("utf-8")
-                    req = urllib.request.Request(
-                        pio_url, data=payload,
-                        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-                        method="POST",
-                    )
-                    with urllib.request.urlopen(req, timeout=60) as resp:
-                        body = json.loads(resp.read().decode("utf-8"))
-                    msg = body.get("choices", [{}])[0].get("message", {}) or {}
-                    text = msg.get("content") or msg.get("reasoning") or msg.get("reasoning_content") or ""
-                    if not text:
-                        fr = body.get("choices", [{}])[0].get("finish_reason")
-                        print(f"[ranker:pioneer] EMPTY content finish_reason={fr} usage={body.get('usage')}", flush=True)
-                    scores = _parse_scores(text, expected_n)
-                    if scores is not None:
-                        return scores
-                    print(f"[ranker:pioneer] PARSE FAIL — raw response: {text[:300]!r}", flush=True)
-                    break  # got a response but couldn't parse — try next key once
-                except Exception as e:
-                    err = str(e).lower()
-                    print(f"[ranker:pioneer] EXCEPTION key=...{key[-12:]} attempt={attempt} err={type(e).__name__}: {str(e)[:200]}", flush=True)
-                    is_net = any(s in err for s in (
-                        "lookup timed out", "11002", "timed out", "connection",
-                        "temporarily unavailable", "name or service",
-                    ))
-                    if is_net and attempt < 2:
-                        time.sleep([1, 3, 7][attempt])
-                        continue
-                    break
-
-    # Fallback: GigaCoder
-    gc_keys = settings.get("gigacoder_api_keys", [])
-    gc_url = settings.get("gigacoder_api_url", "")
-    gc_model = settings.get("gigacoder_model", "gpt-5.4-mini")
-    if gc_keys and gc_url:
-        _, rotated = _next_gigacoder_key(gc_keys)
-        for key in rotated:
-            for attempt in range(3):
-                try:
-                    payload = json.dumps({
-                        "model": gc_model,
-                        "messages": [
-                            {"role": "system", "content": "You rank clip candidates for a narration. Reply with strict JSON only, e.g. {\"scores\":[0.9,0.3]}. No prose, no reasoning."},
-                            {"role": "user", "content": prompt},
-                        ],
-                        "max_tokens": 2000,
-                        "temperature": 0,
-                    }).encode("utf-8")
-                    req = urllib.request.Request(
-                        gc_url, data=payload,
-                        headers={
-                            "Content-Type": "application/json",
-                            "Authorization": f"Bearer {key}",
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                            "Accept": "application/json",
-                        },
-                        method="POST",
-                    )
-                    with urllib.request.urlopen(req, timeout=60) as resp:
-                        body = json.loads(resp.read().decode("utf-8"))
-                    msg = body.get("choices", [{}])[0].get("message", {}) or {}
-                    text = msg.get("content") or msg.get("reasoning") or msg.get("reasoning_content") or ""
-                    scores = _parse_scores(text, expected_n)
-                    if scores is not None:
-                        return scores
-                    print(f"[ranker:gigacoder] PARSE FAIL — raw response: {text[:300]!r}", flush=True)
-                    break
-                except Exception as e:
-                    err = str(e).lower()
-                    print(f"[ranker:gigacoder] EXCEPTION key=...{key[-12:]} attempt={attempt} err={type(e).__name__}: {str(e)[:200]}", flush=True)
-                    is_net = any(s in err for s in (
-                        "lookup timed out", "11002", "timed out", "connection",
-                        "temporarily unavailable", "name or service",
-                    ))
-                    if is_net and attempt < 2:
-                        time.sleep([1, 3, 7][attempt])
-                        continue
-                    break
-
-    return None
+    expected_n = prompt.count("CLIP ")
+    try:
+        text, _ = api_client.call_byesu(
+            'You rank clip candidates for a narration. Reply with strict JSON only, e.g. {"scores":[0.9,0.3]}. No prose, no reasoning.',
+            [{"role": "user", "content": prompt}],
+            timeout=60,
+            max_retries=2,
+            step_label="ranker",
+            use_rewrite_model=False,
+        )
+        return _parse_scores(text, expected_n)
+    except Exception as e:
+        print(f"[ranker:byesu] EXCEPTION {type(e).__name__}: {str(e)[:200]}", flush=True)
+        return None
 
 
 def _normalize_character_text(text: str) -> str:
@@ -1249,7 +965,7 @@ def _apply_score_modifiers(
     score_rules: dict,
 ) -> tuple:
     """
-    Apply niche-defined score rules on top of the base Pioneer score.
+    Apply niche-defined score rules on top of the base score.
     Returns (final_score, breakdown_dict) for logging/debugging.
     """
     rules = score_rules or {}
@@ -1332,7 +1048,7 @@ def rank_clips_by_text(
     if not candidates:
         return []
 
-    # Step 1: build prompt and get base scores from Pioneer/GigaCoder
+    # Step 1: build prompt and get base scores.
     block = _format_candidates_block(candidates)
 
     # Build extended rules block — encodes everything score_rules used to do locally,
@@ -1403,7 +1119,7 @@ def rank_clips_by_text(
     rules_block = "\n".join(rule_lines)
 
     # Build the prompt for the optional LLM ranker (kept for reference / fallback,
-    # but we don't actually call Pioneer/GigaCoder here anymore — too unreliable
+    # but we don't actually call an LLM ranker here anymore — too unreliable
     # under load. Base scores come from Vertex cosine similarity instead.)
     _ = _TEXT_RANK_PROMPT  # noqa: prompt template still used elsewhere
     _ = rules_block, block

@@ -7,12 +7,10 @@ Flow:
   2. Rewrite script (chunked, dedicated rewrite key)
   3. TTS voiceover
   4. Whisper → 2-5s сегменти
-  5. Pioneer БАТЧОВО категоризує сегменти (12 seg/batch, 4 паралельних воркери)
-  6. Vertex embed всіх сегментів одним запитом
-  7. Cosine similarity: для кожного сегмента шукаємо найкращий кліп ТІЛЬКИ у його
-     категорії. Якщо Pioneer впав на сегменті — шукаємо у всій бібліотеці.
-  8. Reuse кліпу до MAX_CLIP_USES разів у одному відео.
-  9. Normalize + uniqualize (parallel) → montage (reuse із movie_pipeline).
+  5. Vertex embed всіх сегментів одним запитом
+  6. Cosine similarity: для кожного сегмента шукаємо найкращий кліп у всій бібліотеці.
+  7. Reuse кліпу до MAX_CLIP_USES разів у одному відео.
+  8. Normalize + uniqualize (parallel) → montage (reuse із movie_pipeline).
 """
 
 import hashlib
@@ -60,13 +58,6 @@ from backend.movie_pipeline import (
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 MAX_CLIP_USES = 2                     # user preference: до 2 разів у одному відео
-CATEGORIZE_BATCH_SIZE = 12            # сегментів на один Pioneer запит
-CATEGORIZE_PARALLEL = 4               # паралельних воркерів (кожен свій batch)
-CATEGORIZE_TIMEOUT = 60               # секунд на batch
-CATEGORIZE_RETRIES = 2                # спроб на batch
-FALLBACK_CATEGORY = "general"         # якщо навіть retry не допоміг
-UNKNOWN_CATEGORY = "__unknown__"      # сегмент без категорії → шукати по всій бібліотеці
-
 # ── Index loading ─────────────────────────────────────────────────────────────
 
 _INDEX_CACHE = {}
@@ -129,153 +120,12 @@ def _load_library_index(niche: str) -> list:
     return valid
 
 
-# ── Pioneer batched categorization ────────────────────────────────────────────
-
-_CATEGORIZE_SYSTEM = (
-    "You are a video editor for a war documentary channel. "
-    "You classify short script segments into visual categories. "
-    "Reply with JSON array only — no markdown, no explanations."
-)
-
-
-def _build_categorize_prompt(batch: list, categories: list) -> str:
-    """Prompt для одного batch. batch = [(seg_id, text), ...]"""
-    cat_lines = "\n".join(f"- {c}" for c in categories)
-    seg_lines = "\n".join(f'Segment {sid}: "{text[:200]}"' for sid, text in batch)
-    return (
-        f"Categorize each segment into ONE of these visual categories:\n{cat_lines}\n\n"
-        f"{seg_lines}\n\n"
-        f"Reply with a JSON array only. Format: "
-        f'[{{"seg": 0, "cat": "armor"}}, {{"seg": 1, "cat": "drones"}}]\n'
-        f"Every segment must appear exactly once. Use category names exactly as listed above. "
-        f'If unsure, use "{FALLBACK_CATEGORY}".'
-    )
-
-
-def _parse_categorize_response(text: str, batch: list, categories: set) -> dict:
-    """Парсимо JSON → {seg_id: category}. Невідомі seg_id ігноруємо."""
-    if not text:
-        return {}
-    # strip markdown fences
-    text = re.sub(r"^```(?:json)?\s*", "", text.strip())
-    text = re.sub(r"\s*```$", "", text)
-    m = re.search(r"\[.*\]", text, re.DOTALL)
-    if not m:
-        return {}
-    try:
-        arr = json.loads(m.group())
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(arr, list):
-        return {}
-
-    valid_seg_ids = {sid for sid, _ in batch}
-    result = {}
-    for item in arr:
-        if not isinstance(item, dict):
-            continue
-        sid = item.get("seg")
-        cat = str(item.get("cat", "")).strip().lower()
-        if sid not in valid_seg_ids:
-            continue
-        if cat not in categories:
-            cat = FALLBACK_CATEGORY if FALLBACK_CATEGORY in categories else next(iter(categories))
-        result[sid] = cat
-    return result
-
-
-def _categorize_batch(batch: list, categories: list, emit=None) -> dict:
-    """
-    Одна Pioneer-категоризація для одного batch (~12 сегментів).
-    Повертає {seg_id: category}. Ті що не вдалось → FALLBACK_CATEGORY.
-    """
-    cat_set = set(categories)
-    prompt = _build_categorize_prompt(batch, categories)
-
-    for attempt in range(CATEGORIZE_RETRIES):
-        try:
-            text, _stop = api_client.call_pioneer(
-                _CATEGORIZE_SYSTEM,
-                [{"role": "user", "content": prompt}],
-                timeout=CATEGORIZE_TIMEOUT,
-                max_retries=1,
-                use_rewrite_model=False,
-            )
-            parsed = _parse_categorize_response(text, batch, cat_set)
-            if parsed:
-                # заповнюємо пропущені seg_id fallback категорією
-                for sid, _ in batch:
-                    if sid not in parsed:
-                        parsed[sid] = FALLBACK_CATEGORY if FALLBACK_CATEGORY in cat_set else next(iter(cat_set))
-                return parsed
-            print(f"[war_pipeline] Categorize batch: empty parse, retry {attempt+1}", flush=True)
-        except Exception as e:
-            print(f"[war_pipeline] Categorize batch attempt {attempt+1} failed: {e}", flush=True)
-
-    # Всі retry failed — усі сегменти в UNKNOWN → шукати по всій бібліотеці
-    print(f"[war_pipeline] Categorize batch FAILED after {CATEGORIZE_RETRIES} tries — using UNKNOWN for {len(batch)} segments", flush=True)
-    return {sid: UNKNOWN_CATEGORY for sid, _ in batch}
-
-
-def _categorize_all_segments(segments: list, categories: list, emit=None) -> list:
-    """
-    Батчово категоризує всі сегменти паралельно.
-    Повертає список категорій (за індексом сегмента).
-    """
-    n = len(segments)
-    if not n:
-        return []
-
-    # Формуємо batches
-    seg_pairs = [(i, seg.get("text", "").strip() or "war footage") for i, seg in enumerate(segments)]
-    batches = [seg_pairs[i:i + CATEGORIZE_BATCH_SIZE] for i in range(0, n, CATEGORIZE_BATCH_SIZE)]
-
-    print(f"[war_pipeline] Categorizing {n} segments in {len(batches)} batches × {CATEGORIZE_PARALLEL} parallel workers", flush=True)
-    if emit:
-        emit("categorize", f"Categorizing {n} segments ({len(batches)} batches)...")
-
-    result_map = {}
-    lock = threading.Lock()
-    done_count = [0]
-
-    def _work(batch_idx: int):
-        batch = batches[batch_idx]
-        result = _categorize_batch(batch, categories, emit=emit)
-        with lock:
-            result_map.update(result)
-            done_count[0] += 1
-            if emit:
-                emit("categorize", f"Categorized batch {done_count[0]}/{len(batches)}")
-
-    with ThreadPoolExecutor(max_workers=CATEGORIZE_PARALLEL) as pool:
-        futures = [pool.submit(_work, i) for i in range(len(batches))]
-        for f in as_completed(futures):
-            try:
-                f.result()
-            except Exception as e:
-                print(f"[war_pipeline] Batch worker crashed: {e}", flush=True)
-
-    # Fill in будь-які пропущені (не мало би бути, але безпечно)
-    categories_list = []
-    for i in range(n):
-        cat = result_map.get(i, UNKNOWN_CATEGORY)
-        categories_list.append(cat)
-
-    # Статистика
-    from collections import Counter
-    stats = Counter(categories_list)
-    print(f"[war_pipeline] Categorization: {dict(stats)}", flush=True)
-    return categories_list
-
-
 # ── Clip selection via cosine ─────────────────────────────────────────────────
 
-def _select_clips_semantic(segments: list, seg_categories: list, clips: list, emit=None) -> list:
+def _select_clips_semantic(segments: list, clips: list, emit=None) -> list:
     """
-    Батчово ембедимо сегменти (Vertex), робимо cosine з кліпами, обираємо:
-    - у власній категорії якщо cat != UNKNOWN
-    - у всій бібліотеці якщо UNKNOWN
-    - MAX_CLIP_USES обмеження на кожен кліп
+    Embed segments, compare against every clip in the library by cosine
+    similarity, and pick the best available clip with MAX_CLIP_USES limit.
     Повертає [{"file": ..., "duration": ..., "id": ...}, ...]
     """
     import numpy as np
@@ -300,65 +150,41 @@ def _select_clips_semantic(segments: list, seg_categories: list, clips: list, em
     seg_norms[seg_norms == 0] = 1.0
     seg_matrix_norm = seg_matrix / seg_norms
 
-    # 2. Готуємо матриці кліпів згруповані за категорією + повну
+    # 2. Готуємо повну матрицю кліпів
     clip_matrix_full = np.array([c["embedding"] for c in clips], dtype=np.float32)
     clip_norms_full = np.linalg.norm(clip_matrix_full, axis=1, keepdims=True)
     clip_norms_full[clip_norms_full == 0] = 1.0
     clip_matrix_full_norm = clip_matrix_full / clip_norms_full
 
-    # Індекси кліпів за категорією (використовуємо scene_type як маркер категорії)
-    cat_indices = {}
-    for idx, c in enumerate(clips):
-        cat = (c.get("scene_type") or "").strip().lower() or FALLBACK_CATEGORY
-        cat_indices.setdefault(cat, []).append(idx)
-    print(f"[war_pipeline] Clip distribution: { {k: len(v) for k, v in cat_indices.items()} }", flush=True)
+    print(f"[war_pipeline] Clip pool: {len(clips)} clips, selecting globally by cosine", flush=True)
 
-    # 3. Для кожного сегмента — cosine у власній категорії (або повній)
+    # 3. Для кожного сегмента — cosine по всій бібліотеці
     use_counts = {}  # clip_idx -> кількість використань
     selected = []
     if emit:
-        emit("clips", f"Matching {n} segments against {len(clips)} clips (cosine)...")
+        emit("clips", f"Matching {n} segments against all {len(clips)} clips (cosine)...")
 
     for i, seg in enumerate(segments):
         seg_dur = max(0.5, seg.get("end", 0) - seg.get("start", 0))
-        cat = seg_categories[i] if i < len(seg_categories) else UNKNOWN_CATEGORY
 
-        if cat == UNKNOWN_CATEGORY or cat not in cat_indices:
-            # Шукаємо у всій бібліотеці
-            candidate_idxs = list(range(len(clips)))
-            search_mode = "ALL"
-        else:
-            candidate_idxs = cat_indices[cat]
-            search_mode = cat
-
-        # Cosine similarity з кандидатами
-        cand_matrix = clip_matrix_full_norm[candidate_idxs]
-        sims = cand_matrix @ seg_matrix_norm[i]
+        sims = clip_matrix_full_norm @ seg_matrix_norm[i]
 
         # Сортуємо по similarity, беремо перший який не використаний MAX_CLIP_USES
         order = np.argsort(-sims)
         picked = None
-        for local_idx in order:
-            global_idx = candidate_idxs[int(local_idx)]
+        for global_idx in order:
+            global_idx = int(global_idx)
             if use_counts.get(global_idx, 0) >= MAX_CLIP_USES:
                 continue
             picked = global_idx
             break
 
-        # Якщо у категорії не залишилось — падаємо на всю бібліотеку
-        if picked is None and cat != UNKNOWN_CATEGORY:
-            all_sims = clip_matrix_full_norm @ seg_matrix_norm[i]
-            order_all = np.argsort(-all_sims)
-            for gi in order_all:
-                if use_counts.get(int(gi), 0) < MAX_CLIP_USES:
-                    picked = int(gi)
-                    search_mode = f"{cat}→ALL"
-                    break
-
         if picked is None:
             # Крайній випадок — просто беремо найкращий (може повторитись >2 разів)
             picked = int(np.argmax(clip_matrix_full_norm @ seg_matrix_norm[i]))
             search_mode = "OVERFLOW"
+        else:
+            search_mode = "ALL"
 
         use_counts[picked] = use_counts.get(picked, 0) + 1
         clip = clips[picked]
@@ -366,7 +192,7 @@ def _select_clips_semantic(segments: list, seg_categories: list, clips: list, em
             "file": clip["file"],
             "duration": seg_dur,
             "id": clip.get("id", os.path.basename(clip["file"])),
-            "category": search_mode,
+            "search_scope": search_mode,
         })
 
         if emit and (i + 1) % 50 == 0:
@@ -421,15 +247,12 @@ Return ONLY a JSON array, no markdown, no commentary:
 def _plan_text_overlays_war(segments_with_times: list, language: str, emit=None) -> list:
     """
     War-specific overlay planner: highlight ONLY named entities (places, tech,
-    numbers, dates). Uses Pioneer rewrite key (Claude Opus). Returns [] on
+    numbers, dates). Uses Byesu. Returns [] on
     failure — video will just render without overlays.
     """
-    import urllib.request
-
     if not segments_with_times:
         return []
 
-    settings = config.load_settings()
     lang_name = lang_utils.configured_language_name(language)
 
     seg_data = [
@@ -445,49 +268,18 @@ def _plan_text_overlays_war(segments_with_times: list, language: str, emit=None)
         language_name=lang_name,
     )
 
-    def _post(url: str, key: str, model: str, ua: bool = False) -> str | None:
-        payload = json.dumps({
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You return JSON only. No markdown, no commentary."},
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": 1024,
-        }).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {key}",
-        }
-        if ua:
-            headers["User-Agent"] = (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
-            headers["Accept"] = "application/json"
-        try:
-            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-            return body["choices"][0]["message"]["content"]
-        except Exception as e:
-            print(f"[war_pipeline] War overlay API failed: {e}", flush=True)
-            return None
-
-    text = None
-    pio_url = settings.get("pioneer_api_url", "")
-    pio_key = settings.get("pioneer_rewrite_key", "")
-    pio_model = settings.get("pioneer_rewrite_model", "claude-opus-4-8")
-    if pio_url and pio_key:
-        text = _post(pio_url, pio_key, pio_model, ua=False)
-
-    if not text:
-        gc_url = settings.get("gigacoder_api_url", "")
-        gc_key = settings.get("gigacoder_rewrite_key", "")
-        gc_model = settings.get("gigacoder_rewrite_model", "claude-opus-4-8")
-        if gc_url and gc_key:
-            text = _post(gc_url, gc_key, gc_model, ua=True)
-
-    if not text:
+    try:
+        text, _ = api_client.call_byesu(
+            "You return JSON only. No markdown, no commentary.",
+            [{"role": "user", "content": prompt}],
+            timeout=120,
+            max_retries=2,
+            emit=emit,
+            step_label="overlays",
+            use_rewrite_model=False,
+        )
+    except Exception as e:
+        print(f"[war_pipeline] War overlay API failed: {e}", flush=True)
         return []
 
     try:
@@ -614,7 +406,7 @@ def prepare(source_url: str, emit=None) -> dict:
 def produce(prepare_id: str, niche: str, language: str, emit=None,
             test_mode: bool = False) -> dict:
     """
-    Фаза 2: rewrite → TTS → segments → categorize → embed → cosine → montage.
+    Фаза 2: rewrite → TTS → segments → embed → global cosine → montage.
     """
     def log(step, msg):
         print(f"[war_pipeline:produce:{step}] {msg}", flush=True)
@@ -638,15 +430,6 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
 
     transcript = state["transcript"]
     source_title = state.get("source_title", "")
-
-    # Читаємо ніші-конфіг щоб дістати список категорій
-    niche_path = os.path.join(config.NICHES_DIR, f"{niche}.json")
-    with open(niche_path, encoding="utf-8") as f:
-        niche_cfg = json.load(f)
-    categories = list((niche_cfg.get("categories") or {}).keys())
-    if not categories:
-        raise RuntimeError(f"Niche '{niche}' has no categories defined")
-    log("config", f"Categories: {categories}")
 
     # Проект
     proj_id = f"{niche}_{language}_{int(time.time())}"
@@ -758,7 +541,7 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
     log("library", f"Library ready: {len(clips)} valid clips")
     mark_timing("library")
 
-    # ── Categorize segments (BATCHED Pioneer) ─────────────────────────────────
+    # ── Semantic clip selection (global cosine) ───────────────────────────────
     clips_cache = os.path.join(proj_dir, "clips.json")
     if os.path.exists(clips_cache):
         with open(clips_cache, encoding="utf-8") as f:
@@ -766,13 +549,8 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         clip_data = [c for c in clip_data if os.path.exists(c.get("file", ""))]
         log("clips", f"Clips cached: {len(clip_data)}")
     else:
-        log("categorize", "Starting Pioneer batched categorization...")
-        seg_cats = _categorize_all_segments(segments, categories, emit=emit)
-        log("categorize", "Categorization done.")
-
-        # ── Semantic clip selection (cosine within category) ──────────────────
-        log("clips", "Selecting clips via cosine similarity within categories...")
-        clip_data = _select_clips_semantic(segments, seg_cats, clips, emit=emit)
+        log("clips", "Selecting clips via global cosine similarity...")
+        clip_data = _select_clips_semantic(segments, clips, emit=emit)
         if not clip_data:
             raise RuntimeError("No clips selected — check library index and embeddings")
 

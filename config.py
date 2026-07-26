@@ -60,9 +60,11 @@ DEFAULT_SETTINGS = {
     "vertex_location": "us-central1",
     "gemini_model": "gemini-2.5-flash",
 
-    # Claude API
-    "claude_api_key": "",
-    "claude_model": "claude-sonnet-4-6",
+    # Byesu API (OpenAI-compatible chat completions)
+    "byesu_api_key": "",
+    "byesu_model": "gpt-5.5",
+    "byesu_rewrite_model": "gpt-5.5",
+    "byesu_api_url": "https://byesu.com/v1/chat/completions",
 
     # TTS
     "tts_api_key": "",
@@ -87,12 +89,6 @@ DEFAULT_SETTINGS = {
         "tr": {"name": "Turkish Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
         "sv": {"name": "Swedish Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
     },
-
-    # Pioneer.ai API (OpenAI-compatible — used for script writing & rewriting)
-    # Add up to N keys for parallel validation (1 key per thread)
-    "pioneer_api_keys": [],
-    "pioneer_model": "gemini-3.5-flash",
-    "pioneer_api_url": "https://api.pioneer.ai/v1/chat/completions",
 
     # Unofficial Gemini cookie API (optional — doubles throughput alongside Vertex AI)
     # Fill psid / psidts from browser cookies at gemini.google.com

@@ -5,51 +5,15 @@ import re
 import shutil
 import subprocess
 import tempfile
-import threading
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
+from backend import api_client
 
 CACHE_SUFFIX  = ".faa_score.json"
-CACHE_VERSION = 2  # bumped: pioneer backend added
+CACHE_VERSION = 3
 BATCH_SIZE    = 8
-
-
-# ---------------------------------------------------------------------------
-# Thread-safe Pioneer.ai key pool (round-robin)
-# ---------------------------------------------------------------------------
-
-class _PioneerKeyPool:
-    """Distributes API keys across threads in round-robin fashion."""
-
-    def __init__(self):
-        self._lock  = threading.Lock()
-        self._index = 0
-        self._keys  = []
-
-    def _reload(self):
-        settings = config.load_settings()
-        keys = settings.get("pioneer_api_keys", [])
-        if isinstance(keys, str):
-            keys = [k.strip() for k in keys.split(",") if k.strip()]
-        self._keys = [k for k in keys if k]
-
-    def next_key(self) -> str | None:
-        with self._lock:
-            self._reload()
-            if not self._keys:
-                return None
-            key = self._keys[self._index % len(self._keys)]
-            self._index += 1
-            return key
-
-    def available(self) -> bool:
-        self._reload()
-        return bool(self._keys)
-
-
-_key_pool = _PioneerKeyPool()
 
 
 # ---------------------------------------------------------------------------
@@ -101,17 +65,11 @@ def _parse_json(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Pioneer.ai scoring (OpenAI-compatible vision API)
+# Byesu scoring (OpenAI-compatible vision API)
 # ---------------------------------------------------------------------------
 
-def _score_pioneer(frames: list, description: str, api_key: str) -> dict:
-    """Score clip frames using pioneer.ai (OpenAI-compatible Gemini proxy)."""
-    import urllib.request
-
-    settings  = config.load_settings()
-    api_url   = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
-    model     = settings.get("pioneer_model", "a87f8985-e7d8-4012-adac-6d5c66287213")
-
+def _score_byesu(frames: list, description: str) -> dict:
+    """Score clip frames using Byesu."""
     prompt = (
         f'Frames from a short video clip. '
         f'How visually relevant is this clip to: "{description}"?\n'
@@ -129,25 +87,14 @@ def _score_pioneer(frames: list, description: str, api_key: str) -> dict:
         })
     content.append({"type": "text", "text": prompt})
 
-    payload = json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": content}],
-        "stream": False,
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        api_url,
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
+    text, _ = api_client.call_byesu(
+        "You are a clip scoring assistant. Reply only with valid JSON.",
+        [{"role": "user", "content": content}],
+        timeout=90,
+        max_retries=2,
+        step_label="validator",
+        use_rewrite_model=False,
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-
-    text = body["choices"][0]["message"]["content"]
     return _parse_json(text)
 
 
@@ -225,8 +172,8 @@ def score_clip(video_path: str, description: str) -> dict:
     """Score a video clip for relevance to description.
 
     Backend priority:
-      1. Pioneer.ai (if keys configured) — free, no Vertex setup needed
-      2. Vertex AI (Gemini) — fallback if pioneer not configured or fails
+      1. Byesu
+      2. Vertex AI (Gemini) fallback
     """
     cache_path = video_path + CACHE_SUFFIX
     cached = _read_cache(cache_path, description)
@@ -239,16 +186,11 @@ def score_clip(video_path: str, description: str) -> dict:
             if not frames:
                 return {"score": 0.0, "reason": "no frames extracted"}
 
-            # Try pioneer.ai first
-            api_key = _key_pool.next_key()
-            if api_key:
-                try:
-                    result = _score_pioneer(frames, description, api_key)
-                    print(f"[validator] pioneer scored {os.path.basename(video_path)}: {result.get('score')}", flush=True)
-                except Exception as e:
-                    print(f"[validator] pioneer failed ({e}), falling back to Vertex", flush=True)
-                    result = _score_vertex(frames, description)
-            else:
+            try:
+                result = _score_byesu(frames, description)
+                print(f"[validator] Byesu scored {os.path.basename(video_path)}: {result.get('score')}", flush=True)
+            except Exception as e:
+                print(f"[validator] Byesu failed ({e}), falling back to Vertex", flush=True)
                 result = _score_vertex(frames, description)
 
     except Exception as e:

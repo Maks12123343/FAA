@@ -16,7 +16,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
-from backend import tts
+from backend import api_client, tts
 from backend.aligner import _split_into_chunks, _chunk_duration, _get_duration
 from backend.transcriber import get_transcript
 from backend.rewriter import rewrite_all
@@ -224,15 +224,8 @@ Return ONLY a JSON array, no markdown:
 
 def _plan_text_overlays(segments_with_times: list, emit=None) -> list:
     """
-    Plan text overlays via Pioneer rewrite key (claude-opus-4-8) — same proxy
-    that handles script rewriting. Falls back to GigaCoder rewrite if Pioneer
-    is down. Returns [] on total failure.
+    Plan text overlays via Byesu. Returns [] on failure.
     """
-    import urllib.error
-    import urllib.request
-
-    settings = config.load_settings()
-
     total_dur = max(1.0, segments_with_times[-1]["end"] if segments_with_times else 1.0)
     seg_data = [
         {
@@ -247,52 +240,18 @@ def _plan_text_overlays(segments_with_times: list, emit=None) -> list:
         segments_json=json.dumps(seg_data, ensure_ascii=False, indent=2)
     )
 
-    def _post(url: str, key: str, model: str, ua: bool = False) -> str | None:
-        payload = json.dumps({
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You return JSON only. No markdown, no commentary."},
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": 2048,
-        }).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {key}",
-        }
-        if ua:
-            headers["User-Agent"] = (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
-            headers["Accept"] = "application/json"
-        try:
-            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-            return body["choices"][0]["message"]["content"]
-        except Exception as e:
-            print(f"[movie_pipeline] Overlay API call failed: {e}", flush=True)
-            return None
-
-    text = None
-
-    # Try Pioneer rewrite key (Claude Opus via proxy)
-    pio_url = settings.get("pioneer_api_url", "")
-    pio_key = settings.get("pioneer_rewrite_key", "")
-    pio_model = settings.get("pioneer_rewrite_model", "claude-opus-4-8")
-    if pio_url and pio_key:
-        text = _post(pio_url, pio_key, pio_model, ua=False)
-
-    # Fallback: GigaCoder rewrite key
-    if not text:
-        gc_url = settings.get("gigacoder_api_url", "")
-        gc_key = settings.get("gigacoder_rewrite_key", "")
-        gc_model = settings.get("gigacoder_rewrite_model", "claude-opus-4-8")
-        if gc_url and gc_key:
-            text = _post(gc_url, gc_key, gc_model, ua=True)
-
-    if not text:
+    try:
+        text, _ = api_client.call_byesu(
+            "You return JSON only. No markdown, no commentary.",
+            [{"role": "user", "content": prompt}],
+            timeout=120,
+            max_retries=2,
+            emit=emit,
+            step_label="overlays",
+            use_rewrite_model=False,
+        )
+    except Exception as e:
+        print(f"[movie_pipeline] Overlay API call failed: {e}", flush=True)
         return []
 
     try:
@@ -1346,7 +1305,7 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
     log("overlays", f"Planned {len(text_overlays)} text overlays.")
     mark_timing("overlays")
 
-    # ── Підбір кліпів: top-5 → Pioneer text ranking → найкращий ──────────────
+    # ── Підбір кліпів: top-5 → semantic ranking → найкращий ──────────────
     # Load niche score_rules so the ranker knows main_character / scene penalties / etc.
     niche_path = os.path.join(config.NICHES_DIR, f"{state.get('niche_name', '')}.json")
     score_rules = {}

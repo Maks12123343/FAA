@@ -418,13 +418,11 @@ socket.on('produce_done', data => {
   card.className = 'card';
   card.style.position = 'relative';
   const safeId = escHtml(data.project_id || '');
-  const langLabels = {
-    pl: 'Polish', tr: 'Turkish', cs: 'Czech', ro: 'Romanian',
-    hu: 'Hungarian', sv: 'Swedish', sw: 'Swahili', de: 'German', fr: 'French',
-    es: 'Spanish', it: 'Italian', pt: 'Portuguese', en: 'English'
-  };
   const langCode = String(data.language || '').toLowerCase();
-  const langText = langCode ? `${langLabels[langCode] || langCode.toUpperCase()} · ${langCode.toUpperCase()}` : '';
+  const langName = String(data.language_name || '').trim();
+  const langText = langCode
+    ? `${langName || langCode.toUpperCase()} · ${langCode.toUpperCase()}`
+    : '';
   const langBadge = langText
     ? `<div style="position:absolute;top:14px;right:14px;background:#1f2937;border:1px solid #4b5563;color:#e5e7eb;border-radius:6px;padding:5px 9px;font-size:11px;font-weight:800;letter-spacing:0">${escHtml(langText)}</div>`
     : '';

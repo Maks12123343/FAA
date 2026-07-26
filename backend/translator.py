@@ -3,11 +3,11 @@ import json
 import os
 import re
 import sys
-import time
 import hashlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
+from backend import api_client
 from backend import languages as lang_utils
 
 
@@ -25,7 +25,7 @@ def translate_sections(section_texts: list, language: str, project_dir: str = No
     Translate section texts to English for clip matching.
     If language is English, returns texts as-is.
     Results are cached to project_dir/sections_english.json.
-    Uses Pioneer API (batch of ~20 sections per call).
+    Uses Byesu API (batch of ~30 sections per call).
     """
     if _is_english(language):
         return section_texts
@@ -75,20 +75,8 @@ _BATCH_SIZE = 30
 
 
 def _batch_translate(texts: list, source_lang: str, emit=None) -> list:
-    """Translate texts in batches using Pioneer API."""
-    import urllib.request
-
-    settings = config.load_settings()
+    """Translate texts in batches using Byesu API."""
     source_lang_name = lang_utils.configured_language_name(source_lang)
-    api_keys = settings.get("pioneer_api_keys", [])
-    if isinstance(api_keys, str):
-        api_keys = [k.strip() for k in api_keys.split(",") if k.strip()]
-    api_url = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
-    model = settings.get("pioneer_model", "gemini-3.5-flash")
-
-    if not api_keys:
-        print("[translator] No Pioneer API keys — falling back to no translation", flush=True)
-        return texts
 
     all_translated = []
     batches = [texts[i:i + _BATCH_SIZE] for i in range(0, len(texts), _BATCH_SIZE)]
@@ -101,65 +89,20 @@ def _batch_translate(texts: list, source_lang: str, emit=None) -> list:
             f"{numbered}"
         )
 
-        payload = json.dumps({
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You are a translator. Translate accurately and concisely. Keep numbering format: '1. translation'"},
-                {"role": "user", "content": prompt},
-            ],
-            "stream": False,
-        }).encode("utf-8")
-
         result_texts = None
-        for key in api_keys:
-            for attempt in range(3):
-                try:
-                    req = urllib.request.Request(
-                        api_url,
-                        data=payload,
-                        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-                        method="POST",
-                    )
-                    with urllib.request.urlopen(req, timeout=120) as resp:
-                        body = json.loads(resp.read().decode("utf-8"))
-                    raw_text = body["choices"][0]["message"]["content"]
-                    result_texts = _parse_numbered(raw_text, len(batch))
-                    break
-                except Exception as e:
-                    print(f"[translator] Batch {batch_idx+1} attempt {attempt+1} error: {e}", flush=True)
-                    if attempt < 2:
-                        time.sleep(5 * (attempt + 1))
-            if result_texts:
-                break
-
-        # Fallback to GigaCoder if Pioneer failed
-        if not result_texts:
-            gc_keys = settings.get("gigacoder_api_keys", [])
-            gc_url = settings.get("gigacoder_api_url", "https://www.gigacoder.org/api/v1/chat/completions")
-            gc_model = settings.get("gigacoder_model", "gpt-5.4-mini")
-            gc_payload = json.dumps({
-                "model": gc_model,
-                "messages": [
-                    {"role": "system", "content": "You are a translator. Translate accurately and concisely. Keep numbering format: '1. translation'"},
-                    {"role": "user", "content": prompt},
-                ],
-                "stream": False,
-            }).encode("utf-8")
-            for gc_key in gc_keys:
-                try:
-                    req = urllib.request.Request(
-                        gc_url, data=gc_payload,
-                        headers={"Content-Type": "application/json", "Authorization": f"Bearer {gc_key}"},
-                        method="POST",
-                    )
-                    with urllib.request.urlopen(req, timeout=120) as resp:
-                        body = json.loads(resp.read().decode("utf-8"))
-                    raw_text = body["choices"][0]["message"]["content"]
-                    result_texts = _parse_numbered(raw_text, len(batch))
-                    if result_texts:
-                        break
-                except Exception as e:
-                    print(f"[translator] GigaCoder fallback error: {e}", flush=True)
+        try:
+            raw_text, _ = api_client.call_byesu(
+                "You are a translator. Translate accurately and concisely. Keep numbering format: '1. translation'",
+                [{"role": "user", "content": prompt}],
+                timeout=120,
+                max_retries=3,
+                emit=emit,
+                step_label="translate",
+                use_rewrite_model=False,
+            )
+            result_texts = _parse_numbered(raw_text, len(batch))
+        except Exception as e:
+            print(f"[translator] Batch {batch_idx+1} Byesu error: {e}", flush=True)
 
         if result_texts and len(result_texts) == len(batch):
             all_translated.extend(result_texts)

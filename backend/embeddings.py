@@ -10,27 +10,22 @@ the LLM validator could only pick "the best of the noise". This module replaces 
 first step with semantic vectors: text is turned into a vector of meaning, and clips
 are ranked by cosine similarity, so meaning matches even when words differ.
 
-Backends (auto-detected at runtime, in order):
-  1. Pioneer.ai  /v1/embeddings   — OpenAI-compatible, uses the existing pioneer keys
-                                     in parallel (one key per worker) for speed.
-  2. Vertex AI   text-embedding-004 — fallback, uses the existing gcloud credentials.
+Backends:
+  1. Vertex AI text-embedding-004, using the existing gcloud credentials.
 
 If neither backend is available, embed_texts() returns None and callers fall back to
 the legacy keyword search — nothing crashes.
 """
 
-import json
 import os
 import sys
 import threading
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
 
 # Remember which backend works so we don't re-probe a dead one every call.
-# Values: None (unknown), "pioneer", "vertex", "none"
+# Values: None (unknown), "vertex", "none"
 _BACKEND_CACHE = {"kind": None}
 _BACKEND_LOCK = threading.Lock()
 
@@ -38,8 +33,6 @@ _BACKEND_LOCK = threading.Lock()
 _TEXT_CACHE = {}
 _TEXT_CACHE_LOCK = threading.Lock()
 
-# OpenAI-compatible embeddings batch size per request.
-_PIONEER_BATCH = 96
 # Vertex text-embedding-004 accepts up to 250 instances; keep margin.
 _VERTEX_BATCH = 100
 
@@ -60,89 +53,6 @@ def cosine(a: list, b: list) -> float:
     if na <= 0.0 or nb <= 0.0:
         return 0.0
     return dot / ((na ** 0.5) * (nb ** 0.5))
-
-
-# ── Pioneer backend ───────────────────────────────────────────────────────────
-
-def _pioneer_keys() -> list:
-    settings = config.load_settings()
-    keys = settings.get("pioneer_api_keys", [])
-    if isinstance(keys, str):
-        keys = [k.strip() for k in keys.split(",") if k.strip()]
-    return [k for k in keys if k]
-
-
-def _pioneer_embed_url() -> str:
-    settings = config.load_settings()
-    chat_url = settings.get("pioneer_api_url", "https://api.pioneer.ai/v1/chat/completions")
-    # Derive the embeddings endpoint from the chat endpoint.
-    return settings.get("pioneer_embed_url", chat_url.replace("chat/completions", "embeddings"))
-
-
-def _pioneer_embed_model() -> str:
-    settings = config.load_settings()
-    return settings.get("pioneer_embed_model", "text-embedding-004")
-
-
-def _pioneer_embed_batch(texts: list, api_key: str, timeout: int = 120) -> list:
-    """Embed one batch via Pioneer (OpenAI-compatible /v1/embeddings). Raises on failure."""
-    payload = json.dumps({
-        "model": _pioneer_embed_model(),
-        "input": texts,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        _pioneer_embed_url(),
-        data=payload,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-    # OpenAI shape: {"data": [{"index": 0, "embedding": [...]}, ...]}
-    data = body.get("data", [])
-    data_sorted = sorted(data, key=lambda d: d.get("index", 0))
-    vectors = [d.get("embedding") for d in data_sorted]
-    if len(vectors) != len(texts) or any(v is None for v in vectors):
-        raise RuntimeError(
-            f"Pioneer embeddings returned {len(vectors)} vectors for {len(texts)} inputs"
-        )
-    return vectors
-
-
-def _pioneer_embed_all(texts: list, emit=None) -> list:
-    """Embed all texts using every Pioneer key in parallel. Raises if any batch fails."""
-    keys = _pioneer_keys()
-    if not keys:
-        raise RuntimeError("No Pioneer keys configured")
-
-    batches = [texts[i:i + _PIONEER_BATCH] for i in range(0, len(texts), _PIONEER_BATCH)]
-    results = [None] * len(batches)
-    n_workers = min(len(keys), len(batches)) or 1
-
-    def _work(batch_idx: int):
-        key = keys[batch_idx % len(keys)]
-        results[batch_idx] = _pioneer_embed_batch(batches[batch_idx], key)
-
-    errors = []
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = {pool.submit(_work, i): i for i in range(len(batches))}
-        done = 0
-        for f in as_completed(futures):
-            try:
-                f.result()
-                done += 1
-                if emit and len(batches) > 1:
-                    emit("embed", f"Embedded batch {done}/{len(batches)} (Pioneer)")
-            except Exception as e:
-                errors.append(e)
-
-    if errors:
-        raise errors[0]
-
-    out = []
-    for r in results:
-        out.extend(r)
-    return out
 
 
 # ── Vertex backend ──────────────────────────────────────────────────────────────
@@ -198,8 +108,8 @@ def embed_texts(texts: list, emit=None) -> list:
     """
     Turn a list of strings into a list of vectors (list[float]).
 
-    Tries Pioneer first, then Vertex. Caches which backend works so a dead backend
-    is not re-probed on every call. Returns None if no backend is available — callers
+    Tries Vertex. Caches which backend works so a dead backend is not re-probed
+    on every call. Returns None if no backend is available — callers
     must handle None by falling back to keyword matching.
     """
     if not texts:
@@ -212,9 +122,7 @@ def embed_texts(texts: list, emit=None) -> list:
     last_err = None
     for kind in order:
         try:
-            if kind == "pioneer":
-                vecs = _pioneer_embed_all(clean, emit=emit)
-            elif kind == "vertex":
+            if kind == "vertex":
                 vecs = _vertex_embed_all(clean, emit=emit)
             else:
                 continue
@@ -249,8 +157,8 @@ def embed_text(text: str, emit=None) -> list:
 
 
 def _backend_order() -> list:
-    """Try Pioneer first, then Vertex AI fallback."""
-    return ["pioneer", "vertex"]
+    """Use Vertex AI embeddings."""
+    return ["vertex"]
 
 
 def _set_backend(kind: str):
