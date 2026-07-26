@@ -1,5 +1,6 @@
 """Shared Byesu OpenAI-compatible API client."""
 
+import json
 import os
 import sys
 import time
@@ -38,6 +39,16 @@ def _byesu_settings(use_rewrite_model: bool = True) -> tuple[str, str, str]:
     return api_url, api_key, model
 
 
+def _clean_for_json(value):
+    if isinstance(value, str):
+        return value.encode("utf-8", "replace").decode("utf-8")
+    if isinstance(value, list):
+        return [_clean_for_json(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _clean_for_json(item) for key, item in value.items()}
+    return value
+
+
 def call_byesu(
     system: str,
     messages: list,
@@ -56,6 +67,7 @@ def call_byesu(
         "messages": [{"role": "system", "content": system}] + messages,
         "stream": False,
     }
+    body = json.dumps(_clean_for_json(payload), ensure_ascii=False).encode("utf-8")
 
     last_err = None
     for attempt in range(max_retries):
@@ -70,7 +82,7 @@ def call_byesu(
                     "User-Agent": "FAA/1.0",
                     "Accept": "application/json",
                 },
-                json=payload,
+                data=body,
                 timeout=timeout,
             )
             resp.raise_for_status()
@@ -81,7 +93,7 @@ def call_byesu(
             stop_reason = "max_tokens" if finish == "length" else finish
             return text, stop_reason
         except Exception as e:
-            detail = type(e).__name__
+            detail = f"{type(e).__name__}: {e}"
             try:
                 if getattr(e, "response", None) is not None:
                     detail += f" status={e.response.status_code}"
