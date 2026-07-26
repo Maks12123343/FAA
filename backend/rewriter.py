@@ -750,8 +750,12 @@ def rewrite_all(
     feedback = ""
     orig_len = len(transcript)
     min_chars, max_chars = _length_bounds(orig_len)
+    skip_rewrite = os.environ.get("FAA_SKIP_REWRITE", "").strip().lower() in {"1", "true", "yes", "on"}
 
-    if test_mode:
+    if skip_rewrite:
+        print("[rewriter] FAA_SKIP_REWRITE=1: using original transcript as script", flush=True)
+        script = transcript.strip()
+    elif test_mode:
         print("[rewriter] TEST MODE: using short prompt (~750 words), skipping quality check", flush=True)
         script = _rewrite_script(transcript, language_name, source_title, test_mode=True)
         print(f"[rewriter] TEST MODE: script done ({len(script)} chars)", flush=True)
