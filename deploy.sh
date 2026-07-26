@@ -9,7 +9,7 @@ set -e
 
 FAA_DIR="/workspace/FAA"
 FAA_PORT=16006
-NGROK_TOKEN="2oFXcF3ErF74nLdfF0vUk9ObCBq_4K2Pj98oZzptmf8NchEPC"
+NGROK_TOKEN="${NGROK_TOKEN:-}"
 
 echo ""
 echo "╔══════════════════════════════════════════╗"
@@ -166,7 +166,11 @@ echo "=== [8/8] Ngrok setup ==="
 if ! command -v ngrok &>/dev/null; then
     curl -s https://ngrok-agent.s3.amazonaws.com/ngrok-v3-stable-linux-amd64.tgz | tar xz -C /usr/local/bin
 fi
-ngrok config add-authtoken "$NGROK_TOKEN" 2>/dev/null || true
+if [ -n "$NGROK_TOKEN" ]; then
+    ngrok config add-authtoken "$NGROK_TOKEN" 2>/dev/null || true
+else
+    echo "NGROK_TOKEN not set — skipping ngrok auth (export NGROK_TOKEN=... if needed)"
+fi
 
 # ──────────────────────────────────────────────
 # LAUNCH

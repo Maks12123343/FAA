@@ -78,16 +78,39 @@ def generate(text: str, language: str, output_path: str) -> str:
     if status not in _DONE_STATUSES:
         raise RuntimeError(f"TTS task {task_id} timed out after {MAX_WAIT}s (last status: {status})")
 
-    # Download result
+    # Download result.
+    # Пишемо в .part і тільки потім атомарно перейменовуємо. Callers вважають
+    # існуючий voiceover.mp3 валідним кешем, тому обірваний download не має
+    # права залишити після себе файл під кінцевим іменем — інакше наступний
+    # запуск тихо збере відео з обрізаною озвучкою.
     dr = requests.get(f"{base_url}/tasks/{task_id}/result", headers=headers, timeout=300, stream=True)
     dr.raise_for_status()
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "wb") as f:
-        for chunk in dr.iter_content(chunk_size=8192):
-            f.write(chunk)
+    part_path = output_path + ".part"
+    written = 0
+    try:
+        with open(part_path, "wb") as f:
+            for chunk in dr.iter_content(chunk_size=8192):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                written += len(chunk)
+            f.flush()
+            os.fsync(f.fileno())
+        if written < 1024:
+            raise RuntimeError(
+                f"TTS result for task {task_id} is too small ({written} bytes) — treating as failed"
+            )
+        os.replace(part_path, output_path)
+    except BaseException:
+        try:
+            os.unlink(part_path)
+        except OSError:
+            pass
+        raise
 
-    print(f"[tts] Saved to {output_path}", flush=True)
+    print(f"[tts] Saved to {output_path} ({written} bytes)", flush=True)
     return output_path
 
 

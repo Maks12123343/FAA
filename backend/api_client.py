@@ -14,6 +14,12 @@ def _byesu_settings(use_rewrite_model: bool = True) -> tuple[str, str, str]:
     api_key = (os.environ.get("BYESU_API_KEY") or settings.get("byesu_api_key", "")).strip()
     if not api_key:
         raise RuntimeError("No BYESU_API_KEY env var or byesu_api_key configured in Settings.")
+    try:
+        api_key.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise RuntimeError("BYESU_API_KEY must be the real ASCII API key, not a placeholder like 'твій_ключ'.") from exc
+    if not api_key.startswith("sk-"):
+        raise RuntimeError("BYESU_API_KEY must start with 'sk-'.")
 
     api_url = (
         os.environ.get("BYESU_API_URL")

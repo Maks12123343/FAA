@@ -431,8 +431,17 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
     transcript = state["transcript"]
     source_title = state.get("source_title", "")
 
-    # Проект
-    proj_id = f"{niche}_{language}_{int(time.time())}"
+    # Проект.
+    # proj_id детермінований: (prepare_id, niche, language) -> та сама тека.
+    # Раніше тут стояв int(time.time()), через що кожна спроба створювала нову
+    # теку і кеш script.txt / metadata.json / voiceover.mp3 / clips.json ніколи
+    # не спрацьовував — retry переплачував за rewrite + TTS + Whisper заново.
+    # Формат лишається "<niche>_<lang>_<digits>": на нього спираються
+    # app.py:_infer_project_language і download_ready_from_site.py.
+    _pid_digits = re.sub(r"\D", "", prepare_id)
+    if not _pid_digits:
+        _pid_digits = str(int(hashlib.sha1(prepare_id.encode("utf-8")).hexdigest()[:8], 16))
+    proj_id = f"{niche}_{language}_{_pid_digits}"
     proj_dir = os.path.join(config.PROJECTS_DIR, proj_id)
     os.makedirs(proj_dir, exist_ok=True)
 

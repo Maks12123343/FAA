@@ -118,6 +118,49 @@ def _language_folder(item: dict) -> str:
     return _safe_name(item.get("language_name") or code or "unknown")
 
 
+def _prune_empty_dirs(leaf: Path, stop_at: Path) -> None:
+    """
+    Прибрати теки, що лишились порожніми після невдалого завантаження.
+    _download_file створює теку до початку качання, тому після помилки
+    залишається порожня "<день>/<мова>". Йдемо знизу вгору й видаляємо
+    лише порожні, ніколи не піднімаючись вище out_dir.
+    """
+    try:
+        leaf = leaf.resolve()
+        stop = stop_at.resolve()
+    except OSError:
+        return
+    while leaf != stop and stop in leaf.parents:
+        try:
+            leaf.rmdir()          # OSError, якщо тека не порожня — тоді стоп
+        except OSError:
+            return
+        leaf = leaf.parent
+
+
+def _dest_paths(dest_dir: Path) -> tuple:
+    """
+    Шляхи для video / metadata / project у теці мови.
+
+    Тека мови тепер спільна на весь день, тому друге відео тієї самої мови
+    за той самий день не має перезаписати перше — додаємо суфікс _2, _3, ...
+    """
+    if not (dest_dir / "video.mp4").exists():
+        return (
+            dest_dir / "video.mp4",
+            dest_dir / "metadata.txt",
+            dest_dir / "project.json",
+        )
+    n = 2
+    while (dest_dir / f"video_{n}.mp4").exists():
+        n += 1
+    return (
+        dest_dir / f"video_{n}.mp4",
+        dest_dir / f"metadata_{n}.txt",
+        dest_dir / f"project_{n}.json",
+    )
+
+
 def _download_file(url: str, dest: Path, retries: int, timeout: int) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
@@ -251,20 +294,24 @@ def _run_once(args) -> int:
         print("Dry run only. Nothing downloaded.")
         return 0
 
-    batch_dir = out_dir / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    batch_dir.mkdir(parents=True, exist_ok=True)
+    # Одна тека на ДЕНЬ, а не на кожну перевірку.
+    # Раніше тут стояв "%Y-%m-%d_%H-%M-%S", через що мови з одного джерела
+    # розлітались по десятках тек: сервер робить мови по черзі, а --watch
+    # опитує сайт кожні N хвилин, тож кожна мова потрапляла у власну теку.
+    # mkdir тут навмисно немає — теку створює _download_file. Якщо завантаження
+    # впало, порожню теку прибирає _prune_empty_dirs у except-гілці нижче.
+    batch_dir = out_dir / datetime.now().strftime("%Y-%m-%d")
 
     downloaded = 0
     failed = 0
     for item in projects:
         pid = item["project_id"]
+        dest_dir = None
         try:
             item = _project_metadata(args, pid)
             lang_folder = _language_folder(item)
             dest_dir = batch_dir / lang_folder
-            dest_video = dest_dir / "video.mp4"
-            dest_meta = dest_dir / "metadata.txt"
-            dest_info = dest_dir / "project.json"
+            dest_video, dest_meta, dest_info = _dest_paths(dest_dir)
 
             print(f"[download] {pid} -> {dest_dir}")
             _download_file(_video_url(args, pid), dest_video, args.retries, args.download_timeout)
@@ -283,10 +330,14 @@ def _run_once(args) -> int:
             downloaded += 1
             print(f"[done] {lang_folder}")
         except KeyboardInterrupt:
+            if dest_dir is not None:
+                _prune_empty_dirs(dest_dir, out_dir)
             raise
         except Exception as e:
             failed += 1
             print(f"[error] {pid}: {e}", file=sys.stderr)
+            if dest_dir is not None:
+                _prune_empty_dirs(dest_dir, out_dir)
 
     if downloaded:
         print(f"Batch folder: {batch_dir}")
