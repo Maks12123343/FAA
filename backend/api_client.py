@@ -95,11 +95,19 @@ def call_byesu(
     import requests
 
     api_url, api_key, model = _byesu_settings(use_rewrite_model=use_rewrite_model)
+    settings = config.load_settings()
+    max_tokens_raw = os.environ.get("BYESU_MAX_TOKENS") or settings.get("byesu_max_tokens") or "12000"
     payload = {
         "model": model,
         "messages": [{"role": "system", "content": system}] + messages,
         "stream": False,
     }
+    try:
+        max_tokens = int(max_tokens_raw)
+        if max_tokens > 0:
+            payload["max_tokens"] = max_tokens
+    except (TypeError, ValueError):
+        pass
     body = json.dumps(_clean_for_json(payload), ensure_ascii=False).encode("utf-8")
 
     last_err = None

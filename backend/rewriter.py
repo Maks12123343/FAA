@@ -110,6 +110,13 @@ def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
         f"Original video title: {video_title}",
         f"This is a CHUNK of a longer script. Position: {position.upper()} chunk.",
     ]
+    chunk_min = max(400, int(len(chunk) * MIN_LENGTH_RATIO))
+    chunk_max = max(chunk_min + 200, int(len(chunk) * MAX_LENGTH_RATIO))
+    chunk_target = max(chunk_min, int(len(chunk) * TARGET_LENGTH_RATIO))
+    ctx_lines.append(
+        f"This source chunk is {len(chunk)} characters. Rewrite this chunk to about "
+        f"{chunk_target} characters; hard range: {chunk_min}-{chunk_max} characters."
+    )
     if position == "first":
         ctx_lines.append("Write a strong opening hook. Do NOT close/summarize — the script continues.")
     elif position == "middle":
@@ -241,6 +248,49 @@ def _trim_script(script: str, max_chars: int) -> str:
     return cut.rstrip()
 
 
+def _sentence_list(text: str) -> list:
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", (text or "").strip()) if s.strip()]
+    return sentences or [(text or "").strip()]
+
+
+def _fit_text_by_even_sentences(text: str, min_chars: int, max_chars: int, target_chars: int) -> str:
+    """Fallback compressor for provider failures; preserves beginning, middle, and ending."""
+    text = (text or "").strip()
+    if len(text) <= max_chars:
+        return text
+
+    sentences = _sentence_list(text)
+    if len(sentences) <= 3:
+        return _trim_script(text, max_chars)
+
+    target_chars = max(min_chars, min(max_chars, target_chars))
+    total_len = max(len(text), 1)
+    keep_count = max(2, min(len(sentences), round(len(sentences) * target_chars / total_len)))
+
+    def render(count: int) -> str:
+        if count >= len(sentences):
+            picked = sentences
+        else:
+            indexes = sorted({round(i * (len(sentences) - 1) / max(count - 1, 1)) for i in range(count)})
+            picked = [sentences[i] for i in indexes]
+        return " ".join(picked).strip()
+
+    fitted = render(keep_count)
+    while len(fitted) > max_chars and keep_count > 2:
+        keep_count -= 1
+        fitted = render(keep_count)
+    while len(fitted) < min_chars and keep_count < len(sentences):
+        keep_count += 1
+        candidate = render(keep_count)
+        if len(candidate) > max_chars:
+            break
+        fitted = candidate
+
+    if len(fitted) > max_chars:
+        fitted = _trim_script(fitted, max_chars)
+    return fitted
+
+
 def _compress_script_to_bounds(
     script: str,
     transcript: str,
@@ -282,8 +332,12 @@ def _compress_script_to_bounds(
         user_msg += f"\nPrevious quality feedback to respect:\n{feedback}\n"
     user_msg += f"\nSCRIPT TO COMPRESS:\n{script}"
 
-    text, _ = _call_claude(system, [{"role": "user", "content": user_msg}], timeout=360)
-    return _extract_code_block(text)
+    try:
+        text, _ = _call_claude(system, [{"role": "user", "content": user_msg}], timeout=360)
+        return _extract_code_block(text)
+    except Exception as e:
+        print(f"[rewriter] Compression API failed ({e}); using local sentence fit", flush=True)
+        return _fit_text_by_even_sentences(script, min_chars, max_chars, target_chars)
 
 
 def _compress_until_in_bounds(
@@ -370,8 +424,16 @@ def _compress_parts_to_bounds(
             f"({len(part)} chars -> target {part_target})",
             flush=True,
         )
-        text, _ = _call_claude(system, [{"role": "user", "content": user_msg}], timeout=300)
-        compressed_part = _extract_code_block(text)
+        try:
+            text, _ = _call_claude(system, [{"role": "user", "content": user_msg}], timeout=300)
+            compressed_part = _extract_code_block(text)
+        except Exception as e:
+            print(
+                f"[rewriter] Compressing part {idx}/{len(clean_parts)} failed ({e}); "
+                "using local sentence fit",
+                flush=True,
+            )
+            compressed_part = _fit_text_by_even_sentences(part, part_min, part_max, part_target)
         compressed.append(compressed_part)
 
     script = "\n\n".join(compressed).strip()
