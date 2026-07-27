@@ -475,7 +475,10 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
 
     # ---- thumbnail analysis (library pipeline only) ----
     _thumb_out = os.path.join(proj_dir, "thumbnail_prompt.txt")
-    if os.path.exists(_thumb_out):
+    _skip_thumbnail = os.environ.get("FAA_SKIP_THUMBNAIL", "").strip().lower() in {"1", "true", "yes", "on"}
+    if _skip_thumbnail:
+        log("thumbnail", "FAA_SKIP_THUMBNAIL=1: skipping thumbnail analysis/rewrite")
+    elif os.path.exists(_thumb_out):
         try:
             with open(_thumb_out, encoding="utf-8") as _f:
                 _thumb_prompt = _f.read()
