@@ -860,12 +860,24 @@ def rewrite_all(
                 f"(allowed {min_chars}-{max_chars})."
             )
 
-    meta = _rewrite_metadata(
-        language           = language_name,
-        source_title       = source_title,
-        source_description = source_description,
-        source_tags        = source_tags or [],
-    )
+    skip_metadata = os.environ.get("FAA_SKIP_METADATA", "").strip().lower() in {"1", "true", "yes", "on"}
+    if skip_metadata:
+        print("[rewriter] FAA_SKIP_METADATA=1: using source metadata without rewrite", flush=True)
+        meta = {
+            "title": source_title,
+            "titles": [source_title] if source_title else [],
+            "titles_main": [source_title] if source_title else [],
+            "description": source_description or "",
+            "tags": source_tags or [],
+            "tags_raw": ", ".join(source_tags or []),
+        }
+    else:
+        meta = _rewrite_metadata(
+            language           = language_name,
+            source_title       = source_title,
+            source_description = source_description,
+            source_tags        = source_tags or [],
+        )
 
     return {
         "script":       script,
