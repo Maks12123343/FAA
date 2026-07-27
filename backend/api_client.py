@@ -92,7 +92,15 @@ def call_byesu(
                 timeout=timeout,
             )
             resp.raise_for_status()
-            data = resp.json()
+            try:
+                data = resp.json()
+            except json.JSONDecodeError as exc:
+                body_preview = (resp.text or "")[:500]
+                raise RuntimeError(
+                    f"non-JSON response status={resp.status_code} "
+                    f"content_type={resp.headers.get('Content-Type', '')!r} "
+                    f"body={body_preview!r}"
+                ) from exc
             choice = data["choices"][0]
             text = choice["message"]["content"].strip()
             finish = choice.get("finish_reason") or choice.get("native_finish_reason") or "stop"
