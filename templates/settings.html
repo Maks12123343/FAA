@@ -20,7 +20,7 @@
     <button type="button" class="btn btn-primary" onclick="openAddLangModal()">+ Add Language</button>
   </div>
   <p style="color:#aaa;font-size:13px;margin-bottom:20px">
-    Set voice_id for each language. Leave empty to disable that language.
+    Set VoiceGen voice_id for each language. ElevenLabs voice IDs are also accepted by VoiceGen import.
   </p>
   <div id="voiceProfilesContainer">
     {% for code, profile in settings.voice_profiles.items() %}
@@ -59,7 +59,7 @@
       <input type="text" id="newLangCode" placeholder="e.g. sv" maxlength="5" style="width:100%;text-transform:lowercase">
     </div>
     <div class="field">
-      <label>Voice ID (ElevenLabs)</label>
+      <label>Voice ID (VoiceGen or ElevenLabs)</label>
       <input type="text" id="newLangVoiceId" placeholder="e.g. 1nUkvoDFCcCTjJk9U8mL" style="width:100%">
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
@@ -108,8 +108,8 @@
 </div>
 
 <div class="card">
-  <h2>TTS</h2>
-  <div class="field"><label>TTS API URL</label>
+  <h2>VoiceGen TTS</h2>
+  <div class="field"><label>VoiceGen API URL</label>
     <input type="text" id="tts_api_url" value="{{ settings.tts_api_url }}"></div>
 </div>
 

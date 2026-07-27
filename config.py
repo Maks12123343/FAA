@@ -68,7 +68,12 @@ DEFAULT_SETTINGS = {
 
     # TTS
     "tts_api_key": "",
-    "tts_api_url": "https://voiceapi.csv666.ru",
+    "tts_api_url": "https://qw1voicegencore.pro",
+    "tts_voice_engine": "elevenLabsV3",
+    "tts_settings_preset": "standard",
+    "tts_chunk_size": 1200,
+    "tts_delay_between_chunks": 0.5,
+    "tts_thread_count": 10,
 
     # YouTube API keys (rotated automatically when quota exceeded)
     "youtube_api_key":   "",

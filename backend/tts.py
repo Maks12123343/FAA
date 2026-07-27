@@ -6,8 +6,11 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
 
-POLL_INTERVAL = 5    # seconds between status checks
-MAX_WAIT      = 1800 # max seconds to wait for task (30 min — long scripts need time)
+VOICEGEN_DEFAULT_URL = "https://qw1voicegencore.pro"
+LEGACY_TTS_URLS = {"https://voiceapi.csv666.ru"}
+
+POLL_INTERVAL = 5
+MAX_WAIT = 1800
 
 
 def _get_voice_profile(language: str) -> dict:
@@ -25,68 +28,144 @@ def _get_voice_profile(language: str) -> dict:
     return profile
 
 
-def generate(text: str, language: str, output_path: str) -> str:
-    """
-    Generate TTS audio for text in the given language.
-    Saves MP3 to output_path and returns the path.
-    """
-    settings  = config.load_settings()
-    api_key   = settings.get("tts_api_key", "")
-    base_url  = settings.get("tts_api_url", "https://voiceapi.csv666.ru").rstrip("/")
-    profile   = _get_voice_profile(language)
+def _voicegen_settings() -> tuple[str, str, dict]:
+    settings = config.load_settings()
+    api_key = (
+        os.environ.get("VOICEGEN_API_KEY")
+        or os.environ.get("TTS_API_KEY")
+        or settings.get("tts_api_key", "")
+    ).strip()
+    if not api_key:
+        raise RuntimeError("No VoiceGen API key configured. Set VOICEGEN_API_KEY or tts_api_key in Settings.")
+    try:
+        api_key.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise RuntimeError("VoiceGen API key must be ASCII, for example vg_live_...") from exc
+    if not api_key.startswith("vg_"):
+        raise RuntimeError("VoiceGen API key must start with 'vg_'.")
 
-    headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+    base_url = (
+        os.environ.get("VOICEGEN_API_URL")
+        or os.environ.get("TTS_API_URL")
+        or settings.get("tts_api_url")
+        or VOICEGEN_DEFAULT_URL
+    ).rstrip("/")
+    if base_url in LEGACY_TTS_URLS:
+        base_url = VOICEGEN_DEFAULT_URL
 
+    headers = {"Authorization": f"Bearer {api_key}"}
+    return base_url, api_key, headers
+
+
+def _response_error(resp: requests.Response) -> str:
+    body = ""
+    try:
+        body = (resp.text or "")[:500]
+    except Exception:
+        pass
+    return f"HTTP {resp.status_code}: {body}"
+
+
+def _get_with_retries(url: str, headers: dict, timeout: int, attempts: int = 4, **kwargs) -> requests.Response:
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return requests.get(url, headers=headers, timeout=timeout, **kwargs)
+        except requests.RequestException as exc:
+            last_err = exc
+            if attempt < attempts:
+                wait = min(20, attempt * 5)
+                print(f"[tts] VoiceGen GET failed attempt {attempt}/{attempts}: {exc}; retry in {wait}s", flush=True)
+                time.sleep(wait)
+    raise RuntimeError(f"VoiceGen GET failed after {attempts} attempts: {last_err}")
+
+
+def _voicegen_payload(text: str, language: str, output_path: str) -> dict:
+    settings = config.load_settings()
+    profile = _get_voice_profile(language)
+    voice_engine = profile.get("voice_engine") or settings.get("tts_voice_engine") or "elevenLabsV3"
     payload = {
         "text": text,
-        "template": {
-            "model_id": "eleven_multilingual_v2",
-            "voice_id": profile["voice_id"],
-            "stability": profile.get("stability", 0.85),
-            "similarity_boost": profile.get("similarity_boost", 0.75),
-            "speed": profile.get("speed", 1.0),
-            "style": 0.0,
-            "use_speaker_boost": True,
-        }
+        "filename": os.path.basename(output_path) or "voiceover.mp3",
+        "voice_id": profile["voice_id"],
+        "voice_engine": voice_engine,
+        "settings_preset": profile.get("settings_preset") or settings.get("tts_settings_preset") or "standard",
+        "chunk_size": int(profile.get("chunk_size") or settings.get("tts_chunk_size") or 1200),
+        "delay_between_chunks": float(
+            profile.get("delay_between_chunks") or settings.get("tts_delay_between_chunks") or 0.5
+        ),
+        "thread_count": int(profile.get("thread_count") or settings.get("tts_thread_count") or 10),
+        "auto_start": True,
     }
+    return payload
 
-    print(f"[tts] Creating task for language={language}, chars={len(text)}", flush=True)
-    r = requests.post(f"{base_url}/tasks", json=payload, headers=headers, timeout=30)
-    r.raise_for_status()
-    task_id = r.json()["task_id"]
-    print(f"[tts] Task created: {task_id}", flush=True)
 
-    # Poll until done
-    _DONE_STATUSES = {"ending", "completed", "done", "finished", "success"}
-    _FAIL_STATUSES = {"error", "failed", "cancelled"}
+def generate(text: str, language: str, output_path: str) -> str:
+    """
+    Generate TTS audio through VoiceGen and save MP3 to output_path.
+    """
+    base_url, _api_key, headers = _voicegen_settings()
+    payload = _voicegen_payload(text, language, output_path)
+
+    print(f"[tts] VoiceGen: creating task language={language}, chars={len(text)}", flush=True)
+    r = requests.post(
+        f"{base_url}/api/v1/client/tasks",
+        json=payload,
+        headers={**headers, "Content-Type": "application/json"},
+        timeout=60,
+    )
+    if not r.ok:
+        raise RuntimeError(f"VoiceGen task create failed: {_response_error(r)}")
+    data = r.json()
+    task = data.get("task") or data
+    task_id = task.get("task_id") or task.get("id")
+    if not task_id:
+        raise RuntimeError(f"VoiceGen task create response has no task_id: {data}")
+    print(f"[tts] VoiceGen task created: {task_id}", flush=True)
+
+    _DONE_STATUSES = {"done", "completed", "finished", "success"}
+    _FAIL_STATUSES = {"error", "failed", "cancelled", "canceled"}
     waited = 0
     status = ""
+    progress = None
     while waited < MAX_WAIT:
         time.sleep(POLL_INTERVAL)
         waited += POLL_INTERVAL
 
-        sr = requests.get(f"{base_url}/tasks/{task_id}/status", headers=headers, timeout=30)
-        sr.raise_for_status()
-        status = sr.json().get("status", "")
-        print(f"[tts] Status: {status}", flush=True)
+        sr = _get_with_retries(f"{base_url}/api/v1/client/tasks/{task_id}", headers=headers, timeout=30)
+        if not sr.ok:
+            raise RuntimeError(f"VoiceGen task status failed: {_response_error(sr)}")
+        state = sr.json()
+        task = state.get("task") or state
+        status = (task.get("status") or "").lower()
+        progress = task.get("progress")
+        if progress is None:
+            print(f"[tts] VoiceGen status: {status}", flush=True)
+        else:
+            print(f"[tts] VoiceGen status: {status} ({progress}%)", flush=True)
 
         if status in _DONE_STATUSES:
             break
         if status in _FAIL_STATUSES:
-            raise RuntimeError(f"TTS task {task_id} failed (status: {status})")
+            detail = task.get("error") or task.get("message") or state.get("message") or ""
+            raise RuntimeError(f"VoiceGen task {task_id} failed (status: {status}) {detail}".strip())
 
     if status not in _DONE_STATUSES:
-        raise RuntimeError(f"TTS task {task_id} timed out after {MAX_WAIT}s (last status: {status})")
+        raise RuntimeError(f"VoiceGen task {task_id} timed out after {MAX_WAIT}s (last status: {status})")
 
-    # Download result.
-    # Пишемо в .part і тільки потім атомарно перейменовуємо. Callers вважають
-    # існуючий voiceover.mp3 валідним кешем, тому обірваний download не має
-    # права залишити після себе файл під кінцевим іменем — інакше наступний
-    # запуск тихо збере відео з обрізаною озвучкою.
-    dr = requests.get(f"{base_url}/tasks/{task_id}/result", headers=headers, timeout=300, stream=True)
-    dr.raise_for_status()
+    dr = _get_with_retries(
+        f"{base_url}/api/v1/client/tasks/{task_id}/download",
+        headers=headers,
+        timeout=300,
+        stream=True,
+        allow_redirects=True,
+    )
+    if not dr.ok:
+        raise RuntimeError(f"VoiceGen download failed: {_response_error(dr)}")
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     part_path = output_path + ".part"
     written = 0
     try:
@@ -99,9 +178,7 @@ def generate(text: str, language: str, output_path: str) -> str:
             f.flush()
             os.fsync(f.fileno())
         if written < 1024:
-            raise RuntimeError(
-                f"TTS result for task {task_id} is too small ({written} bytes) — treating as failed"
-            )
+            raise RuntimeError(f"VoiceGen result for task {task_id} is too small ({written} bytes)")
         os.replace(part_path, output_path)
     except BaseException:
         try:
@@ -115,20 +192,19 @@ def generate(text: str, language: str, output_path: str) -> str:
 
 
 def get_balance() -> dict:
-    settings = config.load_settings()
-    api_key  = settings.get("tts_api_key", "")
-    base_url = settings.get("tts_api_url", "https://voiceapi.csv666.ru").rstrip("/")
-    headers  = {"X-API-Key": api_key}
-    r = requests.get(f"{base_url}/balance", headers=headers, timeout=10)
-    r.raise_for_status()
+    base_url, _api_key, headers = _voicegen_settings()
+    r = _get_with_retries(f"{base_url}/api/v1/client/me", headers=headers, timeout=10)
+    if not r.ok:
+        raise RuntimeError(f"VoiceGen profile failed: {_response_error(r)}")
     return r.json()
 
 
 def list_templates() -> list:
-    settings = config.load_settings()
-    api_key  = settings.get("tts_api_key", "")
-    base_url = settings.get("tts_api_url", "https://voiceapi.csv666.ru").rstrip("/")
-    headers  = {"X-API-Key": api_key}
-    r = requests.get(f"{base_url}/templates", headers=headers, timeout=10)
-    r.raise_for_status()
-    return r.json()
+    base_url, _api_key, headers = _voicegen_settings()
+    r = _get_with_retries(f"{base_url}/api/v1/client/templates", headers=headers, timeout=10)
+    if not r.ok:
+        raise RuntimeError(f"VoiceGen templates failed: {_response_error(r)}")
+    data = r.json()
+    if isinstance(data, list):
+        return data
+    return data.get("templates") or data.get("items") or []
