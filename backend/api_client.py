@@ -55,6 +55,33 @@ def _clean_for_json(value):
     return value
 
 
+def _parse_sse_chat_response(raw: str) -> dict:
+    content_parts = []
+    finish = None
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            item = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        for choice in item.get("choices") or []:
+            delta = choice.get("delta") or {}
+            message = choice.get("message") or {}
+            text = delta.get("content") or message.get("content") or choice.get("text") or ""
+            if isinstance(text, str) and text:
+                content_parts.append(text)
+            finish = choice.get("finish_reason") or choice.get("native_finish_reason") or finish
+    text = "".join(content_parts).strip()
+    if not text:
+        raise RuntimeError("SSE response contained no assistant content")
+    return {"choices": [{"message": {"content": text}, "finish_reason": finish or "stop"}]}
+
+
 def call_byesu(
     system: str,
     messages: list,
@@ -92,13 +119,18 @@ def call_byesu(
                 timeout=timeout,
             )
             resp.raise_for_status()
+            content_type = resp.headers.get("Content-Type", "")
+            raw_text = resp.text or ""
             try:
-                data = resp.json()
+                if "text/event-stream" in content_type.lower() or raw_text.lstrip().startswith("data:"):
+                    data = _parse_sse_chat_response(raw_text)
+                else:
+                    data = resp.json()
             except json.JSONDecodeError as exc:
-                body_preview = (resp.text or "")[:500]
+                body_preview = raw_text[:500]
                 raise RuntimeError(
                     f"non-JSON response status={resp.status_code} "
-                    f"content_type={resp.headers.get('Content-Type', '')!r} "
+                    f"content_type={content_type!r} "
                     f"body={body_preview!r}"
                 ) from exc
             choice = data["choices"][0]
