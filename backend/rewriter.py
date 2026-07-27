@@ -38,7 +38,14 @@ def _call_claude(system: str, messages: list, timeout: int = 300, max_retries: i
 
 # ── Script rewrite ────────────────────────────────────────────────────────────
 
-NUM_CHUNKS = 3  # Скільки частин на які розбити transcript
+def _rewrite_chunk_count() -> int:
+    try:
+        return max(3, min(10, int(os.environ.get("FAA_REWRITE_CHUNKS", "6"))))
+    except (TypeError, ValueError):
+        return 6
+
+
+NUM_CHUNKS = _rewrite_chunk_count()
 _LAST_REWRITTEN_PARTS = []
 
 

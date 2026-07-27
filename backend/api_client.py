@@ -82,6 +82,85 @@ def _parse_sse_chat_response(raw: str) -> dict:
     return {"choices": [{"message": {"content": text}, "finish_reason": finish or "stop"}]}
 
 
+def _responses_url(api_url: str) -> str:
+    api_url = (api_url or "").rstrip("/")
+    if api_url.endswith("/chat/completions"):
+        return api_url[: -len("/chat/completions")] + "/responses"
+    if api_url.endswith("/v1"):
+        return api_url + "/responses"
+    return "https://byesu.com/v1/responses"
+
+
+def _messages_to_responses_input(system: str, messages: list) -> str:
+    blocks = []
+    if system:
+        blocks.append("SYSTEM INSTRUCTIONS:\n" + system)
+    for msg in messages or []:
+        role = str(msg.get("role", "user")).upper()
+        content = msg.get("content", "")
+        blocks.append(f"{role}:\n{content}")
+    return "\n\n---\n\n".join(blocks)
+
+
+def _extract_responses_text(data: dict) -> tuple[str, str]:
+    parts = []
+    for item in data.get("output") or []:
+        for content in item.get("content") or []:
+            text = content.get("text")
+            if isinstance(text, str) and text:
+                parts.append(text)
+    for item in data.get("content") or []:
+        text = item.get("text") if isinstance(item, dict) else None
+        if isinstance(text, str) and text:
+            parts.append(text)
+    text = "".join(parts).strip()
+    if not text and isinstance(data.get("output_text"), str):
+        text = data["output_text"].strip()
+    if not text:
+        raise RuntimeError("Responses API returned no text")
+    finish = data.get("status") or "stop"
+    return text, "max_tokens" if finish == "incomplete" else finish
+
+
+def _call_byesu_responses(
+    api_url: str,
+    api_key: str,
+    model: str,
+    system: str,
+    messages: list,
+    timeout: int,
+    max_tokens_raw,
+) -> tuple[str, str]:
+    import requests
+
+    payload = {
+        "model": model,
+        "input": _messages_to_responses_input(system, messages),
+        "reasoning": {"effort": "minimal"},
+    }
+    try:
+        max_tokens = int(max_tokens_raw)
+        if max_tokens > 0:
+            payload["max_output_tokens"] = max_tokens
+    except (TypeError, ValueError):
+        pass
+    body = json.dumps(_clean_for_json(payload), ensure_ascii=False).encode("utf-8")
+    resp = requests.post(
+        _responses_url(api_url),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": "FAA/1.0",
+            "Accept": "application/json",
+        },
+        data=body,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return _extract_responses_text(data)
+
+
 def call_byesu(
     system: str,
     messages: list,
@@ -101,6 +180,7 @@ def call_byesu(
         "model": model,
         "messages": [{"role": "system", "content": system}] + messages,
         "stream": False,
+        "reasoning_effort": "minimal",
     }
     try:
         max_tokens = int(max_tokens_raw)
@@ -148,6 +228,20 @@ def call_byesu(
             return text, stop_reason
         except Exception as e:
             detail = f"{type(e).__name__}: {e}"
+            if "SSE response contained no assistant content" in detail:
+                try:
+                    print("[api_client] Byesu chat returned empty SSE; trying Responses API...", flush=True)
+                    return _call_byesu_responses(
+                        api_url=api_url,
+                        api_key=api_key,
+                        model=model,
+                        system=system,
+                        messages=messages,
+                        timeout=timeout,
+                        max_tokens_raw=max_tokens_raw,
+                    )
+                except Exception as fallback_e:
+                    detail += f"; responses fallback {type(fallback_e).__name__}: {fallback_e}"
             try:
                 if getattr(e, "response", None) is not None:
                     detail += f" status={e.response.status_code}"
