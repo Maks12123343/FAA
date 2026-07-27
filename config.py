@@ -65,6 +65,7 @@ DEFAULT_SETTINGS = {
     "byesu_model": "gpt-5.5",
     "byesu_rewrite_model": "gpt-5.5",
     "byesu_api_url": "https://byesu.com/v1/chat/completions",
+    "byesu_reasoning_effort": "high",
 
     # TTS
     "tts_api_key": "",

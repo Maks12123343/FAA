@@ -91,6 +91,20 @@ def _responses_url(api_url: str) -> str:
     return "https://byesu.com/v1/responses"
 
 
+def _reasoning_effort(settings: dict, model: str) -> str:
+    effort = (
+        os.environ.get("BYESU_REASONING_EFFORT")
+        or settings.get("byesu_reasoning_effort")
+        or "high"
+    )
+    effort = str(effort).strip().lower()
+    if effort in {"", "off", "false", "0"}:
+        return ""
+    if model.strip().lower() == "gpt-5.4" and effort == "minimal":
+        return "low"
+    return effort
+
+
 def _messages_to_responses_input(system: str, messages: list) -> str:
     blocks = []
     if system:
@@ -130,14 +144,16 @@ def _call_byesu_responses(
     messages: list,
     timeout: int,
     max_tokens_raw,
+    reasoning_effort: str,
 ) -> tuple[str, str]:
     import requests
 
     payload = {
         "model": model,
         "input": _messages_to_responses_input(system, messages),
-        "reasoning": {"effort": "minimal"},
     }
+    if reasoning_effort:
+        payload["reasoning"] = {"effort": reasoning_effort}
     try:
         max_tokens = int(max_tokens_raw)
         if max_tokens > 0:
@@ -176,12 +192,14 @@ def call_byesu(
     api_url, api_key, model = _byesu_settings(use_rewrite_model=use_rewrite_model)
     settings = config.load_settings()
     max_tokens_raw = os.environ.get("BYESU_MAX_TOKENS") or settings.get("byesu_max_tokens") or "12000"
+    reasoning_effort = _reasoning_effort(settings, model)
     payload = {
         "model": model,
         "messages": [{"role": "system", "content": system}] + messages,
         "stream": False,
-        "reasoning_effort": "minimal",
     }
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     try:
         max_tokens = int(max_tokens_raw)
         if max_tokens > 0:
@@ -239,6 +257,7 @@ def call_byesu(
                         messages=messages,
                         timeout=timeout,
                         max_tokens_raw=max_tokens_raw,
+                        reasoning_effort=reasoning_effort,
                     )
                 except Exception as fallback_e:
                     detail += f"; responses fallback {type(fallback_e).__name__}: {fallback_e}"
