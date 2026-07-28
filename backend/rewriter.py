@@ -41,7 +41,7 @@ def _call_claude(system: str, messages: list, timeout: int = 300, max_retries: i
 def _rewrite_chunk_count() -> int:
     try:
         settings = config.load_settings()
-        raw = os.environ.get("FAA_REWRITE_CHUNKS") or settings.get("rewrite_chunks") or 6
+        raw = settings.get("rewrite_chunks") or os.environ.get("FAA_REWRITE_CHUNKS") or 6
         return max(3, min(10, int(raw)))
     except (TypeError, ValueError):
         return 6
@@ -823,10 +823,7 @@ def rewrite_all(
     orig_len = len(transcript)
     min_chars, max_chars = _length_bounds(orig_len)
     settings = config.load_settings()
-    skip_rewrite = (
-        os.environ.get("FAA_SKIP_REWRITE", "").strip().lower() in {"1", "true", "yes", "on"}
-        or not bool(settings.get("rewrite_script_enabled", True))
-    )
+    skip_rewrite = not bool(settings.get("rewrite_script_enabled", True))
 
     if skip_rewrite:
         print("[rewriter] script rewrite disabled: using original transcript as script", flush=True)
@@ -936,10 +933,7 @@ def rewrite_all(
                 f"(allowed {min_chars}-{max_chars})."
             )
 
-    skip_metadata = (
-        os.environ.get("FAA_SKIP_METADATA", "").strip().lower() in {"1", "true", "yes", "on"}
-        or not bool(settings.get("rewrite_metadata_enabled", True))
-    )
+    skip_metadata = not bool(settings.get("rewrite_metadata_enabled", True))
     if skip_metadata:
         print("[rewriter] metadata rewrite disabled: using source metadata without rewrite", flush=True)
         meta = {

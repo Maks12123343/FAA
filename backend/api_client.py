@@ -11,9 +11,9 @@ import config
 
 def _byesu_settings(use_rewrite_model: bool = True) -> tuple[str, str, str]:
     settings = config.load_settings()
-    api_key = (os.environ.get("BYESU_API_KEY") or settings.get("byesu_api_key", "")).strip()
+    api_key = (settings.get("byesu_api_key", "") or os.environ.get("BYESU_API_KEY", "")).strip()
     if not api_key:
-        raise RuntimeError("No BYESU_API_KEY env var or byesu_api_key configured in Settings.")
+        raise RuntimeError("No Byesu API key configured in Settings.")
     try:
         api_key.encode("ascii")
     except UnicodeEncodeError as exc:
@@ -22,24 +22,24 @@ def _byesu_settings(use_rewrite_model: bool = True) -> tuple[str, str, str]:
         raise RuntimeError("BYESU_API_KEY must start with 'sk-'.")
 
     api_url = (
-        os.environ.get("BYESU_API_URL")
-        or settings.get("byesu_api_url")
+        settings.get("byesu_api_url")
+        or os.environ.get("BYESU_API_URL")
         or "https://byesu.com/v1/chat/completions"
     )
     if use_rewrite_model:
         model = (
-            os.environ.get("BYESU_REWRITE_MODEL")
-            or settings.get("byesu_rewrite_model")
-            or os.environ.get("BYESU_MODEL")
+            settings.get("byesu_rewrite_model")
+            or os.environ.get("BYESU_REWRITE_MODEL")
             or settings.get("byesu_model")
+            or os.environ.get("BYESU_MODEL")
             or "gpt-5.5"
         )
     else:
         model = (
-            os.environ.get("BYESU_MODEL")
-            or settings.get("byesu_model")
-            or os.environ.get("BYESU_REWRITE_MODEL")
+            settings.get("byesu_model")
+            or os.environ.get("BYESU_MODEL")
             or settings.get("byesu_rewrite_model")
+            or os.environ.get("BYESU_REWRITE_MODEL")
             or "gpt-5.5"
         )
     return api_url, api_key, model
@@ -93,8 +93,8 @@ def _responses_url(api_url: str) -> str:
 
 def _reasoning_effort(settings: dict, model: str) -> str:
     effort = (
-        os.environ.get("BYESU_REASONING_EFFORT")
-        or settings.get("byesu_reasoning_effort")
+        settings.get("byesu_reasoning_effort")
+        or os.environ.get("BYESU_REASONING_EFFORT")
         or "high"
     )
     effort = str(effort).strip().lower()

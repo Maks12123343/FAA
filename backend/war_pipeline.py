@@ -476,10 +476,7 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
     # ---- thumbnail analysis (library pipeline only) ----
     _thumb_out = os.path.join(proj_dir, "thumbnail_prompt.txt")
     _settings = config.load_settings()
-    _skip_thumbnail = (
-        os.environ.get("FAA_SKIP_THUMBNAIL", "").strip().lower() in {"1", "true", "yes", "on"}
-        or not bool(_settings.get("rewrite_thumbnail_enabled", True))
-    )
+    _skip_thumbnail = not bool(_settings.get("rewrite_thumbnail_enabled", True))
     if _skip_thumbnail:
         log("thumbnail", "thumbnail rewrite disabled: skipping thumbnail analysis/rewrite")
     elif os.path.exists(_thumb_out):
