@@ -77,22 +77,60 @@
 </div>
 
 <div class="card">
-  <h2>Byesu API</h2>
+  <h2>Rewrite</h2>
   <p style="color:#aaa;font-size:13px;margin-bottom:16px">
-    OpenAI-compatible API. Якщо ключі є — використовується замість Vertex AI. Можна додати кілька ключів для паралельної валідації.
+    Byesu controls for script rewrite, thumbnail prompt rewrite, and metadata rewrite.
   </p>
   <div class="field">
-    <label>API Key</label>
+    <label>Byesu API Key</label>
     <textarea id="byesu_api_key" rows="2" style="width:100%;background:#1a1a1a;color:#e0e0e0;border:1px solid #333;border-radius:6px;padding:8px;font-family:monospace;font-size:13px">{{ settings.byesu_api_key or '' }}</textarea>
   </div>
   <div class="grid-2">
-    <div class="field"><label>Model ID</label>
-      <input type="text" id="byesu_model" value="{{ settings.byesu_model or 'gpt-5.5' }}"></div>
-    <div class="field"><label>Rewrite Model ID</label>
-      <input type="text" id="byesu_rewrite_model" value="{{ settings.byesu_rewrite_model or 'gpt-5.5' }}"></div>
+    <div class="field"><label>General Byesu Model</label>
+      <input type="text" id="byesu_model" list="rewriteModelOptions" value="{{ settings.byesu_model or 'gpt-5.5' }}"></div>
+    <div class="field"><label>Rewrite Model</label>
+      <input type="text" id="byesu_rewrite_model" list="rewriteModelOptions" value="{{ settings.byesu_rewrite_model or 'gpt-5.5' }}">
+      <datalist id="rewriteModelOptions">
+        <option value="gpt-5.5"></option>
+        <option value="gpt-5.4"></option>
+        <option value="gpt-5.4-mini"></option>
+        <option value="gpt-5.6-luna"></option>
+        <option value="gpt-5.6-sol"></option>
+        <option value="gpt-5.6-terra"></option>
+        <option value="gpt-5.4-openai-compact"></option>
+        <option value="claude-fable-5"></option>
+      </datalist>
+    </div>
   </div>
   <div class="field"><label>API URL</label>
     <input type="text" id="byesu_api_url" value="{{ settings.byesu_api_url or 'https://byesu.com/v1/chat/completions' }}"></div>
+  <div class="grid-2">
+    <div class="field">
+      <label>Reasoning Effort</label>
+      <select id="byesu_reasoning_effort">
+        {% set effort = settings.byesu_reasoning_effort or 'high' %}
+        {% for item in ['none','low','medium','high','xhigh'] %}
+        <option value="{{ item }}" {% if effort == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field"><label>Rewrite Chunks</label>
+      <input type="text" id="rewrite_chunks" value="{{ settings.rewrite_chunks or 6 }}"></div>
+  </div>
+  <div style="display:grid;gap:10px;margin-top:8px">
+    <label style="display:flex;align-items:center;gap:10px;color:#ddd;margin:0">
+      <input type="checkbox" id="rewrite_script_enabled" {% if settings.rewrite_script_enabled %}checked{% endif %} style="width:auto">
+      Rewrite + translate script
+    </label>
+    <label style="display:flex;align-items:center;gap:10px;color:#ddd;margin:0">
+      <input type="checkbox" id="rewrite_thumbnail_enabled" {% if settings.rewrite_thumbnail_enabled %}checked{% endif %} style="width:auto">
+      Rewrite thumbnail / preview
+    </label>
+    <label style="display:flex;align-items:center;gap:10px;color:#ddd;margin:0">
+      <input type="checkbox" id="rewrite_metadata_enabled" {% if settings.rewrite_metadata_enabled %}checked{% endif %} style="width:auto">
+      Rewrite metadata
+    </label>
+  </div>
 </div>
 
 <div class="card">
@@ -235,6 +273,11 @@ function saveSettings() {
     byesu_model:       document.getElementById('byesu_model').value,
     byesu_rewrite_model: document.getElementById('byesu_rewrite_model').value,
     byesu_api_url:     document.getElementById('byesu_api_url').value,
+    byesu_reasoning_effort: document.getElementById('byesu_reasoning_effort').value,
+    rewrite_chunks:    parseInt(document.getElementById('rewrite_chunks').value) || 6,
+    rewrite_script_enabled: document.getElementById('rewrite_script_enabled').checked,
+    rewrite_thumbnail_enabled: document.getElementById('rewrite_thumbnail_enabled').checked,
+    rewrite_metadata_enabled: document.getElementById('rewrite_metadata_enabled').checked,
     tts_api_key:       document.getElementById('tts_api_key').value,
     tts_api_url:       document.getElementById('tts_api_url').value,
     youtube_api_key:   document.getElementById('youtube_api_key').value,

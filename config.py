@@ -66,6 +66,10 @@ DEFAULT_SETTINGS = {
     "byesu_rewrite_model": "gpt-5.5",
     "byesu_api_url": "https://byesu.com/v1/chat/completions",
     "byesu_reasoning_effort": "high",
+    "rewrite_script_enabled": True,
+    "rewrite_thumbnail_enabled": True,
+    "rewrite_metadata_enabled": True,
+    "rewrite_chunks": 6,
 
     # TTS
     "tts_api_key": "",
@@ -131,6 +135,12 @@ def _coerce_settings(data: dict) -> dict:
         "output_width":  1,
         "output_height": 1,
         "fps":           1,
+        "rewrite_chunks": 3,
+    }
+    bool_fields = {
+        "rewrite_script_enabled",
+        "rewrite_thumbnail_enabled",
+        "rewrite_metadata_enabled",
     }
     for key, (lo, hi) in float_fields.items():
         if key in data:
@@ -146,9 +156,19 @@ def _coerce_settings(data: dict) -> dict:
     for key, minimum in int_fields.items():
         if key in data:
             try:
-                data[key] = max(minimum, int(data[key]))
+                val = max(minimum, int(data[key]))
+                if key == "rewrite_chunks":
+                    val = min(10, val)
+                data[key] = val
             except (TypeError, ValueError):
                 data.pop(key, None)
+    for key in bool_fields:
+        if key in data:
+            val = data[key]
+            if isinstance(val, str):
+                data[key] = val.strip().lower() in {"1", "true", "yes", "on", "checked"}
+            else:
+                data[key] = bool(val)
     # Guard: clip_min <= clip_max
     lo = data.get("clip_min_duration")
     hi = data.get("clip_max_duration")
