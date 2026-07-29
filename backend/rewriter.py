@@ -224,12 +224,12 @@ def _rewrite_script(transcript: str, language: str, video_title: str,
 
 
 # Length is relative to the original transcript:
-#   - minimum: 0.50x of original
-#   - target:  0.55x of original
-#   - maximum: 0.60x of original
-MIN_LENGTH_RATIO = 0.50
-TARGET_LENGTH_RATIO = 0.55
-MAX_LENGTH_RATIO = 0.60
+#   - minimum: 0.70x of original
+#   - target:  0.75x of original
+#   - maximum: 0.80x of original
+MIN_LENGTH_RATIO = 0.70
+TARGET_LENGTH_RATIO = 0.75
+MAX_LENGTH_RATIO = 0.80
 
 
 def _length_bounds(original_length: int) -> tuple:
@@ -480,7 +480,7 @@ def _quality_check_script(script: str, transcript: str, language: str, test_mode
         f"REWRITTEN SCRIPT ({script_len} chars, {pct}% of original):\n{script_preview}\n\n"
         f"{'...[truncated]' if script_len > 4000 else ''}\n\n"
         f"Evaluate the rewritten script on these criteria:\n"
-        f"1. LENGTH: Must be between 50% and 60% of the original, with an ideal target near 55%. "
+        f"1. LENGTH: Must be between 70% and 80% of the original, with an ideal target near 75%. "
         f"(original={orig_len} chars, rewritten={script_len} chars = {pct}%, "
         f"allowed range: {min_chars}-{max_chars} chars)\n"
         f"2. COMPLETENESS: Are all key events, facts, and narrative beats preserved?\n"
@@ -489,7 +489,7 @@ def _quality_check_script(script: str, transcript: str, language: str, test_mode
         f"4. NO REPETITION: Is it free of unnecessary repetition or filler?\n"
         f"5. LANGUAGE: Is it correctly and fluently written in {language}?\n"
         f"6. UNIQUENESS: Is it genuinely rewritten (not just synonymized)?\n\n"
-        f"Scoring: 1-10. PASSED if score >= 7 AND length is between 50% and 60% of original.\n\n"
+        f"Scoring: 1-10. PASSED if score >= 7 AND length is between 70% and 80% of original.\n\n"
         f"Reply with JSON only, no markdown:\n"
         f'{{\"score\": 8, \"passed\": true, \"issues\": [\"issue1\", \"issue2\"], '
         f'\"feedback\": \"Specific actionable feedback for improvement\"}}'
@@ -513,13 +513,13 @@ def _quality_check_script(script: str, transcript: str, language: str, test_mode
                 passed   = False
                 feedback = (
                     f"Script is too short: {script_len} chars ({pct}% of original {orig_len} chars). "
-                    f"Must be at least {min_chars} chars (50% of original). " + feedback
+                    f"Must be at least {min_chars} chars (70% of original). " + feedback
                 )
             elif script_len > max_chars:
                 passed   = False
                 feedback = (
                     f"Script is too long: {script_len} chars ({pct}% of original {orig_len} chars). "
-                    f"Must be at most {max_chars} chars (60% of original). "
+                    f"Must be at most {max_chars} chars (80% of original). "
                     f"Rewrite more concisely while preserving all key events. " + feedback
                 )
 
@@ -848,7 +848,7 @@ def rewrite_all(
             )
             script = _rewrite_script(transcript, language_name, source_title, feedback=feedback, test_mode=False)
 
-            # If the model overshot 60%, compress the whole script with an LLM
+            # If the model overshot the max length, compress the whole script with an LLM
             # pass instead of cutting off sentences from the end.
             was_compressed = False
             parts = list(_LAST_REWRITTEN_PARTS) or [p for p in script.split("\n\n") if p.strip()]

@@ -48,14 +48,14 @@ Before delivering the result, ensure that:
 If in doubt — choose a more literal preservation of meaning.
 
 LENGTH CONTROL — CRITICAL
-* The final text length MUST be between 50% and 60% of the original. Both bounds are non-negotiable.
-* Ideal target: about 55% of the original.
+* The final text length MUST be between 70% and 80% of the original. Both bounds are non-negotiable.
+* Ideal target: about 75% of the original.
 * Compress the source intelligently: keep all key events, facts, names, numbers, cause-and-effect, and narrative beats, but remove filler, repeated explanations, slow setup, and non-essential wording.
-* Excessive compression is forbidden — never write less than 50% of the original.
-* Excessive expansion is forbidden — never write more than 60% of the original. Do not pad, do not add filler, do not invent additional context to inflate length.
-* If you find yourself writing less than 50% — restore important details and context.
-* If you find yourself writing more than 60% — tighten the prose and remove repetition.
-* Count your characters before submitting. Confirm you are within the 50%-60% window and close to the 55% target.
+* Excessive compression is forbidden — never write less than 70% of the original.
+* Excessive expansion is forbidden — never write more than 80% of the original. Do not pad, do not add filler, do not invent additional context to inflate length.
+* If you find yourself writing less than 70% — restore important details and context.
+* If you find yourself writing more than 80% — tighten the prose and remove repetition.
+* Count your characters before submitting. Confirm you are within the 70%-80% window and close to the 75% target.
 
 RESPONSE FORMAT (STRICTLY MANDATORY)
 * Main text: only in a code block; without comments inside
