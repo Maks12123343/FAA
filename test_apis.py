@@ -60,37 +60,16 @@ def main():
     settings = json.load(open(settings_path, encoding="utf-8"))
 
     print("=" * 70)
-    print("Pioneer API keys")
+    print("Rewrite API (A6API)")
     print("=" * 70)
-    pio_url = settings.get("pioneer_api_url", "")
-    pio_model = settings.get("pioneer_model", "gemini-3.5-flash")
-    pio_keys = settings.get("pioneer_api_keys", [])
-    for i, k in enumerate(pio_keys, 1):
-        ok, msg = _ping_openai_compat(pio_url, k, pio_model, "pioneer")
-        print(f"  Key #{i} ({_short(k)}): {msg}")
-
-    pio_rewrite = settings.get("pioneer_rewrite_key", "").strip()
-    pio_rewrite_model = settings.get("pioneer_rewrite_model", "claude-opus-4-7")
-    if pio_rewrite:
-        ok, msg = _ping_openai_compat(pio_url, pio_rewrite, pio_rewrite_model, "pioneer-rewrite")
-        print(f"  Rewrite ({_short(pio_rewrite)}, model={pio_rewrite_model}): {msg}")
-
-    print()
-    print("=" * 70)
-    print("GigaCoder API keys")
-    print("=" * 70)
-    gc_url = settings.get("gigacoder_api_url", "")
-    gc_model = settings.get("gigacoder_model", "gpt-5.4-mini")
-    gc_keys = settings.get("gigacoder_api_keys", [])
-    for i, k in enumerate(gc_keys, 1):
-        ok, msg = _ping_openai_compat(gc_url, k, gc_model, "gigacoder")
-        print(f"  Key #{i} ({_short(k)}): {msg}")
-
-    gc_rewrite = settings.get("gigacoder_rewrite_key", "").strip()
-    gc_rewrite_model = settings.get("gigacoder_rewrite_model", "claude-opus-4-8")
-    if gc_rewrite:
-        ok, msg = _ping_openai_compat(gc_url, gc_rewrite, gc_rewrite_model, "gigacoder-rewrite")
-        print(f"  Rewrite ({_short(gc_rewrite)}, model={gc_rewrite_model}): {msg}")
+    rewrite_url = settings.get("rewrite_api_url", "https://a6api.com/v1/chat/completions")
+    rewrite_key = settings.get("rewrite_api_key", "").strip()
+    rewrite_model = settings.get("rewrite_model", "gpt-5.5")
+    if rewrite_key:
+        ok, msg = _ping_openai_compat(rewrite_url, rewrite_key, rewrite_model, "rewrite")
+        print(f"  Rewrite ({_short(rewrite_key)}, model={rewrite_model}): {msg}")
+    else:
+        print("  rewrite_api_key: (empty, skipped)")
 
     print()
     print("=" * 70)

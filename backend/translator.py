@@ -25,7 +25,7 @@ def translate_sections(section_texts: list, language: str, project_dir: str = No
     Translate section texts to English for clip matching.
     If language is English, returns texts as-is.
     Results are cached to project_dir/sections_english.json.
-    Uses Byesu API (batch of ~30 sections per call).
+    Uses A6API (batch of ~30 sections per call).
     """
     if _is_english(language):
         return section_texts
@@ -75,7 +75,7 @@ _BATCH_SIZE = 30
 
 
 def _batch_translate(texts: list, source_lang: str, emit=None) -> list:
-    """Translate texts in batches using Byesu API."""
+    """Translate texts in batches using A6API."""
     source_lang_name = lang_utils.configured_language_name(source_lang)
 
     all_translated = []
@@ -91,18 +91,17 @@ def _batch_translate(texts: list, source_lang: str, emit=None) -> list:
 
         result_texts = None
         try:
-            raw_text, _ = api_client.call_byesu(
+            raw_text, _ = api_client.call_rewrite_api(
                 "You are a translator. Translate accurately and concisely. Keep numbering format: '1. translation'",
                 [{"role": "user", "content": prompt}],
                 timeout=120,
                 max_retries=3,
                 emit=emit,
                 step_label="translate",
-                use_rewrite_model=False,
             )
             result_texts = _parse_numbered(raw_text, len(batch))
         except Exception as e:
-            print(f"[translator] Batch {batch_idx+1} Byesu error: {e}", flush=True)
+            print(f"[translator] Batch {batch_idx+1} A6API error: {e}", flush=True)
 
         if result_texts and len(result_texts) == len(batch):
             all_translated.extend(result_texts)

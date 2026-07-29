@@ -9,42 +9,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
 
 
-def _byesu_settings(use_rewrite_model: bool = True) -> tuple[str, str, str]:
-    settings = config.load_settings()
-    api_key = (settings.get("byesu_api_key", "") or os.environ.get("BYESU_API_KEY", "")).strip()
-    if not api_key:
-        raise RuntimeError("No Byesu API key configured in Settings.")
-    try:
-        api_key.encode("ascii")
-    except UnicodeEncodeError as exc:
-        raise RuntimeError("BYESU_API_KEY must be the real ASCII API key, not a placeholder like 'твій_ключ'.") from exc
-    if not api_key.startswith("sk-"):
-        raise RuntimeError("BYESU_API_KEY must start with 'sk-'.")
-
-    api_url = (
-        settings.get("byesu_api_url")
-        or os.environ.get("BYESU_API_URL")
-        or "https://byesu.com/v1/chat/completions"
-    )
-    if use_rewrite_model:
-        model = (
-            settings.get("byesu_rewrite_model")
-            or os.environ.get("BYESU_REWRITE_MODEL")
-            or settings.get("byesu_model")
-            or os.environ.get("BYESU_MODEL")
-            or "gpt-5.5"
-        )
-    else:
-        model = (
-            settings.get("byesu_model")
-            or os.environ.get("BYESU_MODEL")
-            or settings.get("byesu_rewrite_model")
-            or os.environ.get("BYESU_REWRITE_MODEL")
-            or "gpt-5.5"
-        )
-    return api_url, api_key, model
-
-
 def _clean_for_json(value):
     if isinstance(value, str):
         return value.encode("utf-8", "replace").decode("utf-8")
@@ -88,26 +52,12 @@ def _responses_url(api_url: str) -> str:
         return api_url[: -len("/chat/completions")] + "/responses"
     if api_url.endswith("/v1"):
         return api_url + "/responses"
-    return "https://byesu.com/v1/responses"
-
-
-def _reasoning_effort(settings: dict, model: str) -> str:
-    effort = (
-        settings.get("byesu_reasoning_effort")
-        or os.environ.get("BYESU_REASONING_EFFORT")
-        or "high"
-    )
-    effort = str(effort).strip().lower()
-    if effort in {"", "off", "false", "0"}:
-        return ""
-    if model.strip().lower() == "gpt-5.4" and effort == "minimal":
-        return "low"
-    return effort
+    return "https://a6api.com/v1/responses"
 
 
 def _rewrite_settings() -> tuple[str, str, str, str, str]:
     settings = config.load_settings()
-    api_key = (settings.get("rewrite_api_key", "") or settings.get("byesu_api_key", "") or os.environ.get("BYESU_API_KEY", "")).strip()
+    api_key = (settings.get("rewrite_api_key", "") or os.environ.get("REWRITE_API_KEY", "")).strip()
     if not api_key:
         raise RuntimeError("No rewrite API key configured in Settings.")
     try:
@@ -117,25 +67,20 @@ def _rewrite_settings() -> tuple[str, str, str, str, str]:
 
     api_url = (
         settings.get("rewrite_api_url")
-        or settings.get("byesu_api_url")
-        or os.environ.get("BYESU_API_URL")
+        or os.environ.get("REWRITE_API_URL")
         or "https://a6api.com/v1/chat/completions"
     )
     model = (
         settings.get("rewrite_model")
-        or settings.get("byesu_rewrite_model")
-        or settings.get("byesu_model")
-        or os.environ.get("BYESU_REWRITE_MODEL")
-        or os.environ.get("BYESU_MODEL")
+        or os.environ.get("REWRITE_MODEL")
         or "gpt-5.5"
     )
     reasoning = (
         settings.get("rewrite_reasoning_effort")
-        or settings.get("byesu_reasoning_effort")
-        or os.environ.get("BYESU_REASONING_EFFORT")
+        or os.environ.get("REWRITE_REASONING_EFFORT")
         or "high"
     )
-    max_tokens_raw = settings.get("rewrite_max_tokens") or settings.get("byesu_max_tokens") or os.environ.get("BYESU_MAX_TOKENS") or "12000"
+    max_tokens_raw = settings.get("rewrite_max_tokens") or os.environ.get("REWRITE_MAX_TOKENS") or "12000"
     return api_url, api_key, model, reasoning, max_tokens_raw
 
 
@@ -170,7 +115,7 @@ def _extract_responses_text(data: dict) -> tuple[str, str]:
     return text, "max_tokens" if finish == "incomplete" else finish
 
 
-def _call_byesu_responses(
+def _call_rewrite_responses(
     api_url: str,
     api_key: str,
     model: str,
@@ -283,7 +228,7 @@ def _call_openai_compatible(
             if "SSE response contained no assistant content" in detail:
                 try:
                     print(f"[api_client] {provider_name} chat returned empty SSE; trying Responses API...", flush=True)
-                    return _call_byesu_responses(
+                    return _call_rewrite_responses(
                         api_url=api_url,
                         api_key=api_key,
                         model=model,
@@ -311,36 +256,6 @@ def _call_openai_compatible(
     raise RuntimeError(f"{provider_name} failed: {last_err}")
 
 
-def call_byesu(
-    system: str,
-    messages: list,
-    timeout: int = 180,
-    max_retries: int = 3,
-    emit=None,
-    step_label: str = "api",
-    use_rewrite_model: bool = True,
-) -> tuple[str, str]:
-    """Call Byesu chat completions and return (text, stop_reason)."""
-    api_url, api_key, model = _byesu_settings(use_rewrite_model=use_rewrite_model)
-    settings = config.load_settings()
-    max_tokens_raw = os.environ.get("BYESU_MAX_TOKENS") or settings.get("byesu_max_tokens") or "12000"
-    reasoning_effort = _reasoning_effort(settings, model)
-    return _call_openai_compatible(
-        provider_name="Byesu",
-        api_url=api_url,
-        api_key=api_key,
-        model=model,
-        system=system,
-        messages=messages,
-        timeout=timeout,
-        max_retries=max_retries,
-        emit=emit,
-        step_label=step_label,
-        reasoning_effort=reasoning_effort,
-        max_tokens_raw=max_tokens_raw,
-    )
-
-
 def call_rewrite_api(
     system: str,
     messages: list,
@@ -364,23 +279,4 @@ def call_rewrite_api(
         step_label=step_label,
         reasoning_effort=reasoning_effort,
         max_tokens_raw=max_tokens_raw,
-    )
-
-
-def call_byesu_rewrite(
-    system: str,
-    messages: list,
-    timeout: int = 180,
-    max_retries: int = 3,
-    emit=None,
-    step_label: str = "api",
-) -> tuple[str, str]:
-    """Backward-compatible alias for the rewrite API."""
-    return call_rewrite_api(
-        system,
-        messages,
-        timeout=timeout,
-        max_retries=max_retries,
-        emit=emit,
-        step_label=step_label,
     )

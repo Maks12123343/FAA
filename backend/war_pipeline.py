@@ -247,7 +247,7 @@ Return ONLY a JSON array, no markdown, no commentary:
 def _plan_text_overlays_war(segments_with_times: list, language: str, emit=None) -> list:
     """
     War-specific overlay planner: highlight ONLY named entities (places, tech,
-    numbers, dates). Uses Byesu. Returns [] on
+    numbers, dates). Uses A6API. Returns [] on
     failure — video will just render without overlays.
     """
     if not segments_with_times:
@@ -269,14 +269,13 @@ def _plan_text_overlays_war(segments_with_times: list, language: str, emit=None)
     )
 
     try:
-        text, _ = api_client.call_byesu(
+        text, _ = api_client.call_rewrite_api(
             "You return JSON only. No markdown, no commentary.",
             [{"role": "user", "content": prompt}],
             timeout=120,
             max_retries=2,
             emit=emit,
             step_label="overlays",
-            use_rewrite_model=False,
         )
     except Exception as e:
         print(f"[war_pipeline] War overlay API failed: {e}", flush=True)

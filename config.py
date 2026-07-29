@@ -70,13 +70,6 @@ DEFAULT_SETTINGS = {
     "rewrite_metadata_enabled": True,
     "rewrite_chunks": 6,
 
-    # Legacy Byesu API (used by older validator/clip paths)
-    "byesu_api_key": "",
-    "byesu_model": "gpt-5.5",
-    "byesu_rewrite_model": "gpt-5.5",
-    "byesu_api_url": "https://byesu.com/v1/chat/completions",
-    "byesu_reasoning_effort": "high",
-
     # TTS
     "tts_api_key": "",
     "tts_api_url": "https://qw1voicegencore.pro",
@@ -198,7 +191,8 @@ def load_settings() -> dict:
         return _settings_cache["data"].copy()
     with open(SETTINGS_FILE, "r", encoding="utf-8-sig") as f:
         data = json.load(f)
-    merged = _coerce_settings({**DEFAULT_SETTINGS, **data})
+    known_data = {key: value for key, value in data.items() if key in DEFAULT_SETTINGS}
+    merged = _coerce_settings({**DEFAULT_SETTINGS, **known_data})
     _settings_cache["data"] = merged
     _settings_cache["mtime"] = mtime
     return merged.copy()
@@ -208,8 +202,9 @@ def save_settings(settings: dict):
     """Atomic settings write — crash during write won't corrupt the file."""
     os.makedirs(DATA_DIR, exist_ok=True)
     tmp_path = SETTINGS_FILE + ".tmp"
+    clean = {key: settings.get(key, value) for key, value in DEFAULT_SETTINGS.items()}
     with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(settings, f, indent=2, ensure_ascii=False)
+        json.dump(clean, f, indent=2, ensure_ascii=False)
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp_path, SETTINGS_FILE)

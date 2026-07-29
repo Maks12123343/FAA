@@ -391,8 +391,8 @@ def _normalize_analysis(a: dict) -> dict:
     return a
 
 
-def _analyze_single_byesu(item: dict, movie_name: str) -> dict:
-    """Analyze one clip via Byesu."""
+def _analyze_single_rewrite_api(item: dict, movie_name: str) -> dict:
+    """Analyze one clip via A6API."""
     import base64
 
     content_parts = [{"type": "text", "text": "Frame 1 (start of clip):"}]
@@ -409,7 +409,7 @@ def _analyze_single_byesu(item: dict, movie_name: str) -> dict:
         content_parts.append({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}})
 
     content_parts.append({"type": "text", "text": _SINGLE_PROMPT.format(movie_name=movie_name)})
-    text, _ = api_client.call_byesu(
+    text, _ = api_client.call_rewrite_api(
         "You are a precise visual analyzer. Describe ONLY what is visible in the frames. "
         "Never invent characters or scenes that are not shown. If frames are dark, empty, "
         "or unclear, say so honestly. Reply with valid JSON only, no markdown, no commentary.",
@@ -417,7 +417,6 @@ def _analyze_single_byesu(item: dict, movie_name: str) -> dict:
         timeout=120,
         max_retries=3,
         step_label="movie_library",
-        use_rewrite_model=False,
     )
     text = re.sub(r"^```(?:json)?\s*", "", text.strip())
     text = re.sub(r"\s*```$", "", text)
@@ -425,14 +424,14 @@ def _analyze_single_byesu(item: dict, movie_name: str) -> dict:
     return _normalize_analysis(json.loads(m.group() if m else text))
 
 
-def _analyze_batch_byesu(items: list, movie_name: str) -> list:
+def _analyze_batch_rewrite_api(items: list, movie_name: str) -> list:
     results = []
     for item in items:
         try:
-            a = _analyze_single_byesu(item, movie_name)
+            a = _analyze_single_rewrite_api(item, movie_name)
         except Exception as e:
             clip_id = item.get("clip", {}).get("id", "?")
-            print(f"[movie_library] Byesu single-clip analysis failed for {clip_id}: {e}", flush=True)
+            print(f"[movie_library] A6API single-clip analysis failed for {clip_id}: {e}", flush=True)
             raise
         results.append(a)
     return results
@@ -559,7 +558,7 @@ def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
     def _process_batch(batch):
         for attempt in range(3):
             try:
-                analyses = _analyze_batch_byesu(batch, movie_name)
+                analyses = _analyze_batch_rewrite_api(batch, movie_name)
                 for item, analysis in zip(batch, analyses):
                     clip = item["clip"]
                     analysis["id"]   = clip["id"]
@@ -577,7 +576,7 @@ def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
                 if is_rate and attempt < 2:
                     time.sleep(15 * (attempt + 1))
                 else:
-                    print(f"[movie_library] Byesu analysis failed, using local fallback: {e}", flush=True)
+                    print(f"[movie_library] A6API analysis failed, using local fallback: {e}", flush=True)
                     for item in batch:
                         clip = item["clip"]
                         fallback = {
@@ -595,7 +594,7 @@ def _analyze_all_clips(clips: list, movie_name: str, emit=None) -> list:
 
     # Process analysis batches with bounded parallelism for the HTTP calls.
     # Frame extraction was already sequential. The remaining work is HTTP-only
-    # (Byesu API), which works fine under eventlet's monkey-patched socket.
+    # (A6API), which works fine under eventlet's monkey-patched socket.
     PARALLEL_API = 4
     api_start    = time.time()
 
@@ -871,7 +870,7 @@ def _format_candidates_block(candidates: list) -> str:
 
 
 def _call_text_ranker(prompt: str) -> list | None:
-    """Send the ranking prompt to Byesu. Returns list[float] or None on failure."""
+    """Send the ranking prompt to A6API. Returns list[float] or None on failure."""
     def _parse_scores(body_text: str, expected_n: int) -> list | None:
         if not body_text or not body_text.strip():
             print("[ranker] EMPTY content from model", flush=True)
@@ -919,17 +918,16 @@ def _call_text_ranker(prompt: str) -> list | None:
 
     expected_n = prompt.count("CLIP ")
     try:
-        text, _ = api_client.call_byesu(
+        text, _ = api_client.call_rewrite_api(
             'You rank clip candidates for a narration. Reply with strict JSON only, e.g. {"scores":[0.9,0.3]}. No prose, no reasoning.',
             [{"role": "user", "content": prompt}],
             timeout=60,
             max_retries=2,
             step_label="ranker",
-            use_rewrite_model=False,
         )
         return _parse_scores(text, expected_n)
     except Exception as e:
-        print(f"[ranker:byesu] EXCEPTION {type(e).__name__}: {str(e)[:200]}", flush=True)
+        print(f"[ranker:a6api] EXCEPTION {type(e).__name__}: {str(e)[:200]}", flush=True)
         return None
 
 

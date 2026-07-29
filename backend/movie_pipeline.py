@@ -224,7 +224,7 @@ Return ONLY a JSON array, no markdown:
 
 def _plan_text_overlays(segments_with_times: list, emit=None) -> list:
     """
-    Plan text overlays via Byesu. Returns [] on failure.
+    Plan text overlays via A6API. Returns [] on failure.
     """
     total_dur = max(1.0, segments_with_times[-1]["end"] if segments_with_times else 1.0)
     seg_data = [
@@ -241,14 +241,13 @@ def _plan_text_overlays(segments_with_times: list, emit=None) -> list:
     )
 
     try:
-        text, _ = api_client.call_byesu(
+        text, _ = api_client.call_rewrite_api(
             "You return JSON only. No markdown, no commentary.",
             [{"role": "user", "content": prompt}],
             timeout=120,
             max_retries=2,
             emit=emit,
             step_label="overlays",
-            use_rewrite_model=False,
         )
     except Exception as e:
         print(f"[movie_pipeline] Overlay API call failed: {e}", flush=True)

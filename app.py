@@ -204,7 +204,7 @@ def api_prepare():
 
         try:
             if pipeline_type == "library":
-                # Library pipeline (war-style, batched Byesu + Vertex cosine)
+                # Library pipeline (war-style, batched A6API + Vertex cosine)
                 if not source_url:
                     raise ValueError("Library pipeline requires a source YouTube URL. Please paste a URL in Step 1.")
                 result = war_pipeline.prepare(source_url, emit=_emit)

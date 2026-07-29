@@ -495,7 +495,7 @@ def _validation_cache_path(clip_path: str, section_text: str) -> str:
 def validate_clip_for_section(clip_path: str, section_text: str) -> float:
     """
     Score how well a clip matches a script section (visual, with frames).
-    Priority: Byesu > Gemini.
+    Priority: A6API > Gemini.
     Result cached to disk — same clip+section never calls API twice.
     """
     cache_path = _validation_cache_path(clip_path, section_text)
@@ -507,7 +507,7 @@ def validate_clip_for_section(clip_path: str, section_text: str) -> float:
             pass
 
     try:
-        score = _validate_clip_visual_byesu(clip_path, section_text)
+        score = _validate_clip_visual_rewrite_api(clip_path, section_text)
         try:
             with open(cache_path, "w", encoding="utf-8") as f:
                 json.dump({"score": score}, f)
@@ -515,7 +515,7 @@ def validate_clip_for_section(clip_path: str, section_text: str) -> float:
             pass
         return score
     except Exception as e:
-        print(f"[clip_matcher] Byesu visual validation failed ({e}); trying Vertex", flush=True)
+        print(f"[clip_matcher] A6API visual validation failed ({e}); trying Vertex", flush=True)
 
     # Last fallback: Gemini (Vertex)
     from google.genai import types
@@ -668,21 +668,20 @@ def _build_text_score_prompt(items: list) -> str:
     return "\n".join(prompt_parts)
 
 
-def _validate_movie_clips_text_byesu_batch(items: list) -> list:
+def _validate_movie_clips_text_rewrite_api_batch(items: list) -> list:
     if not items:
         return []
-    text, _ = api_client.call_byesu(
+    text, _ = api_client.call_rewrite_api(
         "You are a clip-matching scoring assistant. Reply only with valid JSON.",
         [{"role": "user", "content": _build_text_score_prompt(items)}],
         timeout=120,
         max_retries=2,
         step_label="clip_matcher",
-        use_rewrite_model=False,
     )
     return _parse_score_array(text, len(items))
 
 
-def _validate_clip_visual_byesu(clip_path: str, section_text: str) -> float:
+def _validate_clip_visual_rewrite_api(clip_path: str, section_text: str) -> float:
     import base64
 
     content_parts = [{
@@ -709,13 +708,12 @@ def _validate_clip_visual_byesu(clip_path: str, section_text: str) -> float:
     if len(content_parts) == 1:
         return 0.0
 
-    text, _ = api_client.call_byesu(
+    text, _ = api_client.call_rewrite_api(
         "You are a clip-matching scoring assistant. Reply only with valid JSON.",
         [{"role": "user", "content": content_parts}],
         timeout=120,
         max_retries=2,
         step_label="clip_matcher",
-        use_rewrite_model=False,
     )
     text = re.sub(r"^```(?:json)?\s*", "", (text or "").strip())
     text = re.sub(r"\s*```$", "", text)
@@ -841,11 +839,11 @@ def batch_validate_candidates(
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     # Movie library: text-only validation (no frame extraction).
-    # Use Byesu as the primary scorer, Vertex Gemini only as fallback.
+    # Use A6API as the primary scorer, Vertex Gemini only as fallback.
     # Per section: validate top-3 first; if none ≥ 0.75, validate clips 4-5 too; take best.
     if movie_library_mode:
         MOVIE_THRESHOLD = 0.75
-        backends = [{"kind": "byesu", "name": "Byesu"}]
+        backends = [{"kind": "rewrite_api", "name": "A6API"}]
 
         sections = list(enumerate(zip(section_candidates, section_texts)))
         assigned = [[] for _ in backends]
@@ -869,9 +867,9 @@ def batch_validate_candidates(
             return items
 
         def _score_items(items: list, backend: dict) -> list:
-            if backend["kind"] == "byesu":
+            if backend["kind"] == "rewrite_api":
                 try:
-                    return _validate_movie_clips_text_byesu_batch(items)
+                    return _validate_movie_clips_text_rewrite_api_batch(items)
                 except Exception as e:
                     print(
                         f"[clip_matcher] {backend['name']} failed ({e}); trying Vertex fallback",
@@ -1031,16 +1029,16 @@ def batch_validate_candidates(
     done          = [0]
     worker_errors = []
 
-    def _byesu_visual_batch(batch):
-        """Validate batch via Byesu visual, one item at a time."""
+    def _rewrite_api_visual_batch(batch):
+        """Validate batch via A6API visual, one item at a time."""
         scores = []
         for item in batch:
-            scores.append(_validate_clip_visual_byesu(item["clip_path"], item["section_text"]))
+            scores.append(_validate_clip_visual_rewrite_api(item["clip_path"], item["section_text"]))
         return scores
 
     def _process_batch(batch):
         try:
-            scores = _byesu_visual_batch(batch)
+            scores = _rewrite_api_visual_batch(batch)
             for item, score in zip(batch, scores):
                 cache_path = _validation_cache_path(item["clip_path"], item["section_text"])
                 try:
@@ -1052,10 +1050,10 @@ def batch_validate_candidates(
                     new_scores[(item["sec_idx"], item["clip_path"])] = score
                     done[0] += 1
                     if emit and done[0] % 16 == 0:
-                        emit("media", f"Validated {done[0]}/{len(items)} (Byesu)...")
+                        emit("media", f"Validated {done[0]}/{len(items)} (A6API)...")
             return
         except Exception as e:
-            print(f"[clip_matcher] Byesu visual batch failed ({e}); falling back to Gemini", flush=True)
+            print(f"[clip_matcher] A6API visual batch failed ({e}); falling back to Gemini", flush=True)
 
         # Fallback: Gemini batch visual
         client, model = _gemini()

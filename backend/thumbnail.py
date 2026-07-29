@@ -57,14 +57,13 @@ def _call_thumbnail_step(system: str, messages: list, label: str, emit=None) -> 
     for attempt in range(1, THUMBNAIL_ATTEMPTS + 1):
         try:
             _emit(emit, f"{label} attempt {attempt}/{THUMBNAIL_ATTEMPTS}...")
-            text, _ = api_client.call_byesu(
+            text, _ = api_client.call_rewrite_api(
                 system,
                 messages,
                 timeout=90,
                 max_retries=2,
                 emit=emit,
                 step_label="thumbnail",
-                use_rewrite_model=False,
             )
             text = (text or "").strip()
             if text:

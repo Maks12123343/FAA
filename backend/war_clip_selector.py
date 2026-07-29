@@ -70,19 +70,18 @@ def _has_embeddings(clips):
     return with_emb >= len(clips) * 0.8
 
 
-def _call_byesu(prompt):
+def _call_rewrite_api(prompt):
     try:
-        text, _ = api_client.call_byesu(
+        text, _ = api_client.call_rewrite_api(
             "Reply with exactly the requested format. No markdown.",
             [{"role": "user", "content": prompt}],
             timeout=30,
             max_retries=2,
             step_label="war_clip_selector",
-            use_rewrite_model=False,
         )
         return text.strip()
     except Exception as e:
-        print(f"[war_clip_selector] Byesu call failed: {e}", flush=True)
+        print(f"[war_clip_selector] A6API call failed: {e}", flush=True)
     return None
 
 
@@ -128,7 +127,7 @@ def _llm_classify_text(text):
 
 def classify_segment(text):
     prompt = _CATEGORY_PROMPT.format(text=text)
-    result = _call_byesu(prompt)
+    result = _call_rewrite_api(prompt)
     if result:
         result = result.lower().strip().replace(" ", "_")
         for cat in CATEGORIES:
@@ -139,7 +138,7 @@ def classify_segment(text):
 
 def extract_entities(text):
     prompt = _ENTITY_PROMPT.format(text=text)
-    result = _call_byesu(prompt)
+    result = _call_rewrite_api(prompt)
     if result:
         try:
             entities = json.loads(result)

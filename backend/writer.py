@@ -117,8 +117,8 @@ must be STRICTLY between 490 and 500 characters. Adjust tag count/length to fit 
 from backend import api_client
 
 def _call_claude(system: str, messages: list, timeout: int = 180) -> tuple:
-    """Call Byesu."""
-    return api_client.call_byesu(system, messages, timeout=timeout, use_rewrite_model=False)
+    """Call A6API."""
+    return api_client.call_rewrite_api(system, messages, timeout=timeout)
 
 
 def _extract_code_block(text: str) -> str:

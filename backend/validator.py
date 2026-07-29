@@ -65,11 +65,11 @@ def _parse_json(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Byesu scoring (OpenAI-compatible vision API)
+# A6API scoring (OpenAI-compatible vision API)
 # ---------------------------------------------------------------------------
 
-def _score_byesu(frames: list, description: str) -> dict:
-    """Score clip frames using Byesu."""
+def _score_rewrite_api(frames: list, description: str) -> dict:
+    """Score clip frames using A6API."""
     prompt = (
         f'Frames from a short video clip. '
         f'How visually relevant is this clip to: "{description}"?\n'
@@ -87,13 +87,12 @@ def _score_byesu(frames: list, description: str) -> dict:
         })
     content.append({"type": "text", "text": prompt})
 
-    text, _ = api_client.call_byesu(
+    text, _ = api_client.call_rewrite_api(
         "You are a clip scoring assistant. Reply only with valid JSON.",
         [{"role": "user", "content": content}],
         timeout=90,
         max_retries=2,
         step_label="validator",
-        use_rewrite_model=False,
     )
     return _parse_json(text)
 
@@ -172,7 +171,7 @@ def score_clip(video_path: str, description: str) -> dict:
     """Score a video clip for relevance to description.
 
     Backend priority:
-      1. Byesu
+      1. A6API
       2. Vertex AI (Gemini) fallback
     """
     cache_path = video_path + CACHE_SUFFIX
@@ -187,10 +186,10 @@ def score_clip(video_path: str, description: str) -> dict:
                 return {"score": 0.0, "reason": "no frames extracted"}
 
             try:
-                result = _score_byesu(frames, description)
-                print(f"[validator] Byesu scored {os.path.basename(video_path)}: {result.get('score')}", flush=True)
+                result = _score_rewrite_api(frames, description)
+                print(f"[validator] A6API scored {os.path.basename(video_path)}: {result.get('score')}", flush=True)
             except Exception as e:
-                print(f"[validator] Byesu failed ({e}), falling back to Vertex", flush=True)
+                print(f"[validator] A6API failed ({e}), falling back to Vertex", flush=True)
                 result = _score_vertex(frames, description)
 
     except Exception as e:
