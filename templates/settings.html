@@ -79,17 +79,15 @@
 <div class="card">
   <h2>Rewrite</h2>
   <p style="color:#aaa;font-size:13px;margin-bottom:16px">
-    Byesu controls for script rewrite, thumbnail prompt rewrite, and metadata rewrite.
+    A6API controls for script rewrite, thumbnail prompt rewrite, and metadata rewrite.
   </p>
   <div class="field">
-    <label>Byesu API Key</label>
-    <textarea id="byesu_api_key" rows="2" style="width:100%;background:#1a1a1a;color:#e0e0e0;border:1px solid #333;border-radius:6px;padding:8px;font-family:monospace;font-size:13px">{{ settings.byesu_api_key or '' }}</textarea>
+    <label>A6API Key</label>
+    <textarea id="rewrite_api_key" rows="2" style="width:100%;background:#1a1a1a;color:#e0e0e0;border:1px solid #333;border-radius:6px;padding:8px;font-family:monospace;font-size:13px">{{ settings.rewrite_api_key or '' }}</textarea>
   </div>
   <div class="grid-2">
-    <div class="field"><label>General Byesu Model</label>
-      <input type="text" id="byesu_model" list="rewriteModelOptions" value="{{ settings.byesu_model or 'gpt-5.5' }}"></div>
     <div class="field"><label>Rewrite Model</label>
-      <input type="text" id="byesu_rewrite_model" list="rewriteModelOptions" value="{{ settings.byesu_rewrite_model or 'gpt-5.5' }}">
+      <input type="text" id="rewrite_model" list="rewriteModelOptions" value="{{ settings.rewrite_model or 'gpt-5.5' }}">
       <datalist id="rewriteModelOptions">
         <option value="gpt-5.5"></option>
         <option value="gpt-5.4"></option>
@@ -101,22 +99,20 @@
         <option value="claude-fable-5"></option>
       </datalist>
     </div>
-  </div>
-  <div class="field"><label>API URL</label>
-    <input type="text" id="byesu_api_url" value="{{ settings.byesu_api_url or 'https://byesu.com/v1/chat/completions' }}"></div>
-  <div class="grid-2">
     <div class="field">
       <label>Reasoning Effort</label>
-      <select id="byesu_reasoning_effort">
-        {% set effort = settings.byesu_reasoning_effort or 'high' %}
+      <select id="rewrite_reasoning_effort">
+        {% set effort = settings.rewrite_reasoning_effort or 'high' %}
         {% for item in ['none','low','medium','high','xhigh'] %}
         <option value="{{ item }}" {% if effort == item %}selected{% endif %}>{{ item }}</option>
         {% endfor %}
       </select>
     </div>
-    <div class="field"><label>Rewrite Chunks</label>
-      <input type="text" id="rewrite_chunks" value="{{ settings.rewrite_chunks or 6 }}"></div>
   </div>
+  <div class="field"><label>API URL</label>
+    <input type="text" id="rewrite_api_url" value="{{ settings.rewrite_api_url or 'https://a6api.com/v1/chat/completions' }}"></div>
+  <div class="field"><label>Rewrite Chunks</label>
+    <input type="text" id="rewrite_chunks" value="{{ settings.rewrite_chunks or 6 }}"></div>
   <div style="display:grid;gap:10px;margin-top:8px">
     <label style="display:flex;align-items:center;gap:10px;color:#ddd;margin:0">
       <input type="checkbox" id="rewrite_script_enabled" {% if settings.rewrite_script_enabled %}checked{% endif %} style="width:auto">
@@ -269,11 +265,10 @@ function saveSettings() {
   });
 
   const data = {
-    byesu_api_key:     document.getElementById('byesu_api_key').value.trim(),
-    byesu_model:       document.getElementById('byesu_model').value,
-    byesu_rewrite_model: document.getElementById('byesu_rewrite_model').value,
-    byesu_api_url:     document.getElementById('byesu_api_url').value,
-    byesu_reasoning_effort: document.getElementById('byesu_reasoning_effort').value,
+    rewrite_api_key:   document.getElementById('rewrite_api_key').value.trim(),
+    rewrite_model:     document.getElementById('rewrite_model').value,
+    rewrite_api_url:   document.getElementById('rewrite_api_url').value,
+    rewrite_reasoning_effort: document.getElementById('rewrite_reasoning_effort').value,
     rewrite_chunks:    parseInt(document.getElementById('rewrite_chunks').value) || 6,
     rewrite_script_enabled: document.getElementById('rewrite_script_enabled').checked,
     rewrite_thumbnail_enabled: document.getElementById('rewrite_thumbnail_enabled').checked,

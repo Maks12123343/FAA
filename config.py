@@ -60,16 +60,22 @@ DEFAULT_SETTINGS = {
     "vertex_location": "us-central1",
     "gemini_model": "gemini-2.5-flash",
 
-    # Byesu API (OpenAI-compatible chat completions)
+    # Rewrite API (OpenAI-compatible chat completions)
+    "rewrite_api_key": "",
+    "rewrite_model": "gpt-5.5",
+    "rewrite_api_url": "https://a6api.com/v1/chat/completions",
+    "rewrite_reasoning_effort": "high",
+    "rewrite_script_enabled": True,
+    "rewrite_thumbnail_enabled": True,
+    "rewrite_metadata_enabled": True,
+    "rewrite_chunks": 6,
+
+    # Legacy Byesu API (used by older validator/clip paths)
     "byesu_api_key": "",
     "byesu_model": "gpt-5.5",
     "byesu_rewrite_model": "gpt-5.5",
     "byesu_api_url": "https://byesu.com/v1/chat/completions",
     "byesu_reasoning_effort": "high",
-    "rewrite_script_enabled": True,
-    "rewrite_thumbnail_enabled": True,
-    "rewrite_metadata_enabled": True,
-    "rewrite_chunks": 6,
 
     # TTS
     "tts_api_key": "",

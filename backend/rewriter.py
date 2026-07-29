@@ -27,7 +27,7 @@ from backend import api_client
 
 
 def _call_claude(system: str, messages: list, timeout: int = 300, max_retries: int = 3) -> tuple:
-    """Call Byesu rewrite model."""
+    """Call the rewrite model."""
     return api_client.call_byesu_rewrite(
         system,
         messages,
