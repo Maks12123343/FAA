@@ -134,7 +134,7 @@ def _coerce_settings(data: dict) -> dict:
         "output_width":  1,
         "output_height": 1,
         "fps":           1,
-        "rewrite_chunks": 3,
+        "rewrite_chunks": 1,
     }
     bool_fields = {
         "rewrite_script_enabled",

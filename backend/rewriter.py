@@ -42,7 +42,7 @@ def _rewrite_chunk_count() -> int:
     try:
         settings = config.load_settings()
         raw = settings.get("rewrite_chunks") or os.environ.get("FAA_REWRITE_CHUNKS") or 6
-        return max(3, min(10, int(raw)))
+        return max(1, min(10, int(raw)))
     except (TypeError, ValueError):
         return 6
 
@@ -63,10 +63,13 @@ def _split_into_chunks(transcript: str, num_chunks: int = NUM_CHUNKS) -> list:
     Розбити transcript на num_chunks приблизно рівні частини.
     Ділимо по межі речення (крапка/! /?), щоб не рвати фрази посередині.
     """
-    if num_chunks < 2:
-        return [transcript]
+    num_chunks = max(1, int(num_chunks or 1))
+    if num_chunks == 1:
+        return [transcript.strip()]
 
     total = len(transcript)
+    if total == 0:
+        return [""]
     target_size = total / num_chunks
     # Всі позиції кінців речень
     sentence_ends = [m.end() for m in re.finditer(r"[.!?](?:\s|$)", transcript)]
@@ -78,14 +81,18 @@ def _split_into_chunks(transcript: str, num_chunks: int = NUM_CHUNKS) -> list:
     start = 0
     for i in range(1, num_chunks):
         target_pos = int(target_size * i)
-        # Знаходимо найближчий кінець речення до цільової позиції
-        best = min(sentence_ends, key=lambda e: abs(e - target_pos))
-        if best > start and best < total:
-            chunks.append(transcript[start:best].strip())
-            start = best
-        # інакше пропускаємо (буде злиття з наступним)
+        remaining_chunks = num_chunks - i
+        min_pos = start + 1
+        max_pos = total - remaining_chunks
+        candidates = [e for e in sentence_ends if min_pos <= e <= max_pos]
+        if candidates:
+            best = min(candidates, key=lambda e: abs(e - target_pos))
+        else:
+            best = max(min_pos, min(max_pos, target_pos))
+        chunks.append(transcript[start:best].strip())
+        start = best
     chunks.append(transcript[start:].strip())
-    return [c for c in chunks if c]
+    return chunks
 
 
 def _get_summary(text: str, language: str, timeout: int = 120) -> str:
@@ -109,7 +116,9 @@ def _get_summary(text: str, language: str, timeout: int = 120) -> str:
 def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
                    system_prompt: str, prev_summary: str = "",
                    prev_tail: str = "", feedback: str = "",
-                   timeout: int = 300) -> str:
+                   timeout: int = 300, total_len: int = 0,
+                   total_min: int = 0, total_max: int = 0,
+                   total_target: int = 0) -> str:
     """
     Переписати один chunk з контекстом попереднього.
     position: "first" / "middle" / "last".
@@ -121,6 +130,12 @@ def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
     strict_system = (
         system_prompt
         + "\n\nCRITICAL NUMERIC LENGTH CONTRACT FOR THIS REQUEST:\n"
+        + (
+            f"- Full source transcript length: {total_len} characters.\n"
+            f"- Required full script length: {total_min}-{total_max} characters.\n"
+            f"- Ideal full script target: {total_target} characters.\n"
+            if total_len else ""
+        )
         + f"- Source chunk length: {chunk_len} characters.\n"
         + f"- Required rewritten chunk length: {chunk_min}-{chunk_max} characters.\n"
         + f"- Ideal target: {chunk_target} characters.\n"
@@ -129,6 +144,9 @@ def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
     )
     ctx_lines = [
         "CRITICAL NUMERIC LENGTH CONTRACT",
+        f"Full source transcript length: {total_len} characters." if total_len else "",
+        f"Required full script length: {total_min}-{total_max} characters." if total_len else "",
+        f"Ideal full script target: {total_target} characters." if total_len else "",
         f"Source chunk length: {chunk_len} characters.",
         f"Required rewritten chunk length: {chunk_min}-{chunk_max} characters.",
         f"Ideal target: {chunk_target} characters.",
@@ -145,6 +163,8 @@ def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
         ctx_lines.append("Continue smoothly from the previous chunk. Do NOT re-introduce or close.")
     elif position == "last":
         ctx_lines.append("Continue smoothly and write a strong closing that wraps up the story.")
+    elif position == "single":
+        ctx_lines.append("This is the ONLY chunk. Rewrite the complete script with a strong opening and a natural final closing.")
 
     if prev_summary:
         ctx_lines.append(f"\nCONTEXT FROM PREVIOUS CHUNKS (do NOT rewrite this, just use for continuity):\n{prev_summary}")
@@ -200,21 +220,28 @@ def _rewrite_script(transcript: str, language: str, video_title: str,
     """
     global _LAST_REWRITTEN_PARTS
     _LAST_REWRITTEN_PARTS = []
+    orig_len = len(transcript)
+    min_chars, max_chars = _length_bounds(orig_len)
 
     prompt_file = REWRITE_PROMPT_TEST_FILE if test_mode else REWRITE_PROMPT_FILE
     system = _load_prompt(prompt_file, language)
 
     chunk_count = _rewrite_chunk_count()
     chunks = _split_into_chunks(transcript, chunk_count)
-    print(f"[rewriter] Split transcript into {len(chunks)} chunks: "
-          f"{[len(c) for c in chunks]} chars", flush=True)
+    print(
+        f"[rewriter] Split transcript into {len(chunks)} chunks "
+        f"(requested {chunk_count}): {[len(c) for c in chunks]} chars",
+        flush=True,
+    )
 
     rewritten_parts = []
     prev_summary = ""
     prev_tail = ""
 
     for i, chunk in enumerate(chunks):
-        if i == 0:
+        if len(chunks) == 1:
+            position = "single"
+        elif i == 0:
             position = "first"
         elif i == len(chunks) - 1:
             position = "last"
@@ -232,6 +259,10 @@ def _rewrite_script(transcript: str, language: str, video_title: str,
             prev_tail=prev_tail,
             feedback=feedback if i == 0 else "",  # feedback тільки в перший
             timeout=300,
+            total_len=orig_len,
+            total_min=min_chars,
+            total_max=max_chars,
+            total_target=int(orig_len * TARGET_LENGTH_RATIO),
         )
         print(f"[rewriter]   → rewrote to {len(part)} chars", flush=True)
         rewritten_parts.append(part)
