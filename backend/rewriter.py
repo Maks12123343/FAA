@@ -114,18 +114,31 @@ def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
     Переписати один chunk з контекстом попереднього.
     position: "first" / "middle" / "last".
     """
+    chunk_len = len(chunk)
+    chunk_min = max(400, int(chunk_len * MIN_LENGTH_RATIO))
+    chunk_max = max(chunk_min + 200, int(chunk_len * MAX_LENGTH_RATIO))
+    chunk_target = max(chunk_min, int(chunk_len * TARGET_LENGTH_RATIO))
+    strict_system = (
+        system_prompt
+        + "\n\nCRITICAL NUMERIC LENGTH CONTRACT FOR THIS REQUEST:\n"
+        + f"- Source chunk length: {chunk_len} characters.\n"
+        + f"- Required rewritten chunk length: {chunk_min}-{chunk_max} characters.\n"
+        + f"- Ideal target: {chunk_target} characters.\n"
+        + f"- The rewritten chunk MUST be shorter than the source chunk and close to the target.\n"
+        + "- If any generic percentage rule conflicts with these exact numbers, follow these exact numbers.\n"
+    )
     ctx_lines = [
+        "CRITICAL NUMERIC LENGTH CONTRACT",
+        f"Source chunk length: {chunk_len} characters.",
+        f"Required rewritten chunk length: {chunk_min}-{chunk_max} characters.",
+        f"Ideal target: {chunk_target} characters.",
+        "Before finalizing, estimate the character count and tighten the text until it fits this range.",
+        "Do not preserve every sentence. Preserve the story logic and key events, but remove secondary description, repeated setup, and slow explanations.",
+        "",
         f"Target language: {language}",
         f"Original video title: {video_title}",
         f"This is a CHUNK of a longer script. Position: {position.upper()} chunk.",
     ]
-    chunk_min = max(400, int(len(chunk) * MIN_LENGTH_RATIO))
-    chunk_max = max(chunk_min + 200, int(len(chunk) * MAX_LENGTH_RATIO))
-    chunk_target = max(chunk_min, int(len(chunk) * TARGET_LENGTH_RATIO))
-    ctx_lines.append(
-        f"This source chunk is {len(chunk)} characters. Rewrite this chunk to about "
-        f"{chunk_target} characters; hard range: {chunk_min}-{chunk_max} characters."
-    )
     if position == "first":
         ctx_lines.append("Write a strong opening hook. Do NOT close/summarize — the script continues.")
     elif position == "middle":
@@ -147,15 +160,34 @@ def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
     result = ""
     part = 1
     while True:
-        text, stop = _call_claude(system_prompt, messages, timeout=timeout)
+        text, stop = _call_claude(strict_system, messages, timeout=timeout)
         result += ("\n\n" if result else "") + _extract_code_block(text)
         if stop != "max_tokens":
             break
         messages.append({"role": "assistant", "content": text})
-        messages.append({"role": "user", "content": "Continue from where you left off."})
+        messages.append({
+            "role": "user",
+            "content": (
+                "Continue from where you left off, but keep the TOTAL rewritten chunk "
+                f"within {chunk_min}-{chunk_max} characters."
+            ),
+        })
         part += 1
         if part > 3:
             break
+    if len(result) > chunk_max:
+        print(
+            f"[rewriter] Chunk over length ({len(result)}>{chunk_max}); correcting before next chunk",
+            flush=True,
+        )
+        result = _compress_script_to_bounds(
+            script=result,
+            transcript=chunk,
+            language=language,
+            min_chars=chunk_min,
+            max_chars=chunk_max,
+            feedback=feedback,
+        )
     return result
 
 
@@ -890,26 +922,32 @@ def rewrite_all(
             if not continuity_ok:
                 print("[rewriter] Continuity polish pass...", flush=True)
                 old_len = len(script)
-                script = _polish_script_continuity(
-                    script=script,
-                    language=language_name,
-                    min_chars=min_chars,
-                    max_chars=max_chars,
-                    feedback=continuity_feedback,
-                )
-                if len(script) > max_chars:
-                    script = _compress_until_in_bounds(
+                try:
+                    script = _polish_script_continuity(
                         script=script,
-                        transcript=transcript,
                         language=language_name,
                         min_chars=min_chars,
                         max_chars=max_chars,
                         feedback=continuity_feedback,
                     )
-                print(
-                    f"[rewriter] Continuity polish done: {old_len} -> {len(script)} chars",
-                    flush=True,
-                )
+                    if len(script) > max_chars:
+                        script = _compress_until_in_bounds(
+                            script=script,
+                            transcript=transcript,
+                            language=language_name,
+                            min_chars=min_chars,
+                            max_chars=max_chars,
+                            feedback=continuity_feedback,
+                        )
+                    print(
+                        f"[rewriter] Continuity polish done: {old_len} -> {len(script)} chars",
+                        flush=True,
+                    )
+                except Exception as e:
+                    print(
+                        f"[rewriter] Continuity polish failed ({e}); keeping current script",
+                        flush=True,
+                    )
 
             passed, feedback = _quality_check_script(script, transcript, language_name, test_mode=False)
             if passed:
