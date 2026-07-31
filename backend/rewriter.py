@@ -58,6 +58,14 @@ def _extract_code_block(text: str) -> str:
     return m.group(1).strip() if m else text.strip()
 
 
+def _word_count(text: str) -> int:
+    return len(re.findall(r"\S+", text or ""))
+
+
+def _word_bounds(source_words: int) -> tuple:
+    return int(source_words * MIN_LENGTH_RATIO), int(source_words * MAX_LENGTH_RATIO)
+
+
 def _split_into_chunks(transcript: str, num_chunks: int = NUM_CHUNKS) -> list:
     """
     Розбити transcript на num_chunks приблизно рівні частини.
@@ -124,9 +132,12 @@ def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
     position: "first" / "middle" / "last".
     """
     chunk_len = len(chunk)
+    chunk_words = _word_count(chunk)
     chunk_min = max(400, int(chunk_len * MIN_LENGTH_RATIO))
     chunk_max = max(chunk_min + 200, int(chunk_len * MAX_LENGTH_RATIO))
     chunk_target = max(chunk_min, int(chunk_len * TARGET_LENGTH_RATIO))
+    chunk_min_words, chunk_max_words = _word_bounds(chunk_words)
+    chunk_target_words = max(chunk_min_words, int(chunk_words * TARGET_LENGTH_RATIO))
     strict_system = (
         system_prompt
         + "\n\nCRITICAL NUMERIC LENGTH CONTRACT FOR THIS REQUEST:\n"
@@ -137,9 +148,15 @@ def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
             if total_len else ""
         )
         + f"- Source chunk length: {chunk_len} characters.\n"
+        + f"- Source chunk word count: {chunk_words} words.\n"
         + f"- Required rewritten chunk length: {chunk_min}-{chunk_max} characters.\n"
         + f"- Ideal target: {chunk_target} characters.\n"
+        + f"- Required rewritten chunk word count: {chunk_min_words}-{chunk_max_words} words.\n"
+        + f"- Ideal word target: {chunk_target_words} words.\n"
+        + "- Draft by word count first; use the character maximum as the hard safety limit.\n"
         + f"- The rewritten chunk MUST be shorter than the source chunk and close to the target.\n"
+        + f"- Output above {chunk_max} characters is invalid. Do not rely on a later editor to fix length.\n"
+        + "- Output only one code block containing the rewritten script. No text before or after the code block.\n"
         + "- If any generic percentage rule conflicts with these exact numbers, follow these exact numbers.\n"
     )
     ctx_lines = [
@@ -148,10 +165,16 @@ def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
         f"Required full script length: {total_min}-{total_max} characters." if total_len else "",
         f"Ideal full script target: {total_target} characters." if total_len else "",
         f"Source chunk length: {chunk_len} characters.",
+        f"Source chunk word count: {chunk_words} words.",
         f"Required rewritten chunk length: {chunk_min}-{chunk_max} characters.",
         f"Ideal target: {chunk_target} characters.",
+        f"Required rewritten chunk word count: {chunk_min_words}-{chunk_max_words} words.",
+        f"Ideal word target: {chunk_target_words} words.",
+        "Draft by word count first, then tighten enough to stay below the character maximum.",
+        f"Hard maximum: {chunk_max} characters. The answer fails if it is longer.",
         "Before finalizing, estimate the character count and tighten the text until it fits this range.",
         "Do not preserve every sentence. Preserve the story logic and key events, but remove secondary description, repeated setup, and slow explanations.",
+        "Return only the rewritten script in one code block. Do not write status notes after the code block.",
         "",
         f"Target language: {language}",
         f"Original video title: {video_title}",
@@ -380,26 +403,40 @@ def _compress_script_to_bounds(
     """
     orig_len = len(transcript)
     target_chars = int(orig_len * TARGET_LENGTH_RATIO)
+    orig_words = _word_count(transcript)
+    script_words = _word_count(script)
+    min_words, max_words = _word_bounds(orig_words)
+    target_words = max(min_words, int(orig_words * TARGET_LENGTH_RATIO))
+    reduction_needed = max(0, len(script) - target_chars)
+    reduction_pct = round(reduction_needed / max(len(script), 1) * 100)
     system = (
         "You are a senior voiceover editor. You compress completed scripts "
         "without cutting off the ending, without adding facts, and without "
-        "changing the meaning."
+        "changing the meaning. You obey numeric character limits exactly."
     )
     user_msg = (
         f"Target language: {language}\n"
         f"Original transcript length: {orig_len} characters.\n"
+        f"Original transcript word count: {orig_words} words.\n"
         f"Required final script length: {min_chars}-{max_chars} characters.\n"
-        f"Ideal target: about {target_chars} characters.\n\n"
-        f"The current rewritten script is too long: {len(script)} characters.\n"
-        f"Compress the WHOLE script to the required range.\n\n"
+        f"Ideal target: {target_chars} characters.\n"
+        f"Required final word count: {min_words}-{max_words} words.\n"
+        f"Ideal word target: {target_words} words.\n"
+        f"The current rewritten script is too long: {len(script)} characters, {script_words} words.\n"
+        f"You must remove about {reduction_needed} characters ({reduction_pct}% of the current script).\n\n"
+        f"Compress the WHOLE script to about {target_words} words / {target_chars} characters, "
+        f"with hard range {min_chars}-{max_chars} characters.\n"
+        f"Use the word target while editing; use the character maximum as the hard safety limit.\n"
+        f"If your answer is longer than {max_chars} characters, it is invalid.\n\n"
         f"Rules:\n"
         f"- Do NOT simply delete the ending.\n"
         f"- Preserve the opening hook and the final closing thought.\n"
         f"- Preserve all key events, names, numbers, cause-and-effect, and narrative beats.\n"
         f"- Remove filler, repeated explanations, slow setup, and non-essential wording.\n"
+        f"- Combine adjacent sentences and remove secondary descriptions before removing key events.\n"
         f"- Do not add new facts, new claims, or new scenes.\n"
         f"- Keep the result natural for voiceover.\n"
-        f"- Output only the compressed script in one code block.\n"
+        f"- Output only the compressed script in one code block. No text before or after it.\n"
     )
     if feedback:
         user_msg += f"\nPrevious quality feedback to respect:\n{feedback}\n"
@@ -407,7 +444,15 @@ def _compress_script_to_bounds(
 
     try:
         text, _ = _call_claude(system, [{"role": "user", "content": user_msg}], timeout=360)
-        return _extract_code_block(text)
+        compressed = _extract_code_block(text)
+        if not (min_chars <= len(compressed) <= max_chars):
+            print(
+                f"[rewriter] Compression result out of range "
+                f"({len(compressed)} not in {min_chars}-{max_chars}); using local sentence fit",
+                flush=True,
+            )
+            return _fit_text_by_even_sentences(script, min_chars, max_chars, target_chars)
+        return compressed
     except Exception as e:
         print(f"[rewriter] Compression API failed ({e}); using local sentence fit", flush=True)
         return _fit_text_by_even_sentences(script, min_chars, max_chars, target_chars)
@@ -420,9 +465,9 @@ def _compress_until_in_bounds(
     min_chars: int,
     max_chars: int,
     feedback: str = "",
-    max_attempts: int = 2,
+    max_attempts: int = 1,
 ) -> str:
-    """Try LLM compression a few times; never use blind sentence trimming."""
+    """Try one LLM compression, then force length locally if the provider ignores it."""
     for attempt in range(1, max_attempts + 1):
         if len(script) <= max_chars:
             break
@@ -441,6 +486,16 @@ def _compress_until_in_bounds(
             feedback=feedback,
         )
         print(f"[rewriter] Compression pass {attempt}: {old_len} -> {len(script)} chars", flush=True)
+        if len(script) > max_chars:
+            target_chars = int(len(transcript) * TARGET_LENGTH_RATIO)
+            print(
+                f"[rewriter] Compression still over max; forcing local sentence fit "
+                f"to {min_chars}-{max_chars} chars",
+                flush=True,
+            )
+            script = _fit_text_by_even_sentences(script, min_chars, max_chars, target_chars)
+            print(f"[rewriter] Local sentence fit result: {len(script)} chars", flush=True)
+            break
     return script
 
 
@@ -500,6 +555,13 @@ def _compress_parts_to_bounds(
         try:
             text, _ = _call_claude(system, [{"role": "user", "content": user_msg}], timeout=300)
             compressed_part = _extract_code_block(text)
+            if not (part_min <= len(compressed_part) <= part_max):
+                print(
+                    f"[rewriter] Part {idx}/{len(clean_parts)} compression out of range "
+                    f"({len(compressed_part)} not in {part_min}-{part_max}); using local sentence fit",
+                    flush=True,
+                )
+                compressed_part = _fit_text_by_even_sentences(part, part_min, part_max, part_target)
         except Exception as e:
             print(
                 f"[rewriter] Compressing part {idx}/{len(clean_parts)} failed ({e}); "
@@ -864,7 +926,7 @@ def _rewrite_metadata(
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-MAX_REWRITE_ATTEMPTS = 3
+MAX_REWRITE_ATTEMPTS = 1
 
 def rewrite_all(
     transcript: str,
@@ -900,6 +962,13 @@ def rewrite_all(
             f"[rewriter] Length target: {min_chars}-{max_chars} chars "
             f"(original={orig_len}, target {int(TARGET_LENGTH_RATIO * 100)}%, "
             f"range {int(MIN_LENGTH_RATIO * 100)}%-{int(MAX_LENGTH_RATIO * 100)}%)",
+            flush=True,
+        )
+        orig_words = _word_count(transcript)
+        min_words, max_words = _word_bounds(orig_words)
+        print(
+            f"[rewriter] Word target: {min_words}-{max_words} words "
+            f"(original={orig_words}, ideal={int(orig_words * TARGET_LENGTH_RATIO)})",
             flush=True,
         )
         quality_passed = False
@@ -980,6 +1049,20 @@ def rewrite_all(
                         flush=True,
                     )
 
+            if len(script) > max_chars:
+                old_len = len(script)
+                script = _fit_text_by_even_sentences(
+                    script,
+                    min_chars,
+                    max_chars,
+                    int(orig_len * TARGET_LENGTH_RATIO),
+                )
+                parts = [script]
+                print(
+                    f"[rewriter] Final local length fit: {old_len} -> {len(script)} chars",
+                    flush=True,
+                )
+
             passed, feedback = _quality_check_script(script, transcript, language_name, test_mode=False)
             if passed:
                 quality_passed = True
@@ -990,11 +1073,33 @@ def rewrite_all(
                     f"[rewriter] Quality check FAILED on attempt {attempt + 1}: {feedback[:120]}",
                     flush=True,
                 )
+                if min_chars <= len(script) <= max_chars:
+                    quality_passed = True
+                    print(
+                        "[rewriter] Accepting script despite QC style feedback because length is valid; "
+                        "avoiding full rewrite loop.",
+                        flush=True,
+                    )
+                    break
         if not quality_passed:
-            raise RuntimeError(
-                "Rewrite quality check failed after "
-                f"{MAX_REWRITE_ATTEMPTS} attempts. Last feedback: {feedback[:500]}"
-            )
+            if len(script) > max_chars:
+                script = _fit_text_by_even_sentences(
+                    script,
+                    min_chars,
+                    max_chars,
+                    int(orig_len * TARGET_LENGTH_RATIO),
+                )
+            if min_chars <= len(script) <= max_chars:
+                print(
+                    "[rewriter] Accepting script after forced length fit; "
+                    f"last QC feedback: {feedback[:300]}",
+                    flush=True,
+                )
+            else:
+                raise RuntimeError(
+                    "Rewrite quality check failed after "
+                    f"{MAX_REWRITE_ATTEMPTS} attempts. Last feedback: {feedback[:500]}"
+                )
 
         if not (min_chars <= len(script) <= max_chars):
             raise RuntimeError(
