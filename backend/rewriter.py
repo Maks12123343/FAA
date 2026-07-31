@@ -219,6 +219,14 @@ def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
         if part > 3:
             break
     if len(result) > chunk_max:
+        chunk_soft_max = _soft_max_from_hard(chunk_max)
+        if len(result) <= chunk_soft_max:
+            print(
+                f"[rewriter] Chunk slightly over hard max "
+                f"({len(result)}>{chunk_max}, soft max {chunk_soft_max}); keeping coherent text",
+                flush=True,
+            )
+            return result
         print(
             f"[rewriter] Chunk over length ({len(result)}>{chunk_max}); correcting before next chunk",
             flush=True,
@@ -316,75 +324,21 @@ def _rewrite_script(transcript: str, language: str, video_title: str,
 MIN_LENGTH_RATIO = 0.70
 TARGET_LENGTH_RATIO = 0.75
 MAX_LENGTH_RATIO = 0.80
+SOFT_MAX_LENGTH_RATIO = 0.85
+
+
+def _soft_max_chars(original_length: int) -> int:
+    """Quality-first ceiling: accept slightly longer scripts instead of cutting logic."""
+    return int(original_length * SOFT_MAX_LENGTH_RATIO)
+
+
+def _soft_max_from_hard(max_chars: int) -> int:
+    return int(max_chars * SOFT_MAX_LENGTH_RATIO / MAX_LENGTH_RATIO)
 
 
 def _length_bounds(original_length: int) -> tuple:
     """Return (min_chars, max_chars) for a rewrite based on the original transcript length."""
     return int(original_length * MIN_LENGTH_RATIO), int(original_length * MAX_LENGTH_RATIO)
-
-
-def _trim_script(script: str, max_chars: int) -> str:
-    """
-    If script is over max_chars, cut it back at the last sentence boundary
-    that fits within the limit so we don't end mid-sentence.
-    """
-    if len(script) <= max_chars:
-        return script
-
-    cut = script[:max_chars]
-    # Prefer the last sentence-ending punctuation followed by whitespace/newline
-    for punct in (". ", "! ", "? ", ".\n", "!\n", "?\n"):
-        idx = cut.rfind(punct)
-        if idx >= max_chars * 0.6:  # don't cut too aggressively
-            return cut[:idx + 1].rstrip()
-    # Fallback: cut at last whitespace
-    idx = cut.rfind(" ")
-    if idx >= max_chars * 0.6:
-        return cut[:idx].rstrip()
-    return cut.rstrip()
-
-
-def _sentence_list(text: str) -> list:
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", (text or "").strip()) if s.strip()]
-    return sentences or [(text or "").strip()]
-
-
-def _fit_text_by_even_sentences(text: str, min_chars: int, max_chars: int, target_chars: int) -> str:
-    """Fallback compressor for provider failures; preserves beginning, middle, and ending."""
-    text = (text or "").strip()
-    if len(text) <= max_chars:
-        return text
-
-    sentences = _sentence_list(text)
-    if len(sentences) <= 3:
-        return _trim_script(text, max_chars)
-
-    target_chars = max(min_chars, min(max_chars, target_chars))
-    total_len = max(len(text), 1)
-    keep_count = max(2, min(len(sentences), round(len(sentences) * target_chars / total_len)))
-
-    def render(count: int) -> str:
-        if count >= len(sentences):
-            picked = sentences
-        else:
-            indexes = sorted({round(i * (len(sentences) - 1) / max(count - 1, 1)) for i in range(count)})
-            picked = [sentences[i] for i in indexes]
-        return " ".join(picked).strip()
-
-    fitted = render(keep_count)
-    while len(fitted) > max_chars and keep_count > 2:
-        keep_count -= 1
-        fitted = render(keep_count)
-    while len(fitted) < min_chars and keep_count < len(sentences):
-        keep_count += 1
-        candidate = render(keep_count)
-        if len(candidate) > max_chars:
-            break
-        fitted = candidate
-
-    if len(fitted) > max_chars:
-        fitted = _trim_script(fitted, max_chars)
-    return fitted
 
 
 def _compress_script_to_bounds(
@@ -403,6 +357,7 @@ def _compress_script_to_bounds(
     """
     orig_len = len(transcript)
     target_chars = int(orig_len * TARGET_LENGTH_RATIO)
+    soft_max = _soft_max_chars(orig_len)
     orig_words = _word_count(transcript)
     script_words = _word_count(script)
     min_words, max_words = _word_bounds(orig_words)
@@ -445,17 +400,39 @@ def _compress_script_to_bounds(
     try:
         text, _ = _call_claude(system, [{"role": "user", "content": user_msg}], timeout=360)
         compressed = _extract_code_block(text)
-        if not (min_chars <= len(compressed) <= max_chars):
+        if min_chars <= len(compressed) <= max_chars:
+            return compressed
+        if min_chars <= len(compressed) <= soft_max:
             print(
-                f"[rewriter] Compression result out of range "
-                f"({len(compressed)} not in {min_chars}-{max_chars}); using local sentence fit",
+                f"[rewriter] Compression slightly over hard range "
+                f"({len(compressed)} not in {min_chars}-{max_chars}, soft max {soft_max}); "
+                "keeping coherent LLM-compressed text",
                 flush=True,
             )
-            return _fit_text_by_even_sentences(script, min_chars, max_chars, target_chars)
-        return compressed
+            return compressed
+        if len(compressed) < min_chars:
+            print(
+                f"[rewriter] Compression too short ({len(compressed)}<{min_chars}); "
+                "keeping previous coherent text",
+                flush=True,
+            )
+            return script
+        if len(compressed) < len(script):
+            print(
+                f"[rewriter] Compression still over soft max ({len(compressed)}>{soft_max}); "
+                "keeping reduced LLM text without local sentence cuts",
+                flush=True,
+            )
+            return compressed
+        print(
+            f"[rewriter] Compression did not improve length ({len(compressed)} chars); "
+            "keeping previous coherent text",
+            flush=True,
+        )
+        return script
     except Exception as e:
-        print(f"[rewriter] Compression API failed ({e}); using local sentence fit", flush=True)
-        return _fit_text_by_even_sentences(script, min_chars, max_chars, target_chars)
+        print(f"[rewriter] Compression API failed ({e}); keeping coherent overlength text", flush=True)
+        return script
 
 
 def _compress_until_in_bounds(
@@ -467,7 +444,7 @@ def _compress_until_in_bounds(
     feedback: str = "",
     max_attempts: int = 1,
 ) -> str:
-    """Try one LLM compression, then force length locally if the provider ignores it."""
+    """Try LLM compression; never remove sentences locally just to hit a number."""
     for attempt in range(1, max_attempts + 1):
         if len(script) <= max_chars:
             break
@@ -487,14 +464,11 @@ def _compress_until_in_bounds(
         )
         print(f"[rewriter] Compression pass {attempt}: {old_len} -> {len(script)} chars", flush=True)
         if len(script) > max_chars:
-            target_chars = int(len(transcript) * TARGET_LENGTH_RATIO)
             print(
-                f"[rewriter] Compression still over max; forcing local sentence fit "
-                f"to {min_chars}-{max_chars} chars",
+                f"[rewriter] Compression still over hard max ({len(script)}>{max_chars}); "
+                "keeping coherent text and relying on full-script soft limit",
                 flush=True,
             )
-            script = _fit_text_by_even_sentences(script, min_chars, max_chars, target_chars)
-            print(f"[rewriter] Local sentence fit result: {len(script)} chars", flush=True)
             break
     return script
 
@@ -526,6 +500,7 @@ def _compress_parts_to_bounds(
         part_target = max(600, int(target_total * share))
         part_min = max(400, int(min_chars * share))
         part_max = max(part_min + 200, int(max_chars * share))
+        part_soft_max = _soft_max_from_hard(part_max)
         position = "first" if idx == 1 else "last" if idx == len(clean_parts) else "middle"
         user_msg = (
             f"Target language: {language}\n"
@@ -555,20 +530,42 @@ def _compress_parts_to_bounds(
         try:
             text, _ = _call_claude(system, [{"role": "user", "content": user_msg}], timeout=300)
             compressed_part = _extract_code_block(text)
-            if not (part_min <= len(compressed_part) <= part_max):
+            if part_min <= len(compressed_part) <= part_max:
+                pass
+            elif part_min <= len(compressed_part) <= part_soft_max:
                 print(
-                    f"[rewriter] Part {idx}/{len(clean_parts)} compression out of range "
-                    f"({len(compressed_part)} not in {part_min}-{part_max}); using local sentence fit",
+                    f"[rewriter] Part {idx}/{len(clean_parts)} slightly over hard range "
+                    f"({len(compressed_part)} not in {part_min}-{part_max}, soft max {part_soft_max}); "
+                    "keeping coherent LLM-compressed part",
                     flush=True,
                 )
-                compressed_part = _fit_text_by_even_sentences(part, part_min, part_max, part_target)
+            elif len(compressed_part) < part_min:
+                print(
+                    f"[rewriter] Part {idx}/{len(clean_parts)} compression too short "
+                    f"({len(compressed_part)}<{part_min}); keeping original part",
+                    flush=True,
+                )
+                compressed_part = part
+            elif len(compressed_part) < len(part):
+                print(
+                    f"[rewriter] Part {idx}/{len(clean_parts)} still over soft max "
+                    f"({len(compressed_part)}>{part_soft_max}); keeping reduced LLM part",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[rewriter] Part {idx}/{len(clean_parts)} compression did not improve length; "
+                    "keeping original part",
+                    flush=True,
+                )
+                compressed_part = part
         except Exception as e:
             print(
                 f"[rewriter] Compressing part {idx}/{len(clean_parts)} failed ({e}); "
-                "using local sentence fit",
+                "keeping original coherent part",
                 flush=True,
             )
-            compressed_part = _fit_text_by_even_sentences(part, part_min, part_max, part_target)
+            compressed_part = part
         compressed.append(compressed_part)
 
     script = "\n\n".join(compressed).strip()
@@ -1050,18 +1047,28 @@ def rewrite_all(
                     )
 
             if len(script) > max_chars:
-                old_len = len(script)
-                script = _fit_text_by_even_sentences(
-                    script,
-                    min_chars,
-                    max_chars,
-                    int(orig_len * TARGET_LENGTH_RATIO),
-                )
-                parts = [script]
-                print(
-                    f"[rewriter] Final local length fit: {old_len} -> {len(script)} chars",
-                    flush=True,
-                )
+                if len(script) <= soft_max_chars:
+                    print(
+                        f"[rewriter] Script over hard max but within soft max "
+                        f"({len(script)}>{max_chars}, soft max {soft_max_chars}); "
+                        "keeping coherent text",
+                        flush=True,
+                    )
+                else:
+                    old_len = len(script)
+                    script = _compress_until_in_bounds(
+                        script=script,
+                        transcript=transcript,
+                        language=language_name,
+                        min_chars=min_chars,
+                        max_chars=max_chars,
+                        feedback=feedback,
+                    )
+                    parts = [script]
+                    print(
+                        f"[rewriter] Final LLM length pass: {old_len} -> {len(script)} chars",
+                        flush=True,
+                    )
 
             passed, feedback = _quality_check_script(script, transcript, language_name, test_mode=False)
             if passed:
@@ -1081,18 +1088,32 @@ def rewrite_all(
                         flush=True,
                     )
                     break
+                if max_chars < len(script) <= soft_max_chars:
+                    quality_passed = True
+                    print(
+                        "[rewriter] Accepting script despite QC feedback because length is only "
+                        "slightly over hard max; avoiding destructive local cuts.",
+                        flush=True,
+                    )
+                    break
         if not quality_passed:
-            if len(script) > max_chars:
-                script = _fit_text_by_even_sentences(
-                    script,
-                    min_chars,
-                    max_chars,
-                    int(orig_len * TARGET_LENGTH_RATIO),
-                )
             if min_chars <= len(script) <= max_chars:
                 print(
-                    "[rewriter] Accepting script after forced length fit; "
+                    "[rewriter] Accepting script after QC fallback; "
                     f"last QC feedback: {feedback[:300]}",
+                    flush=True,
+                )
+            elif max_chars < len(script) <= soft_max_chars:
+                print(
+                    "[rewriter] Accepting coherent script above hard max but within soft max; "
+                    f"last QC feedback: {feedback[:300]}",
+                    flush=True,
+                )
+            elif len(script) > soft_max_chars:
+                print(
+                    "[rewriter] Accepting coherent script despite overlength because local sentence "
+                    f"cuts are disabled; length={len(script)} soft_max={soft_max_chars}. "
+                    f"Last QC feedback: {feedback[:300]}",
                     flush=True,
                 )
             else:
@@ -1101,10 +1122,16 @@ def rewrite_all(
                     f"{MAX_REWRITE_ATTEMPTS} attempts. Last feedback: {feedback[:500]}"
                 )
 
-        if not (min_chars <= len(script) <= max_chars):
+        if len(script) < min_chars:
             raise RuntimeError(
-                f"Rewrite length out of bounds after correction: {len(script)} chars "
-                f"(allowed {min_chars}-{max_chars})."
+                f"Rewrite length too short after correction: {len(script)} chars "
+                f"(minimum {min_chars})."
+            )
+        if len(script) > max_chars:
+            print(
+                f"[rewriter] Rewrite length outside hard range but accepted: {len(script)} chars "
+                f"(hard {min_chars}-{max_chars}, soft max {soft_max_chars}).",
+                flush=True,
             )
 
     skip_metadata = not bool(settings.get("rewrite_metadata_enabled", True))
