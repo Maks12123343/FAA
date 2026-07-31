@@ -4,8 +4,6 @@
 
 <div class="card">
   <h2>API Keys</h2>
-  <div class="field"><label>TTS API Key</label>
-    <input type="password" id="tts_api_key" value="{{ settings.tts_api_key }}"></div>
   <div class="field"><label>YouTube Data API v3 Key #1</label>
     <input type="password" id="youtube_api_key" value="{{ settings.youtube_api_key }}"></div>
   <div class="field"><label>YouTube Data API v3 Key #2 (backup)</label>
@@ -143,8 +141,10 @@
 
 <div class="card">
   <h2>VoiceGen TTS</h2>
+  <div class="field"><label>VoiceGen API Key</label>
+    <input type="password" id="tts_api_key" value="{{ settings.tts_api_key }}" placeholder="vg_..."></div>
   <div class="field"><label>VoiceGen API URL</label>
-    <input type="text" id="tts_api_url" value="{{ settings.tts_api_url }}"></div>
+    <input type="text" id="tts_api_url" value="{% if settings.tts_api_url == 'https://voiceapi.csv666.ru' %}https://qw1voicegencore.pro{% else %}{{ settings.tts_api_url or 'https://qw1voicegencore.pro' }}{% endif %}"></div>
 </div>
 
 <div class="card">
