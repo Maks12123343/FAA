@@ -101,6 +101,15 @@
       <p style="color:#f87171">No voice profiles configured. Add voice IDs in Settings.</p>
       {% endif %}
     </div>
+    <div id="manualModeWrap" style="margin-top:16px;padding-top:14px;border-top:1px solid #222">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#d1d5db">
+        <input type="checkbox" id="manualMode" onchange="updateManualEditor()" style="width:16px;height:16px">
+        Manual scripts and metadata
+      </label>
+      <div id="manualEditor" style="display:none;margin-top:12px">
+        <div id="manualLanguageInputs" style="display:grid;gap:12px"></div>
+      </div>
+    </div>
     <div style="margin-top:12px;display:flex;align-items:center;gap:16px">
       <button class="btn btn-success" id="produceBtn" onclick="startProduce()">
         Start Production
@@ -128,6 +137,7 @@ let _producing = false;
 let _pollTimer = null;
 let _lastLogCount = 0;
 let _socketAlive = false;
+let manualDrafts = {};
 
 socket.on('connect', () => { _socketAlive = true; });
 socket.on('disconnect', () => { _socketAlive = false; });
@@ -168,6 +178,88 @@ function log(msg, cls='') {
   el.scrollTop = el.scrollHeight;
 }
 
+function selectedLanguages() {
+  return [...document.querySelectorAll('#langCheckboxes input:checked')].map(el => el.value);
+}
+
+function languageLabel(code) {
+  const box = [...document.querySelectorAll('#langCheckboxes input')].find(el => el.value === code);
+  if (!box) return code.toUpperCase();
+  return box.parentElement.textContent.replace(/\s+/g, ' ').trim();
+}
+
+function saveManualDrafts() {
+  document.querySelectorAll('[data-manual-lang]').forEach(card => {
+    const lang = card.dataset.manualLang;
+    manualDrafts[lang] = {
+      script: card.querySelector('[data-manual-field="script"]').value,
+      title: card.querySelector('[data-manual-field="title"]').value,
+      description: card.querySelector('[data-manual-field="description"]').value,
+      tags: card.querySelector('[data-manual-field="tags"]').value,
+    };
+  });
+}
+
+function manualCard(lang) {
+  const draft = manualDrafts[lang] || {};
+  const wrap = document.createElement('div');
+  wrap.dataset.manualLang = lang;
+  wrap.style.cssText = 'border:1px solid #30363d;border-radius:8px;background:#111827;padding:12px';
+  wrap.innerHTML = `
+    <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:10px">
+      <div style="font-weight:700;color:#f3f4f6;font-size:14px">${escHtml(languageLabel(lang))}</div>
+      <div style="color:#9ca3af;font-size:11px;text-transform:uppercase">${escHtml(lang)}</div>
+    </div>
+    <label style="display:block;color:#aaa;font-size:12px;margin-bottom:5px">Voiceover text</label>
+    <textarea data-manual-field="script" rows="10" placeholder="Paste final translated script for this language..." style="width:100%;background:#0b0b0b;border:1px solid #333;border-radius:6px;padding:10px;color:#fff;font-size:13px;resize:vertical;line-height:1.45">${escHtml(draft.script || '')}</textarea>
+    <div style="display:grid;grid-template-columns:minmax(0,1fr);gap:8px;margin-top:10px">
+      <div>
+        <label style="display:block;color:#aaa;font-size:12px;margin-bottom:5px">Title</label>
+        <input data-manual-field="title" type="text" value="${escHtml(draft.title || '')}" placeholder="YouTube title" style="width:100%;background:#0b0b0b;border:1px solid #333;border-radius:6px;padding:8px 10px;color:#fff;font-size:13px">
+      </div>
+      <div>
+        <label style="display:block;color:#aaa;font-size:12px;margin-bottom:5px">Description</label>
+        <textarea data-manual-field="description" rows="4" placeholder="YouTube description" style="width:100%;background:#0b0b0b;border:1px solid #333;border-radius:6px;padding:8px 10px;color:#fff;font-size:13px;resize:vertical">${escHtml(draft.description || '')}</textarea>
+      </div>
+      <div>
+        <label style="display:block;color:#aaa;font-size:12px;margin-bottom:5px">Tags</label>
+        <input data-manual-field="tags" type="text" value="${escHtml(draft.tags || '')}" placeholder="tag 1, tag 2, tag 3" style="width:100%;background:#0b0b0b;border:1px solid #333;border-radius:6px;padding:8px 10px;color:#fff;font-size:13px">
+      </div>
+    </div>
+  `;
+  return wrap;
+}
+
+function updateManualEditor() {
+  saveManualDrafts();
+  const manualMode = document.getElementById('manualMode').checked;
+  const editor = document.getElementById('manualEditor');
+  const list = document.getElementById('manualLanguageInputs');
+  editor.style.display = manualMode ? '' : 'none';
+  if (!manualMode) return;
+
+  list.innerHTML = '';
+  const langs = selectedLanguages();
+  if (!langs.length) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'color:#9ca3af;font-size:13px;padding:10px;border:1px dashed #374151;border-radius:8px';
+    empty.textContent = 'Select languages first.';
+    list.appendChild(empty);
+    return;
+  }
+  langs.forEach(lang => list.appendChild(manualCard(lang)));
+}
+
+function setManualAvailability(enabled) {
+  const wrap = document.getElementById('manualModeWrap');
+  const toggle = document.getElementById('manualMode');
+  wrap.style.display = enabled ? '' : 'none';
+  if (!enabled) {
+    toggle.checked = false;
+  }
+  updateManualEditor();
+}
+
 // Load movies list for movie pipeline dropdown
 async function loadMovies() {
   const sel = document.getElementById('movieSelect');
@@ -200,6 +292,7 @@ async function onNicheChange() {
     const data = await r.json();
     const isLibrary = data.pipeline_type === 'library';
     const isMovie = !isLibrary && (data.pipeline_type === 'movie' || (data.movie_library && data.movie_library.length > 0));
+    currentPipelineType = isLibrary ? 'library' : (isMovie ? 'movie' : 'standard');
 
     if (isLibrary) {
       // Library pipeline (war-style): clips come from pre-indexed library, no Step 2 needed
@@ -225,10 +318,12 @@ async function onNicheChange() {
     }
   } catch (e) {
     // fallback to standard
+    currentPipelineType = 'standard';
     document.getElementById('standardClipBlock').style.display = '';
     document.getElementById('movieClipBlock').style.display = 'none';
     document.getElementById('cropBlock').style.display = 'none';
   }
+  setManualAvailability(currentPipelineType === 'library');
 }
 
 function resumePrepare() {
@@ -282,8 +377,7 @@ function resetJob() {
 }
 
 async function startProduce() {
-  const langs = [...document.querySelectorAll('#langCheckboxes input:checked')]
-    .map(el => el.value);
+  const langs = selectedLanguages();
 
   if (!langs.length) { alert('Select at least one language'); return; }
   if (!currentPrepareId) {
@@ -325,6 +419,7 @@ async function startProduce() {
   log(`Starting production for ${langs.length} language(s)...`);
 
   const testMode = document.getElementById('testMode').checked;
+  const manualMode = document.getElementById('manualMode').checked;
   const payload = {
     prepare_id:   currentPrepareId,
     languages:    langs,
@@ -334,6 +429,36 @@ async function startProduce() {
   const mainCharEl = document.getElementById('mainCharacter');
   if (mainCharEl && mainCharEl.value.trim()) payload.main_character = mainCharEl.value.trim();
   if (youtube_urls.length) payload.youtube_urls = youtube_urls;
+  if (manualMode) {
+    saveManualDrafts();
+    const manualInputs = {};
+    for (const lang of langs) {
+      const draft = manualDrafts[lang] || {};
+      const script = (draft.script || '').trim();
+      const title = (draft.title || '').trim();
+      if (!script) {
+        alert(`Paste voiceover text for ${languageLabel(lang)}`);
+        document.getElementById('produceBtn').disabled = false;
+        _producing = false;
+        return;
+      }
+      if (!title) {
+        alert(`Paste title for ${languageLabel(lang)}`);
+        document.getElementById('produceBtn').disabled = false;
+        _producing = false;
+        return;
+      }
+      manualInputs[lang] = {
+        script,
+        title,
+        description: (draft.description || '').trim(),
+        tags_raw: (draft.tags || '').trim(),
+      };
+    }
+    payload.manual_mode = true;
+    payload.manual_inputs = manualInputs;
+    log('Manual mode: rewrite and metadata API will be skipped.');
+  }
 
   fetch('/api/produce', {
     method: 'POST',
@@ -400,6 +525,7 @@ socket.on('prepare_done', data => {
     document.getElementById('standardClipBlock').style.display = '';
     document.getElementById('movieClipBlock').style.display = 'none';
   }
+  setManualAvailability(currentPipelineType === 'library');
 
   document.getElementById('phase2Card').style.display = 'block';
 
@@ -497,6 +623,9 @@ socket.on('error', data => {
 
 // Initialize on page load
 onNicheChange();
+document.querySelectorAll('#langCheckboxes input').forEach(el => {
+  el.addEventListener('change', updateManualEditor);
+});
 
 // Check if a job is stuck on page load
 fetch('/api/status').then(r=>r.json()).then(d=>{

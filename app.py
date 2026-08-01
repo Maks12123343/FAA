@@ -275,6 +275,8 @@ def api_produce():
     movie_name  = data.get("movie_name", "").strip()
     main_character = data.get("main_character", "").strip()
     test_mode   = bool(data.get("test_mode", False))
+    manual_mode = bool(data.get("manual_mode", False))
+    manual_inputs = data.get("manual_inputs", {}) if isinstance(data.get("manual_inputs", {}), dict) else {}
 
     if not prepare_id or not languages:
         return jsonify({"error": "prepare_id and languages required"}), 400
@@ -293,6 +295,16 @@ def api_produce():
         pipeline_type = state.get("_niche_pipeline_type", "standard")
         movie_names = state.get("_movie_names", [])
         niche_for_library = state.get("_niche", "")
+
+    if manual_mode:
+        if pipeline_type != "library":
+            return jsonify({"error": "Manual scripts mode is available for Library pipeline jobs only."}), 400
+        for lang in languages:
+            item = manual_inputs.get(lang) if isinstance(manual_inputs.get(lang), dict) else {}
+            if not (item.get("script") or "").strip():
+                return jsonify({"error": f"Manual script required for language: {lang}"}), 400
+            if not (item.get("title") or "").strip():
+                return jsonify({"error": f"Manual title required for language: {lang}"}), 400
 
     with _job_lock:
         if _job_active:
@@ -314,12 +326,14 @@ def api_produce():
         def _produce_one_language(lang, attempt):
             _emit("produce", f"Starting language: {lang} (attempt {attempt}/{MAX_LANGUAGE_ATTEMPTS})")
             if pipeline_type == "library":
+                manual_input = manual_inputs.get(lang, {}) if manual_mode else None
                 return war_pipeline.produce(
                     prepare_id=prepare_id,
                     niche=niche_for_library,
                     language=lang,
                     emit=_emit,
                     test_mode=test_mode,
+                    manual_input=manual_input,
                 )
             if pipeline_type == "movie" or movie_names:
                 return movie_pipeline.produce(

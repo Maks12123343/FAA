@@ -402,8 +402,31 @@ def prepare(source_url: str, emit=None) -> dict:
     }
 
 
+def _manual_tags(value) -> list:
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def _manual_metadata(manual_input: dict, source_title: str) -> dict:
+    title = (manual_input.get("title") or "").strip() or source_title
+    description = (manual_input.get("description") or "").strip()
+    tags_raw = (manual_input.get("tags_raw") or manual_input.get("tags") or "")
+    tags = _manual_tags(tags_raw)
+    tags_text = ", ".join(tags)
+    return {
+        "title": title,
+        "titles": [title] if title else [],
+        "titles_main": [title] if title else [],
+        "description": description,
+        "tags": tags,
+        "tags_raw": tags_text,
+        "manual_mode": True,
+    }
+
+
 def produce(prepare_id: str, niche: str, language: str, emit=None,
-            test_mode: bool = False) -> dict:
+            test_mode: bool = False, manual_input=None) -> dict:
     """
     Фаза 2: rewrite → TTS → segments → embed → global cosine → montage.
     """
@@ -447,8 +470,34 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
     # ── Rewrite ────────────────────────────────────────────────────────────────
     script_path = os.path.join(proj_dir, "script.txt")
     meta_path = os.path.join(proj_dir, "metadata.json")
+    audio_path = os.path.join(proj_dir, "voiceover.mp3")
+    clips_cache = os.path.join(proj_dir, "clips.json")
+    output_path = os.path.join(proj_dir, f"{proj_id}.mp4")
     _thumb_prompt = ""
-    if os.path.exists(script_path):
+    manual_input = manual_input if isinstance(manual_input, dict) else None
+    manual_script = (manual_input.get("script") or "").strip() if manual_input else ""
+    manual_mode = bool(manual_script)
+    if manual_mode:
+        previous_script = ""
+        if os.path.exists(script_path):
+            with open(script_path, encoding="utf-8") as f:
+                previous_script = f.read().strip()
+        script_changed = previous_script != manual_script
+        script = manual_script
+        meta = _manual_metadata(manual_input, source_title)
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(script)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        if script_changed:
+            for stale_path in (audio_path, clips_cache, output_path):
+                try:
+                    if os.path.exists(stale_path):
+                        os.remove(stale_path)
+                except Exception as e:
+                    print(f"[war_pipeline] Failed to remove stale cache {stale_path}: {e}", flush=True)
+        log("rewrite", f"Manual script supplied; rewrite/metadata API skipped ({len(script)} chars)")
+    elif os.path.exists(script_path):
         with open(script_path, encoding="utf-8") as f:
             script = f.read()
         log("rewrite", f"Script cached ({len(script)} chars)")
@@ -475,9 +524,12 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
     # ---- thumbnail analysis (library pipeline only) ----
     _thumb_out = os.path.join(proj_dir, "thumbnail_prompt.txt")
     _settings = config.load_settings()
-    _skip_thumbnail = not bool(_settings.get("rewrite_thumbnail_enabled", True))
+    _skip_thumbnail = manual_mode or not bool(_settings.get("rewrite_thumbnail_enabled", True))
     if _skip_thumbnail:
-        log("thumbnail", "thumbnail rewrite disabled: skipping thumbnail analysis/rewrite")
+        if manual_mode:
+            log("thumbnail", "Manual mode: skipping thumbnail analysis/rewrite")
+        else:
+            log("thumbnail", "thumbnail rewrite disabled: skipping thumbnail analysis/rewrite")
     elif os.path.exists(_thumb_out):
         try:
             with open(_thumb_out, encoding="utf-8") as _f:
@@ -521,7 +573,6 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
     mark_timing("thumbnail")
 
     # ── TTS ────────────────────────────────────────────────────────────────────
-    audio_path = os.path.join(proj_dir, "voiceover.mp3")
     if not os.path.exists(audio_path):
         log("tts", "Generating voiceover...")
         tts.generate(script, language, audio_path)
@@ -541,10 +592,14 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
     mark_timing("segments")
 
     # ── Text overlays (те саме що movie_pipeline) ──────────────────────────────
-    log("overlays", "Planning text overlays...")
-    overlay_plan = _plan_text_overlays_war(segments, language, emit=emit)
-    text_overlays = _build_text_overlays_war(overlay_plan, segments)
-    log("overlays", f"Planned {len(text_overlays)} text overlays.")
+    if manual_mode:
+        text_overlays = []
+        log("overlays", "Manual mode: skipping AI text overlay planning.")
+    else:
+        log("overlays", "Planning text overlays...")
+        overlay_plan = _plan_text_overlays_war(segments, language, emit=emit)
+        text_overlays = _build_text_overlays_war(overlay_plan, segments)
+        log("overlays", f"Planned {len(text_overlays)} text overlays.")
     mark_timing("overlays")
 
     # ── Load library index ─────────────────────────────────────────────────────
@@ -554,7 +609,6 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
     mark_timing("library")
 
     # ── Semantic clip selection (global cosine) ───────────────────────────────
-    clips_cache = os.path.join(proj_dir, "clips.json")
     if os.path.exists(clips_cache):
         with open(clips_cache, encoding="utf-8") as f:
             clip_data = json.load(f)
@@ -617,7 +671,6 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         log("montage", f"Assembling {len(prepared)} clips ({audio_dur:.1f}s audio)...")
         if emit:
             emit("montage", "Assembling video segments...")
-        output_path = os.path.join(proj_dir, f"{proj_id}.mp4")
         _build_movie_video(
             clips=prepared,
             audio_path=audio_path,
