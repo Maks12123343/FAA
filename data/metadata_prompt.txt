@@ -74,6 +74,12 @@ Requirements:
 - Make only light localization / geo / language adjustments.
 - Preserve the core keyword intent.
 - Order by relevance from strongest to most specific.
+- Write ALL tags in {language}.
+- Localize proper names, organization names, acronyms, weapon names, places,
+  and search entities into the form normally used by {language} speakers.
+- Do not use English tags unless the target language itself commonly uses the
+  exact English spelling as the natural search form.
+- Do not mix generic English keywords into non-English videos.
 - The entire tags block, including commas and spaces, must be strictly between
   490 and 500 characters total.
 - No more, no less.
