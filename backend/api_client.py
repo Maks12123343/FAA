@@ -19,6 +19,65 @@ def _clean_for_json(value):
     return value
 
 
+def _content_to_text(value) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = (
+                    item.get("text")
+                    or item.get("content")
+                    or item.get("value")
+                    or ""
+                )
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts).strip()
+    if isinstance(value, dict):
+        text = value.get("text") or value.get("content") or value.get("value") or ""
+        return text.strip() if isinstance(text, str) else ""
+    return ""
+
+
+def _extract_chat_text(data: dict) -> tuple[str, str]:
+    if not isinstance(data, dict):
+        raise RuntimeError(f"chat response was not a JSON object: {type(data).__name__}")
+    if data.get("error"):
+        raise RuntimeError(f"chat response error: {data.get('error')}")
+
+    choices = data.get("choices") or []
+    if choices:
+        choice = choices[0] or {}
+        message = choice.get("message") or {}
+        delta = choice.get("delta") or {}
+        text = (
+            _content_to_text(message.get("content"))
+            or _content_to_text(delta.get("content"))
+            or _content_to_text(choice.get("text"))
+        )
+        finish = choice.get("finish_reason") or choice.get("native_finish_reason") or data.get("status") or "stop"
+        if text:
+            return text, "max_tokens" if finish == "length" else finish
+
+        choice_keys = sorted(choice.keys()) if isinstance(choice, dict) else []
+        message_keys = sorted(message.keys()) if isinstance(message, dict) else []
+        raise RuntimeError(
+            "chat response contained no assistant content "
+            f"(finish={finish!r}, choice_keys={choice_keys}, message_keys={message_keys})"
+        )
+
+    text = _content_to_text(data.get("output_text")) or _content_to_text(data.get("content"))
+    if text:
+        finish = data.get("status") or "stop"
+        return text, "max_tokens" if finish == "incomplete" else finish
+
+    raise RuntimeError(f"chat response contained no choices/content; keys={sorted(data.keys())}")
+
+
 def _parse_sse_chat_response(raw: str) -> dict:
     content_parts = []
     finish = None
@@ -36,8 +95,12 @@ def _parse_sse_chat_response(raw: str) -> dict:
         for choice in item.get("choices") or []:
             delta = choice.get("delta") or {}
             message = choice.get("message") or {}
-            text = delta.get("content") or message.get("content") or choice.get("text") or ""
-            if isinstance(text, str) and text:
+            text = (
+                _content_to_text(delta.get("content"))
+                or _content_to_text(message.get("content"))
+                or _content_to_text(choice.get("text"))
+            )
+            if text:
                 content_parts.append(text)
             finish = choice.get("finish_reason") or choice.get("native_finish_reason") or finish
     text = "".join(content_parts).strip()
@@ -80,6 +143,8 @@ def _rewrite_settings() -> tuple[str, str, str, str, str]:
         or os.environ.get("REWRITE_REASONING_EFFORT")
         or "high"
     )
+    if str(reasoning).strip().lower() in ("", "none", "off", "false", "0"):
+        reasoning = ""
     max_tokens_raw = settings.get("rewrite_max_tokens") or os.environ.get("REWRITE_MAX_TOKENS") or "12000"
     return api_url, api_key, model, reasoning, max_tokens_raw
 
@@ -218,11 +283,7 @@ def _call_openai_compatible(
                     f"content_type={content_type!r} "
                     f"body={body_preview!r}"
                 ) from exc
-            choice = data["choices"][0]
-            text = choice["message"]["content"].strip()
-            finish = choice.get("finish_reason") or choice.get("native_finish_reason") or "stop"
-            stop_reason = "max_tokens" if finish == "length" else finish
-            return text, stop_reason
+            return _extract_chat_text(data)
         except Exception as e:
             detail = f"{type(e).__name__}: {e}"
             if "SSE response contained no assistant content" in detail:
