@@ -20,11 +20,11 @@ and any unrelated conversational filler.
 
 Provide 5 title options.
 
-Each option must be written in {language}, followed by an em-dash ( — ) and an
-accurate Ukrainian translation.
+Each option must be written in {language}, followed by " || " and an accurate
+Ukrainian translation.
 
 Format:
-[Title in {language}] — [Ukrainian translation]
+[Title in {language}] || [Ukrainian translation]
 
 Title strategy:
 - Options 1 and 2: almost the same as the original, with only light synonym or
@@ -89,11 +89,11 @@ Requirements:
 Provide the output exactly in this structure:
 
 ### Optimized Titles:
-1. [Title in {language}] — [Ukrainian translation]
-2. [Title in {language}] — [Ukrainian translation]
-3. [Title in {language}] — [Ukrainian translation]
-4. [Title in {language}] — [Ukrainian translation]
-5. [Title in {language}] — [Ukrainian translation]
+1. [Title in {language}] || [Ukrainian translation]
+2. [Title in {language}] || [Ukrainian translation]
+3. [Title in {language}] || [Ukrainian translation]
+4. [Title in {language}] || [Ukrainian translation]
+5. [Title in {language}] || [Ukrainian translation]
 
 ### Optimized Description:
 [Rewritten description text in {language}]

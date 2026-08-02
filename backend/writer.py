@@ -77,9 +77,9 @@ Exception: each title must also include a Ukrainian translation (see Title rules
 
 ## TITLE RULES
 Provide exactly 5 different title options.
-Each option must be written in the target language, followed by an em-dash ( — ) and its
+Each option must be written in the target language, followed by " || " and its
 accurate translation into Ukrainian.
-Format: [Title in target language] — [Ukrainian translation]
+Format: [Title in target language] || [Ukrainian translation]
 The 5 options must represent different rewriting styles:
   * Options 1 and 2 (Direct): straightforward, close to the topic, different words.
   * Options 3 and 4 (Moderate): altered structure, more intrigue, same core angle.
@@ -98,11 +98,11 @@ must be STRICTLY between 490 and 500 characters. Adjust tag count/length to fit 
 
 ## OUTPUT FORMAT (STRICTLY MANDATORY)
 ### Optimized Titles:
-1. [Title] — [Ukrainian translation]
-2. [Title] — [Ukrainian translation]
-3. [Title] — [Ukrainian translation]
-4. [Title] — [Ukrainian translation]
-5. [Title] — [Ukrainian translation]
+1. [Title] || [Ukrainian translation]
+2. [Title] || [Ukrainian translation]
+3. [Title] || [Ukrainian translation]
+4. [Title] || [Ukrainian translation]
+5. [Title] || [Ukrainian translation]
 
 ### Optimized Description:
 [Description text]
@@ -248,11 +248,11 @@ def generate_metadata(topic: str, language: str, script: str) -> dict:
         f"Generate optimized YouTube metadata following ALL rules from the system prompt.\n"
         f"Use this exact output format:\n\n"
         f"### Optimized Titles:\n"
-        f"1. [Title in {language}] — [Ukrainian translation]\n"
-        f"2. [Title in {language}] — [Ukrainian translation]\n"
-        f"3. [Title in {language}] — [Ukrainian translation]\n"
-        f"4. [Title in {language}] — [Ukrainian translation]\n"
-        f"5. [Title in {language}] — [Ukrainian translation]\n\n"
+        f"1. [Title in {language}] || [Ukrainian translation]\n"
+        f"2. [Title in {language}] || [Ukrainian translation]\n"
+        f"3. [Title in {language}] || [Ukrainian translation]\n"
+        f"4. [Title in {language}] || [Ukrainian translation]\n"
+        f"5. [Title in {language}] || [Ukrainian translation]\n\n"
         f"### Optimized Description:\n"
         f"[Engaging, SEO-optimized description in {language}]\n\n"
         f"### Optimized Tags:\n"
@@ -275,11 +275,13 @@ def generate_metadata(topic: str, language: str, script: str) -> dict:
             if m:
                 full = m.group(1).strip()
                 titles.append(full)
-                # Split off Ukrainian translation if present (separator: " — ")
-                if " — " in full:
-                    main_part = full.split(" — ")[0].strip()
+                # Split off Ukrainian translation for clean YouTube title.
+                if " || " in full:
+                    main_part = full.split(" || ", 1)[0].strip()
+                elif " — " in full:
+                    main_part = full.rsplit(" — ", 1)[0].strip()
                 else:
-                    main_part = full
+                    main_part = full.strip()
                 titles_main.append(main_part)
 
     # Parse description

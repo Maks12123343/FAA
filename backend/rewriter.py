@@ -763,11 +763,8 @@ def _parse_metadata_output(text: str) -> dict:
             if m:
                 full = m.group(1).strip()
                 titles.append(full)
-                # Split off Ukrainian translation (separator: " — ")
-                if " — " in full:
-                    main_part = full.split(" — ")[0].strip()
-                else:
-                    main_part = full
+                # Split off Ukrainian translation for clean YouTube title.
+                main_part = _split_title_translation(full)
                 titles_main.append(main_part)
 
     # Description
@@ -797,6 +794,14 @@ def _parse_metadata_output(text: str) -> dict:
         "tags":        tags,
         "tags_raw":    tags_raw,
     }
+
+
+def _split_title_translation(full: str) -> str:
+    if " || " in full:
+        return full.split(" || ", 1)[0].strip()
+    if " — " in full:
+        return full.rsplit(" — ", 1)[0].strip()
+    return full.strip()
 
 
 MAX_METADATA_ATTEMPTS = 3
@@ -866,11 +871,11 @@ def _rewrite_metadata(
         f"Keep capitalized emphasis where it makes sense for YouTube style, and avoid clickbait exaggeration beyond the source.\n\n"
         f"Reply STRICTLY in this format (no other text):\n"
         f"### Optimized Titles:\n"
-        f"1. Title in {language} — Ukrainian translation\n"
-        f"2. Title in {language} — Ukrainian translation\n"
-        f"3. Title in {language} — Ukrainian translation\n"
-        f"4. Title in {language} — Ukrainian translation\n"
-        f"5. Title in {language} — Ukrainian translation\n"
+        f"1. Title in {language} || Ukrainian translation\n"
+        f"2. Title in {language} || Ukrainian translation\n"
+        f"3. Title in {language} || Ukrainian translation\n"
+        f"4. Title in {language} || Ukrainian translation\n"
+        f"5. Title in {language} || Ukrainian translation\n"
     )
     print("[rewriter]   → titles...", flush=True)
     titles_raw = _call_metadata_part(system_full, "titles", title_user, "### Optimized Titles:")
