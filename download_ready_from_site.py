@@ -356,7 +356,10 @@ def _watch(args) -> int:
         print(f"[check] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         try:
             if baseline_done:
-                _run_once(args)
+                downloaded = _run_once(args)
+                if downloaded > 0:
+                    print("[watch] downloaded new video(s), checking again immediately")
+                    continue
             else:
                 marked = _mark_existing_ready(args)
                 print(f"[watch] ignored {marked} ready project(s) already visible at startup")
@@ -381,7 +384,8 @@ def _watch(args) -> int:
 def run(args) -> int:
     if args.watch:
         return _watch(args)
-    return _run_once(args)
+    _run_once(args)
+    return 0
 
 
 def parse_args():
