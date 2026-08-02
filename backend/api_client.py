@@ -118,35 +118,59 @@ def _responses_url(api_url: str) -> str:
     return "https://a6api.com/v1/responses"
 
 
-def _rewrite_settings() -> tuple[str, str, str, str, str]:
+def _rewrite_settings() -> tuple[str, str, str, str, str, str]:
     settings = config.load_settings()
-    api_key = (settings.get("rewrite_api_key", "") or os.environ.get("REWRITE_API_KEY", "")).strip()
+    active_provider = (
+        settings.get("rewrite_active_provider")
+        or os.environ.get("REWRITE_PROVIDER")
+        or "a6api"
+    )
+    providers = settings.get("rewrite_providers") if isinstance(settings.get("rewrite_providers"), dict) else {}
+    provider = providers.get(active_provider) if isinstance(providers.get(active_provider), dict) else {}
+    provider_name = (provider.get("name") or str(active_provider or "Rewrite API")).strip()
+
+    legacy_api_key = settings.get("rewrite_api_key", "")
+    provider_api_key = provider.get("api_key", "")
+    use_provider_fields = bool(str(provider_api_key or "").strip())
+    api_key = (
+        provider_api_key
+        or legacy_api_key
+        or os.environ.get("REWRITE_API_KEY", "")
+    ).strip()
     if not api_key:
-        raise RuntimeError("No rewrite API key configured in Settings.")
+        raise RuntimeError(f"No rewrite API key configured in Settings for provider: {provider_name}.")
     try:
         api_key.encode("ascii")
     except UnicodeEncodeError as exc:
         raise RuntimeError("Rewrite API key must be the real ASCII API key, not a placeholder.") from exc
 
     api_url = (
-        settings.get("rewrite_api_url")
+        (provider.get("api_url") if use_provider_fields else "")
+        or settings.get("rewrite_api_url")
         or os.environ.get("REWRITE_API_URL")
         or "https://a6api.com/v1/chat/completions"
     )
     model = (
-        settings.get("rewrite_model")
+        (provider.get("model") if use_provider_fields else "")
+        or settings.get("rewrite_model")
         or os.environ.get("REWRITE_MODEL")
         or "gpt-5.5"
     )
     reasoning = (
-        settings.get("rewrite_reasoning_effort")
+        (provider.get("reasoning_effort") if use_provider_fields else "")
+        or settings.get("rewrite_reasoning_effort")
         or os.environ.get("REWRITE_REASONING_EFFORT")
         or "high"
     )
     if str(reasoning).strip().lower() in ("", "none", "off", "false", "0"):
         reasoning = ""
-    max_tokens_raw = settings.get("rewrite_max_tokens") or os.environ.get("REWRITE_MAX_TOKENS") or "12000"
-    return api_url, api_key, model, reasoning, max_tokens_raw
+    max_tokens_raw = (
+        (provider.get("max_tokens") if use_provider_fields else "")
+        or settings.get("rewrite_max_tokens")
+        or os.environ.get("REWRITE_MAX_TOKENS")
+        or "12000"
+    )
+    return provider_name, api_url, api_key, model, reasoning, max_tokens_raw
 
 
 def _messages_to_responses_input(system: str, messages: list) -> str:
@@ -326,9 +350,9 @@ def call_rewrite_api(
     step_label: str = "api",
 ) -> tuple[str, str]:
     """Call the rewrite API (currently A6API/OpenAI-compatible)."""
-    api_url, api_key, model, reasoning_effort, max_tokens_raw = _rewrite_settings()
+    provider_name, api_url, api_key, model, reasoning_effort, max_tokens_raw = _rewrite_settings()
     return _call_openai_compatible(
-        provider_name="A6API",
+        provider_name=provider_name,
         api_url=api_url,
         api_key=api_key,
         model=model,

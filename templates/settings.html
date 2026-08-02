@@ -77,10 +77,23 @@
 <div class="card">
   <h2>Rewrite</h2>
   <p style="color:#aaa;font-size:13px;margin-bottom:16px">
-    A6API controls for script rewrite, thumbnail prompt rewrite, and metadata rewrite.
+    OpenAI-compatible API controls for script rewrite, thumbnail prompt rewrite, and metadata rewrite.
   </p>
+  <div class="grid-2">
+    <div class="field">
+      <label>Active Provider</label>
+      <select id="rewrite_active_provider" onchange="onRewriteProviderChange()"></select>
+    </div>
+    <div class="field">
+      <label>Provider Name</label>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="rewrite_provider_name" value="" style="flex:1">
+        <button type="button" class="btn" onclick="addRewriteProvider()" style="white-space:nowrap">+ Add</button>
+      </div>
+    </div>
+  </div>
   <div class="field">
-    <label>A6API Key</label>
+    <label>API Key</label>
     <textarea id="rewrite_api_key" rows="2" style="width:100%;background:#1a1a1a;color:#e0e0e0;border:1px solid #333;border-radius:6px;padding:8px;font-family:monospace;font-size:13px">{{ settings.rewrite_api_key or '' }}</textarea>
   </div>
   <div class="grid-2">
@@ -109,6 +122,8 @@
   </div>
   <div class="field"><label>API URL</label>
     <input type="text" id="rewrite_api_url" value="{{ settings.rewrite_api_url or 'https://a6api.com/v1/chat/completions' }}"></div>
+  <div class="field"><label>Max Tokens</label>
+    <input type="text" id="rewrite_max_tokens" value="{{ settings.rewrite_max_tokens or '12000' }}"></div>
   <div class="field"><label>Rewrite Chunks</label>
     <input type="text" id="rewrite_chunks" value="{{ settings.rewrite_chunks or 6 }}"></div>
   <div style="display:grid;gap:10px;margin-top:8px">
@@ -188,6 +203,133 @@ function _esc(s) {
                   .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+const rewriteProviders = {{ settings.rewrite_providers|tojson }};
+let currentRewriteProvider = {{ (settings.rewrite_active_provider or 'a6api')|tojson }};
+
+function providerDefaults() {
+  return {
+    a6api: {
+      name: 'A6API',
+      api_key: '',
+      model: 'gpt-5.5',
+      api_url: 'https://a6api.com/v1/chat/completions',
+      reasoning_effort: 'high',
+      max_tokens: '12000',
+    },
+    byesu: {
+      name: 'Byesu',
+      api_key: '',
+      model: 'gpt-5.5',
+      api_url: 'https://byesu.com/v1/chat/completions',
+      reasoning_effort: 'none',
+      max_tokens: '12000',
+    },
+    custom: {
+      name: 'Custom',
+      api_key: '',
+      model: '',
+      api_url: '',
+      reasoning_effort: 'none',
+      max_tokens: '12000',
+    },
+  };
+}
+
+function normalizeProviderId(name) {
+  return String(name || 'custom')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40) || 'custom';
+}
+
+function ensureRewriteProviders() {
+  const defaults = providerDefaults();
+  Object.entries(defaults).forEach(([id, data]) => {
+    rewriteProviders[id] = {...data, ...(rewriteProviders[id] || {})};
+  });
+  if (!rewriteProviders[currentRewriteProvider]) currentRewriteProvider = 'a6api';
+
+  const legacy = {
+    api_key: document.getElementById('rewrite_api_key').value.trim(),
+    model: document.getElementById('rewrite_model').value.trim(),
+    api_url: document.getElementById('rewrite_api_url').value.trim(),
+    reasoning_effort: document.getElementById('rewrite_reasoning_effort').value,
+    max_tokens: document.getElementById('rewrite_max_tokens').value.trim() || '12000',
+  };
+  const active = rewriteProviders[currentRewriteProvider];
+  if (legacy.api_key && !active.api_key) active.api_key = legacy.api_key;
+  if (legacy.model && (!active.model || active.model === defaults[currentRewriteProvider]?.model)) active.model = legacy.model;
+  if (legacy.api_url && (!active.api_url || active.api_url === defaults[currentRewriteProvider]?.api_url)) active.api_url = legacy.api_url;
+  if (legacy.reasoning_effort) active.reasoning_effort = legacy.reasoning_effort;
+  if (legacy.max_tokens) active.max_tokens = legacy.max_tokens;
+}
+
+function saveRewriteProviderDraft() {
+  if (!rewriteProviders[currentRewriteProvider]) rewriteProviders[currentRewriteProvider] = {};
+  rewriteProviders[currentRewriteProvider] = {
+    name: document.getElementById('rewrite_provider_name').value.trim() || currentRewriteProvider,
+    api_key: document.getElementById('rewrite_api_key').value.trim(),
+    model: document.getElementById('rewrite_model').value.trim(),
+    api_url: document.getElementById('rewrite_api_url').value.trim(),
+    reasoning_effort: document.getElementById('rewrite_reasoning_effort').value,
+    max_tokens: document.getElementById('rewrite_max_tokens').value.trim() || '12000',
+  };
+}
+
+function loadRewriteProviderDraft(id) {
+  const provider = rewriteProviders[id] || {};
+  document.getElementById('rewrite_provider_name').value = provider.name || id;
+  document.getElementById('rewrite_api_key').value = provider.api_key || '';
+  document.getElementById('rewrite_model').value = provider.model || '';
+  document.getElementById('rewrite_api_url').value = provider.api_url || '';
+  document.getElementById('rewrite_reasoning_effort').value = provider.reasoning_effort || 'none';
+  document.getElementById('rewrite_max_tokens').value = provider.max_tokens || '12000';
+}
+
+function renderRewriteProviderSelect() {
+  const sel = document.getElementById('rewrite_active_provider');
+  sel.innerHTML = '';
+  Object.entries(rewriteProviders).forEach(([id, provider]) => {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = `${provider.name || id} (${id})`;
+    if (id === currentRewriteProvider) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+function onRewriteProviderChange() {
+  saveRewriteProviderDraft();
+  currentRewriteProvider = document.getElementById('rewrite_active_provider').value;
+  loadRewriteProviderDraft(currentRewriteProvider);
+}
+
+function addRewriteProvider() {
+  saveRewriteProviderDraft();
+  const label = prompt('Provider name, e.g. OpenRouter, Byesu backup, My API');
+  if (!label) return;
+  let id = normalizeProviderId(label);
+  const baseId = id;
+  let n = 2;
+  while (rewriteProviders[id]) {
+    id = `${baseId}_${n++}`;
+  }
+  rewriteProviders[id] = {
+    name: label.trim(),
+    api_key: '',
+    model: '',
+    api_url: '',
+    reasoning_effort: 'none',
+    max_tokens: '12000',
+  };
+  currentRewriteProvider = id;
+  renderRewriteProviderSelect();
+  loadRewriteProviderDraft(id);
+  document.getElementById('rewrite_api_key').focus();
+}
+
 function openAddLangModal() {
   document.getElementById('newLangName').value = '';
   document.getElementById('newLangCode').value = '';
@@ -252,6 +394,7 @@ function removeLanguage(code) {
 }
 
 function saveSettings() {
+  saveRewriteProviderDraft();
   const voice_profiles = {};
   document.querySelectorAll('.voice-profile-card').forEach(card => {
     const code = card.dataset.langCode;
@@ -265,10 +408,13 @@ function saveSettings() {
   });
 
   const data = {
+    rewrite_active_provider: currentRewriteProvider,
+    rewrite_providers: rewriteProviders,
     rewrite_api_key:   document.getElementById('rewrite_api_key').value.trim(),
     rewrite_model:     document.getElementById('rewrite_model').value,
     rewrite_api_url:   document.getElementById('rewrite_api_url').value,
     rewrite_reasoning_effort: document.getElementById('rewrite_reasoning_effort').value,
+    rewrite_max_tokens: document.getElementById('rewrite_max_tokens').value.trim() || '12000',
     rewrite_chunks:    parseInt(document.getElementById('rewrite_chunks').value) || 6,
     rewrite_script_enabled: document.getElementById('rewrite_script_enabled').checked,
     rewrite_thumbnail_enabled: document.getElementById('rewrite_thumbnail_enabled').checked,
@@ -304,5 +450,9 @@ function saveSettings() {
     setTimeout(() => msg.style.display = 'none', 2000);
   });
 }
+
+ensureRewriteProviders();
+renderRewriteProviderSelect();
+loadRewriteProviderDraft(currentRewriteProvider);
 </script>
 {% endblock %}

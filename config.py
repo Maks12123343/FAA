@@ -61,10 +61,38 @@ DEFAULT_SETTINGS = {
     "gemini_model": "gemini-2.5-flash",
 
     # Rewrite API (OpenAI-compatible chat completions)
+    "rewrite_active_provider": "a6api",
+    "rewrite_providers": {
+        "a6api": {
+            "name": "A6API",
+            "api_key": "",
+            "model": "gpt-5.5",
+            "api_url": "https://a6api.com/v1/chat/completions",
+            "reasoning_effort": "high",
+            "max_tokens": "12000",
+        },
+        "byesu": {
+            "name": "Byesu",
+            "api_key": "",
+            "model": "gpt-5.5",
+            "api_url": "https://byesu.com/v1/chat/completions",
+            "reasoning_effort": "none",
+            "max_tokens": "12000",
+        },
+        "custom": {
+            "name": "Custom",
+            "api_key": "",
+            "model": "",
+            "api_url": "",
+            "reasoning_effort": "none",
+            "max_tokens": "12000",
+        },
+    },
     "rewrite_api_key": "",
     "rewrite_model": "gpt-5.5",
     "rewrite_api_url": "https://a6api.com/v1/chat/completions",
     "rewrite_reasoning_effort": "high",
+    "rewrite_max_tokens": "12000",
     "rewrite_script_enabled": True,
     "rewrite_thumbnail_enabled": True,
     "rewrite_metadata_enabled": True,
