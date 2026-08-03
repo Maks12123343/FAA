@@ -47,7 +47,8 @@ SAVE_EVERY = 20
 
 TEXT_CLEANUP_PROMPT = """
 You are cleaning a reusable war-footage clip library for YouTube montage.
-You see 3 frames from ONE short clip: 10%, 50%, and 90% of the clip.
+You see 3 images from ONE short clip: frame 1 is 10%, frame 2 is 50%,
+and frame 3 is 90% of the clip.
 
 Your task is to decide whether this clip should be REMOVED from the reusable
 library because visible text makes it too specific, ugly, or unsuitable for
@@ -75,6 +76,13 @@ Severity definitions:
 - small: tiny/incidental text, keep
 - medium: noticeable text that hurts reuse, delete
 - heavy: subtitles/title cards/UI/large text, delete
+
+Confidence calibration:
+- Use 0.90-0.98 when subtitles, title cards, lower thirds, UI overlays, maps,
+  mirrored text, or large overlay text are clearly visible.
+- Use 0.85-0.90 when noticeable text probably hurts reuse.
+- Use 0.70-0.84 only for borderline or partially visible text.
+- Use 0.00-0.30 when no meaningful text is visible.
 
 Return JSON only:
 {
@@ -292,10 +300,8 @@ def _analyze_clip(path: str, model, processor, ratios: tuple[float, ...], max_ne
             with Image.open(frame) as img:
                 images.append(img.convert("RGB"))
 
-        labels = ("FRAME 10 PERCENT", "FRAME 50 PERCENT", "FRAME 90 PERCENT")
         content = []
-        for i, img in enumerate(images):
-            content.append({"type": "text", "text": labels[i] if i < len(labels) else f"FRAME {i + 1}"})
+        for img in images:
             content.append({"type": "image", "image": img})
         content.append({"type": "text", "text": TEXT_CLEANUP_PROMPT})
 
