@@ -270,6 +270,8 @@ def _select_projects(args, state: dict) -> list:
 
 
 def _state_file(args) -> Path:
+    if args.state_file:
+        return Path(args.state_file)
     return Path(args.out_dir) / ".faa_site_downloaded.json"
 
 
@@ -418,6 +420,11 @@ def parse_args():
     )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--out", "--out-dir", dest="out_dir", default=DEFAULT_OUT_DIR)
+    parser.add_argument(
+        "--state-file",
+        default="",
+        help="Optional separate state file, useful when two downloader processes run in parallel.",
+    )
     parser.add_argument("--languages", default=DEFAULT_LANGUAGES)
     parser.add_argument(
         "--project-ids",

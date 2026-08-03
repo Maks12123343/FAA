@@ -6,6 +6,7 @@ param(
     [int]$LocalPort = 5050,
     [int]$RemotePort = 5050,
     [double]$IntervalMinutes = 1,
+    [string]$StateFile = "",
     [switch]$WatchNewOnly
 )
 
@@ -44,6 +45,11 @@ $downloadArgs = @(
 
 if ($WatchNewOnly) {
     $downloadArgs += "--watch-new-only"
+}
+
+if ($StateFile) {
+    $downloadArgs += "--state-file"
+    $downloadArgs += $StateFile
 }
 
 Write-Host "[auto] starting downloader"
