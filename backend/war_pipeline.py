@@ -188,11 +188,13 @@ def _select_clips_semantic(segments: list, clips: list, emit=None) -> list:
 
         use_counts[picked] = use_counts.get(picked, 0) + 1
         clip = clips[picked]
+        text_safety = clip.get("text_safety") or {}
         selected.append({
             "file": clip["file"],
             "duration": seg_dur,
             "id": clip.get("id", os.path.basename(clip["file"])),
             "search_scope": search_mode,
+            "no_mirror": bool(text_safety.get("no_mirror", False)),
         })
 
         if emit and (i + 1) % 50 == 0:
@@ -613,6 +615,13 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         with open(clips_cache, encoding="utf-8") as f:
             clip_data = json.load(f)
         clip_data = [c for c in clip_data if os.path.exists(c.get("file", ""))]
+        safety_by_file = {
+            c.get("file"): bool((c.get("text_safety") or {}).get("no_mirror", False))
+            for c in clips
+            if c.get("file")
+        }
+        for cached_clip in clip_data:
+            cached_clip["no_mirror"] = safety_by_file.get(cached_clip.get("file"), False)
         log("clips", f"Clips cached: {len(clip_data)}")
     else:
         log("clips", "Selecting clips via global cosine similarity...")
@@ -623,6 +632,9 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         with open(clips_cache, "w", encoding="utf-8") as f:
             json.dump(clip_data, f, ensure_ascii=False)
         log("clips", f"Selected {len(clip_data)} clips.")
+    no_mirror_count = sum(1 for c in clip_data if c.get("no_mirror"))
+    if no_mirror_count:
+        log("clips", f"Text safety: horizontal flip disabled for {no_mirror_count} selected clips")
     mark_timing("clip_select")
 
     # ── Prepare clips (normalize + uniqualize, parallel 4 workers) ────────────
@@ -642,6 +654,7 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
                 max_dur=cd["duration"],
                 effect="none",
                 speed=1.0,
+                allow_hflip=not cd.get("no_mirror", False),
             )
             with count_lock:
                 completed_count[0] += 1

@@ -346,7 +346,8 @@ def _per_clip_uniq_params(clip_path: str, base_params: dict) -> dict:
 def _prepare_movie_clip(clip_path: str, out_path: str, uniq_params: dict,
                         max_dur: float = 5.0,
                         effect: str = "none",
-                        speed: float = 1.0) -> bool:
+                        speed: float = 1.0,
+                        allow_hflip: bool = True) -> bool:
     """
     ОДИН FFmpeg pass: normalize + uniqualize + speed + vignette — все за раз.
     1 замість 4 процесів = в 4x швидше.
@@ -378,7 +379,7 @@ def _prepare_movie_clip(clip_path: str, out_path: str, uniq_params: dict,
         filters.append(f"eq=brightness={brightness:.2f}:contrast={contrast:.2f}:saturation={saturation:.2f}")
 
     # flip
-    if per_clip.get("flip", False):
+    if allow_hflip and per_clip.get("flip", False):
         filters.append("hflip")
 
     # grain

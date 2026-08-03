@@ -60,10 +60,6 @@ def main() -> int:
         "war_cleanup_text_clips.py",
         "--frames",
         "0.10,0.50,0.90",
-        "--min-confidence",
-        "0.85",
-        "--delete-severities",
-        "medium,heavy",
     ]
 
     print(f"[watcher] {_stamp()} watching {args.status_url}", flush=True)
