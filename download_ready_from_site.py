@@ -2,6 +2,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -187,7 +189,10 @@ def _download_file(url: str, dest: Path, retries: int, timeout: int) -> None:
                         else:
                             print(f"    {done // 1024 // 1024}MB")
                         next_report += 50 * 1024 * 1024
+            if total and done != total:
+                raise RuntimeError(f"incomplete download: received {done} of {total} bytes")
             if part.exists() and part.stat().st_size > 0:
+                _validate_mp4(part)
                 part.replace(dest)
                 return
             last_error = "empty download"
@@ -229,6 +234,22 @@ def _project_metadata(args, project_id: str) -> dict:
 def _video_url(args, project_id: str) -> str:
     quoted = urllib.parse.quote(project_id, safe="")
     return args.base_url.rstrip("/") + f"/api/download/{quoted}"
+
+
+def _validate_mp4(path: Path) -> None:
+    """Reject truncated MP4 files before marking a project downloaded."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return
+    proc = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        detail = (proc.stderr or "invalid MP4 container").strip().splitlines()[-1]
+        raise RuntimeError(f"invalid MP4 after download: {detail}")
 
 
 def _select_projects(args, state: dict) -> list:
