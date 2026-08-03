@@ -215,7 +215,7 @@ def _download_file(url: str, dest: Path, retries: int, timeout: int) -> None:
 def _ready_url(args) -> str:
     params = {
         "languages": ",".join(args.languages),
-        "latest_per_language": "1" if args.latest_per_language else "0",
+        "latest_per_language": "0" if args.project_ids else ("1" if args.latest_per_language else "0"),
     }
     return args.base_url.rstrip("/") + "/api/projects/ready?" + urllib.parse.urlencode(params)
 
@@ -234,10 +234,13 @@ def _video_url(args, project_id: str) -> str:
 def _select_projects(args, state: dict) -> list:
     data = _http_json(_ready_url(args), args.timeout)
     projects = data.get("projects") or []
+    requested_ids = set(args.project_ids)
     out = []
     for item in projects:
         pid = item.get("project_id")
         if not pid:
+            continue
+        if requested_ids and pid not in requested_ids:
             continue
         if not args.force and pid in state.get("downloaded", {}):
             continue
@@ -396,6 +399,11 @@ def parse_args():
     parser.add_argument("--out", "--out-dir", dest="out_dir", default=DEFAULT_OUT_DIR)
     parser.add_argument("--languages", default=DEFAULT_LANGUAGES)
     parser.add_argument(
+        "--project-ids",
+        default="",
+        help="Comma-separated exact project IDs to download; overrides latest-per-language selection.",
+    )
+    parser.add_argument(
         "--latest-per-language",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -420,8 +428,11 @@ def parse_args():
     parser.add_argument("--download-timeout", type=int, default=7200)
     args = parser.parse_args()
     args.languages = [x.strip().lower() for x in args.languages.split(",") if x.strip()]
+    args.project_ids = [x.strip() for x in args.project_ids.split(",") if x.strip()]
     if args.watch and args.force:
         parser.error("--force cannot be used with --watch because it would download the same videos repeatedly.")
+    if args.project_ids and args.watch:
+        parser.error("--project-ids is for a one-time exact batch and cannot be combined with --watch.")
     if args.watch_new_only and not args.watch:
         parser.error("--watch-new-only requires --watch.")
     return args
