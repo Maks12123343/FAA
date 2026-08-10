@@ -8,12 +8,22 @@ import tempfile
 
 import requests
 from PIL import Image, ImageOps
+from dotenv import dotenv_values
 
 import config
 
 
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
 THUMBNAIL_SIZE = (1920, 1080)
+
+
+def _bridge_env() -> dict:
+    """Read bridge secrets locally without putting them into FAA settings."""
+    env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "gemini_bridge", ".env")
+    try:
+        return {key: value for key, value in dotenv_values(env_path).items() if value is not None}
+    except Exception:
+        return {}
 
 
 def _emit(emit, message: str):
@@ -23,10 +33,15 @@ def _emit(emit, message: str):
 
 def _settings():
     settings = config.load_settings()
+    bridge_env = _bridge_env()
     return {
         "enabled": bool(settings.get("gemini_image_enabled", False)),
         "url": str(settings.get("gemini_image_bridge_url", "http://127.0.0.1:4981")).rstrip("/"),
-        "api_key": str(settings.get("gemini_image_api_key", "")).strip(),
+        "api_key": str(
+            settings.get("gemini_image_api_key")
+            or bridge_env.get("LOCAL_API_KEY")
+            or os.environ.get("LOCAL_API_KEY", "")
+        ).strip(),
         "model": str(settings.get("gemini_image_model", "gemini-3.1-flash-image")).strip(),
         "timeout": max(30, min(900, int(settings.get("gemini_image_timeout", 360) or 360))),
     }

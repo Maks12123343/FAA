@@ -204,8 +204,8 @@
   <div class="grid-2">
     <div class="field"><label>Bridge URL</label>
       <input type="text" id="gemini_image_bridge_url" value="{{ settings.gemini_image_bridge_url or 'http://127.0.0.1:4981' }}"></div>
-    <div class="field"><label>Local Bridge API Key</label>
-      <input type="password" id="gemini_image_api_key" value="{{ settings.gemini_image_api_key or '' }}" placeholder="same as LOCAL_API_KEY"></div>
+    <div class="field"><label>Local Bridge API Key (optional)</label>
+      <input type="password" id="gemini_image_api_key" value="{{ settings.gemini_image_api_key or '' }}" placeholder="read automatically from bridge .env"></div>
   </div>
   <div class="grid-2">
     <div class="field"><label>Image Model</label>
