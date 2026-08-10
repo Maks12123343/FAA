@@ -1,7 +1,10 @@
-import sys
-sys.path.insert(0, '/workspace/FAA')
 import os
-os.chdir('/workspace/FAA')
+import sys
+from pathlib import Path
+
+APP_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(APP_DIR))
+os.chdir(APP_DIR)
 os.environ['FAA_DEV'] = '1'
 os.environ.setdefault('FAA_CORS_ORIGIN', '*')
 import eventlet

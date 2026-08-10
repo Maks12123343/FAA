@@ -554,6 +554,14 @@ def _ready_project_item(project_id: str, project_dir: str) -> dict | None:
                 thumbnail_prompt = f.read().strip()
         except Exception:
             thumbnail_prompt = ""
+    thumbnail_image_path = next(
+        (
+            os.path.join(project_dir, name)
+            for name in ("thumbnail_generated.png", "thumbnail_generated.jpg", "thumbnail_generated.webp")
+            if os.path.exists(os.path.join(project_dir, name))
+        ),
+        None,
+    )
     raw_lang = _infer_project_language(project_id, meta)
     lang = _canonical_ready_language(raw_lang)
     return {
@@ -567,6 +575,7 @@ def _ready_project_item(project_id: str, project_dir: str) -> dict | None:
         "tags": meta.get("tags", []),
         "tags_raw": meta.get("tags_raw", ""),
         "thumbnail_prompt": thumbnail_prompt,
+        "thumbnail_image_url": f"/api/projects/{project_id}/thumbnail" if thumbnail_image_path else "",
         "video_size": size,
         "mtime": mtime,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime)),
@@ -624,6 +633,19 @@ def api_project_metadata(project_id):
     if not item:
         return jsonify({"error": "Not found"}), 404
     return jsonify(item)
+
+
+@app.route("/api/projects/<project_id>/thumbnail")
+def api_project_thumbnail(project_id):
+    safe_id = os.path.basename(project_id)
+    project_dir = os.path.join(config.PROJECTS_DIR, safe_id)
+    if not _is_inside_dir(project_dir, config.PROJECTS_DIR):
+        return jsonify({"error": "Invalid project id"}), 400
+    for name in ("thumbnail_generated.png", "thumbnail_generated.jpg", "thumbnail_generated.webp"):
+        path = os.path.join(project_dir, name)
+        if os.path.exists(path) and _is_inside_dir(path, config.PROJECTS_DIR):
+            return send_file(path)
+    return jsonify({"error": "Thumbnail not found"}), 404
 
 
 @app.route("/api/download/<project_id>")

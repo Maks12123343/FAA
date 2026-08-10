@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
-from backend import tts, api_client
+from backend import tts, api_client, gemini_image
 from backend import languages as lang_utils
 from backend.transcriber import get_transcript
 from backend.rewriter import rewrite_all
@@ -572,6 +572,16 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         except Exception as _e:
             print(f"[war_pipeline] thumbnail step failed: {_e!r}", flush=True)
     # ---- end thumbnail ----
+    _thumb_image_path = os.path.join(proj_dir, "thumbnail_generated.png")
+    if _thumb_prompt and bool(_settings.get("gemini_image_enabled", False)):
+        if os.path.exists(_thumb_image_path):
+            log("thumbnail_image", "Gemini thumbnail cached.")
+        else:
+            try:
+                gemini_image.generate_thumbnail(_thumb_prompt, _thumb_image_path, emit=emit)
+            except Exception as _e:
+                # Image generation is optional and must never abort video production.
+                log("thumbnail_image", f"Gemini image generation skipped: {_e}")
     mark_timing("thumbnail")
 
     # ── TTS ────────────────────────────────────────────────────────────────────
@@ -707,6 +717,10 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         "language": language,
         "language_name": lang_utils.configured_language_name(language),
         "thumbnail_prompt": _thumb_prompt,
+        "thumbnail_image_url": (
+            f"/api/projects/{proj_id}/thumbnail"
+            if os.path.exists(_thumb_image_path) else ""
+        ),
         "output_path": output_path,
         "audio_dur": round(audio_dur, 1),
         "clips_used": len(prepared),

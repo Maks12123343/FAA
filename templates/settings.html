@@ -163,6 +163,29 @@
 </div>
 
 <div class="card">
+  <h2>Gemini Web Image Bridge</h2>
+  <p style="color:#aaa;font-size:13px;margin-bottom:16px">
+    Optional local image generation for YouTube thumbnails. Google session cookies stay in the bridge .env and are never stored here.
+  </p>
+  <label style="display:flex;align-items:center;gap:10px;color:#ddd;margin:0 0 12px">
+    <input type="checkbox" id="gemini_image_enabled" {% if settings.gemini_image_enabled %}checked{% endif %} style="width:auto">
+    Generate thumbnail image with Gemini Web
+  </label>
+  <div class="grid-2">
+    <div class="field"><label>Bridge URL</label>
+      <input type="text" id="gemini_image_bridge_url" value="{{ settings.gemini_image_bridge_url or 'http://127.0.0.1:4981' }}"></div>
+    <div class="field"><label>Local Bridge API Key</label>
+      <input type="password" id="gemini_image_api_key" value="{{ settings.gemini_image_api_key or '' }}" placeholder="same as LOCAL_API_KEY"></div>
+  </div>
+  <div class="grid-2">
+    <div class="field"><label>Image Model</label>
+      <input type="text" id="gemini_image_model" value="{{ settings.gemini_image_model or 'gemini-3.1-flash-image' }}"></div>
+    <div class="field"><label>Timeout (seconds)</label>
+      <input type="text" id="gemini_image_timeout" value="{{ settings.gemini_image_timeout or 360 }}"></div>
+  </div>
+</div>
+
+<div class="card">
   <h2>Montage</h2>
   <div class="grid-2">
     <div class="field"><label>Clip Min Duration (sec)</label>
@@ -428,6 +451,11 @@ function saveSettings() {
     vertex_project_id: document.getElementById('vertex_project_id').value,
     vertex_location:   document.getElementById('vertex_location').value,
     gemini_model:      document.getElementById('gemini_model').value,
+    gemini_image_enabled:     document.getElementById('gemini_image_enabled').checked,
+    gemini_image_bridge_url:  document.getElementById('gemini_image_bridge_url').value.trim(),
+    gemini_image_api_key:     document.getElementById('gemini_image_api_key').value.trim(),
+    gemini_image_model:       document.getElementById('gemini_image_model').value.trim(),
+    gemini_image_timeout:     parseInt(document.getElementById('gemini_image_timeout').value) || 360,
     clip_min_duration: parseFloat(document.getElementById('clip_min_duration').value) || 2,
     clip_max_duration: parseFloat(document.getElementById('clip_max_duration').value) || 5,
     stock_max_duration: parseFloat(document.getElementById('stock_max_duration').value) || 6,

@@ -36,5 +36,10 @@ flask_debug.log
 application_default_credentials.json
 .config/
 
+# Local Gemini Web bridge secrets/cache
+gemini_bridge/.env
+gemini_bridge/.cookies/
+gemini_bridge/last_response.txt
+
 # Local deploy secrets (never push)
 deploy_secrets.sh

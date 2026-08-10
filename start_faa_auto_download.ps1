@@ -1,5 +1,5 @@
 param(
-    [string]$RepoDir = "C:\Users\Ukraine\FAA_Linux",
+    [string]$RepoDir = "C:\Users\Ukraine\FAA",
     [string]$Out = "D:\youtube",
     [string]$SshHost = "115.78.134.198",
     [int]$SshPort = 48201,
@@ -36,6 +36,7 @@ Start-Sleep -Seconds 3
 
 $downloadArgs = @(
     "download_ready_from_site.py",
+    "--base-url", "http://localhost:$LocalPort",
     "--out", $Out,
     "--watch",
     "--interval-minutes", ([string]$IntervalMinutes),

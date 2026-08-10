@@ -60,6 +60,13 @@ DEFAULT_SETTINGS = {
     "vertex_location": "us-central1",
     "gemini_model": "gemini-2.5-flash",
 
+    # Gemini Web image bridge (local service; Google cookies stay outside FAA settings)
+    "gemini_image_enabled": False,
+    "gemini_image_bridge_url": "http://127.0.0.1:4981",
+    "gemini_image_api_key": "",
+"gemini_image_model": "gemini-3.1-flash-image",
+    "gemini_image_timeout": 360,
+
     # Rewrite API (OpenAI-compatible chat completions)
     "rewrite_active_provider": "a6api",
     "rewrite_providers": {
@@ -163,11 +170,13 @@ def _coerce_settings(data: dict) -> dict:
         "output_height": 1,
         "fps":           1,
         "rewrite_chunks": 1,
+        "gemini_image_timeout": 30,
     }
     bool_fields = {
         "rewrite_script_enabled",
         "rewrite_thumbnail_enabled",
         "rewrite_metadata_enabled",
+        "gemini_image_enabled",
     }
     for key, (lo, hi) in float_fields.items():
         if key in data:
@@ -186,6 +195,8 @@ def _coerce_settings(data: dict) -> dict:
                 val = max(minimum, int(data[key]))
                 if key == "rewrite_chunks":
                     val = min(10, val)
+                if key == "gemini_image_timeout":
+                    val = min(900, val)
                 data[key] = val
             except (TypeError, ValueError):
                 data.pop(key, None)

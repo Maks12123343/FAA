@@ -108,6 +108,8 @@ def _metadata_text(item: dict) -> str:
     thumbnail_prompt = str(item.get("thumbnail_prompt") or "").strip()
     if thumbnail_prompt:
         lines.extend(["", "### Thumbnail Prompt:", thumbnail_prompt])
+    if item.get("thumbnail_image_url"):
+        lines.extend(["", "### Generated Thumbnail:", "thumbnail.png"])
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -152,6 +154,7 @@ def _dest_paths(dest_dir: Path) -> tuple:
             dest_dir / "video.mp4",
             dest_dir / "metadata.txt",
             dest_dir / "project.json",
+            dest_dir / "thumbnail.png",
         )
     n = 2
     while (dest_dir / f"video_{n}.mp4").exists():
@@ -160,10 +163,11 @@ def _dest_paths(dest_dir: Path) -> tuple:
         dest_dir / f"video_{n}.mp4",
         dest_dir / f"metadata_{n}.txt",
         dest_dir / f"project_{n}.json",
+        dest_dir / f"thumbnail_{n}.png",
     )
 
 
-def _download_file(url: str, dest: Path, retries: int, timeout: int) -> None:
+def _download_file(url: str, dest: Path, retries: int, timeout: int, *, accept: str = "video/mp4,*/*", validator=None) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
     if part.exists():
@@ -172,7 +176,7 @@ def _download_file(url: str, dest: Path, retries: int, timeout: int) -> None:
     last_error = ""
     for attempt in range(1, retries + 1):
         try:
-            req = urllib.request.Request(url, headers={"Accept": "video/mp4,*/*"})
+            req = urllib.request.Request(url, headers={"Accept": accept})
             with urllib.request.urlopen(req, timeout=timeout) as resp, part.open("wb") as f:
                 total = int(resp.headers.get("Content-Length") or 0)
                 done = 0
@@ -192,7 +196,8 @@ def _download_file(url: str, dest: Path, retries: int, timeout: int) -> None:
             if total and done != total:
                 raise RuntimeError(f"incomplete download: received {done} of {total} bytes")
             if part.exists() and part.stat().st_size > 0:
-                _validate_mp4(part)
+                if validator is not None:
+                    validator(part)
                 part.replace(dest)
                 return
             last_error = "empty download"
@@ -234,6 +239,21 @@ def _project_metadata(args, project_id: str) -> dict:
 def _video_url(args, project_id: str) -> str:
     quoted = urllib.parse.quote(project_id, safe="")
     return args.base_url.rstrip("/") + f"/api/download/{quoted}"
+
+
+def _thumbnail_url(args, project_id: str) -> str:
+    quoted = urllib.parse.quote(project_id, safe="")
+    return args.base_url.rstrip("/") + f"/api/projects/{quoted}/thumbnail"
+
+
+def _validate_image(path: Path) -> None:
+    header = path.read_bytes()[:16]
+    if not (
+        header.startswith(b"\x89PNG\r\n\x1a\n")
+        or header.startswith(b"\xff\xd8\xff")
+        or header.startswith(b"RIFF")
+    ):
+        raise RuntimeError("invalid thumbnail image")
 
 
 def _validate_mp4(path: Path) -> None:
@@ -337,10 +357,25 @@ def _run_once(args) -> int:
             item = _project_metadata(args, pid)
             lang_folder = _language_folder(item)
             dest_dir = batch_dir / lang_folder
-            dest_video, dest_meta, dest_info = _dest_paths(dest_dir)
+            dest_video, dest_meta, dest_info, dest_thumbnail = _dest_paths(dest_dir)
 
             print(f"[download] {pid} -> {dest_dir}")
-            _download_file(_video_url(args, pid), dest_video, args.retries, args.download_timeout)
+            _download_file(
+                _video_url(args, pid),
+                dest_video,
+                args.retries,
+                args.download_timeout,
+                validator=_validate_mp4,
+            )
+            if item.get("thumbnail_image_url"):
+                _download_file(
+                    urllib.parse.urljoin(args.base_url.rstrip("/") + "/", item["thumbnail_image_url"]),
+                    dest_thumbnail,
+                    args.retries,
+                    min(args.download_timeout, 300),
+                    accept="image/png,image/jpeg,image/webp,*/*",
+                    validator=_validate_image,
+                )
             dest_meta.write_text(_metadata_text(item), encoding="utf-8")
             dest_info.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
 

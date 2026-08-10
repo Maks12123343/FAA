@@ -575,6 +575,13 @@ socket.on('produce_done', data => {
         <button type="button" class="btn" style="margin-top:8px;padding:5px 10px;font-size:11px" onclick="copyText(this.parentElement.querySelector('.thumbnail-prompt-text').textContent, this)">Copy Prompt</button>
       </div>`
     : '';
+  const thumbnailImageHtml = data.thumbnail_image_url
+    ? `<div style="margin:12px 0">
+        <div style="color:#a78bfa;font-size:12px;font-weight:700;margin-bottom:6px">Generated Thumbnail:</div>
+        <img src="${escHtml(data.thumbnail_image_url)}" alt="Generated thumbnail" style="display:block;width:min(100%,640px);aspect-ratio:16/9;object-fit:cover;border-radius:8px;border:1px solid #374151;background:#111827">
+        <a class="btn" style="display:inline-block;margin-top:8px;padding:5px 10px;font-size:11px" href="${escHtml(data.thumbnail_image_url)}" download>Download Thumbnail</a>
+      </div>`
+    : '';
   const timings = data.timings || {};
   const timingEntries = Object.entries(timings);
   const timingsHtml = timingEntries.length
@@ -599,6 +606,7 @@ socket.on('produce_done', data => {
     ${tagsHtml}
     ${titlesHtml}
     ${thumbnailPromptHtml}
+    ${thumbnailImageHtml}
     ${timingsHtml}
     <a class="btn btn-success" href="/api/download/${safeId}">Download Video</a>
   `;
