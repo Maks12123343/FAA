@@ -7,12 +7,13 @@ import os
 import tempfile
 
 import requests
-from PIL import Image
+from PIL import Image, ImageOps
 
 import config
 
 
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
+THUMBNAIL_SIZE = (1920, 1080)
 
 
 def _emit(emit, message: str):
@@ -26,7 +27,7 @@ def _settings():
         "enabled": bool(settings.get("gemini_image_enabled", False)),
         "url": str(settings.get("gemini_image_bridge_url", "http://127.0.0.1:4981")).rstrip("/"),
         "api_key": str(settings.get("gemini_image_api_key", "")).strip(),
-        "model": str(settings.get("gemini_image_model", "gemini-3-pro-image")).strip(),
+        "model": str(settings.get("gemini_image_model", "gemini-3.1-flash-image")).strip(),
         "timeout": max(30, min(900, int(settings.get("gemini_image_timeout", 360) or 360))),
     }
 
@@ -49,11 +50,21 @@ def _decode_image(value: str) -> bytes:
 
 
 def _normalize_png(data: bytes) -> bytes:
-    """Store every provider image as a real PNG, regardless of returned MIME."""
+    """Store every provider image as a crisp, exact 1920x1080 PNG.
+
+    Image generation services may return square or otherwise variable-sized
+    images. Fit-and-crop keeps the aspect ratio and avoids both stretching and
+    black bars in the final YouTube thumbnail.
+    """
     try:
         with Image.open(BytesIO(data)) as image:
-            if image.mode not in {"RGB", "RGBA"}:
-                image = image.convert("RGBA")
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            image = ImageOps.fit(
+                image,
+                THUMBNAIL_SIZE,
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
             output = BytesIO()
             image.save(output, format="PNG")
             return output.getvalue()
@@ -75,7 +86,9 @@ def generate_thumbnail(prompt: str, output_path: str, emit=None) -> bool:
     payload = {
         "model": cfg["model"],
         "prompt": prompt.strip(),
-        "size": "1024x1024",
+        # The bridge may return another native size; _normalize_png enforces
+        # the exact final dimensions after download.
+        "size": "1920x1080",
         "n": 1,
         "response_format": "b64_json",
     }

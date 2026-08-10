@@ -11,33 +11,79 @@ from backend import languages as lang_utils
 THUMBNAIL_ATTEMPTS = 3
 
 ANALYSIS_PROMPT = """
-Analyze the provided competitor YouTube thumbnail as a visual reference only.
-Do not verify facts and do not claim that the scene is real.
+You are an expert visual analyst, reverse-prompt engineer, and YouTube thumbnail
+image-generation prompt writer.
 
-Describe the visible thumbnail strategy in compact detail:
-1. Main subject/event and what must be the focal point.
-2. Camera angle, perspective, crop tightness, and camera distance.
-3. Main-hook geometry: approximate position and size as frame percentages.
-4. Explosion/fire/smoke scale, placement, shape, density, debris direction, and visual intensity.
-5. Drone/aircraft/weapon details if visible: type, shape, size, angle, position, highlight circle/arrow, and flight direction relative to the blast or target.
-6. Military base or location details: buildings, hangars, roads, fences, vehicles, soldiers, damage, dust, and debris.
-7. Broad environment and regional feel: climate, terrain, vegetation, architecture, road/ground type.
-8. Lighting, weather, color palette, realism level, and clickability.
-9. Visible text, arrows, circles, labels, outlines, or other thumbnail effects.
-10. What must stay similar.
-11. What can change to avoid direct copying.
+Analyze the provided reference thumbnail as a visual reference only. Analyze the
+actual pixels, not the apparent topic. Do not verify facts and do not claim that
+the scene is real. Reconstruct the CORE PHOTOGRAPHIC SCENE in enough detail that
+another image model could create a very similar news photograph.
 
-Be strict about scale. If the main hook is large and close, say that clearly.
-Do not describe it as a distant wide landscape or survey shot.
-Be strict about realism. If it looks like a real news/photo/drone still, say
-that clearly and warn against CGI, movie-poster, game-render, or glossy AI style.
+Inspect all of the following:
+- aspect ratio, full-frame 16:9 composition, camera height, distance, and angle;
+- foreground, middle ground, background, empty sky/terrain, and visual balance;
+- exact visual hierarchy and approximate frame positions and sizes of key objects;
+- the main subject, vehicles, buildings, roads, bridges, ships, aircraft, drones,
+  industrial or military equipment, and their orientation and interaction;
+- explosion location, fireball scale, flame shape, smoke density and direction,
+  debris, heat distortion, impact point, visible damage, and nearby scale cues;
+- terrain, architecture, vegetation, weather, haze, lighting, color palette,
+  shadows, reflections, sensor noise, motion blur, and realistic compression;
+- visible circles, arrows, labels, outlines, or other thumbnail effects.
+
+If black bars are present, ignore them and reconstruct the underlying scene as a
+full 16:9 frame. Preserve the main hook and its scale. Do not turn a close,
+dramatic subject into a distant landscape. Identify specific-looking objects
+without inventing exact model numbers that are not visually clear. Warn against
+CGI, a movie poster, a game render, glossy AI art, or fantasy scenery when the
+reference is a realistic news/photo/drone still.
+
+Return exactly these four sections and nothing else:
+
+### MASTER PROMPT
+Write a very detailed standalone English image-generation prompt with sections
+for CORE SCENE, CAMERA AND COMPOSITION, MAIN SUBJECT, VEHICLES / EQUIPMENT,
+EXPLOSION, SMOKE, DAMAGE, DRONE / AIRCRAFT, LOCATION / BACKGROUND, LIGHTING,
+and REAL-PHOTO QUALITY. Require 1920x1080 full-frame 16:9, no black bars, no
+distortion, and preserve the visual hierarchy of the reference.
+
+### LOCKED ELEMENTS
+List the scene identity, main event/target, approximate composition, explosion
+importance, major subject/equipment, environment, and visual hierarchy that must
+not be substantially changed.
+
+### SAFE VARIABLE ELEMENTS
+List only low-impact details that can vary later: subtle camera shift or crop,
+minor secondary object positions, realistic paint shades, smoke drift, fireball
+internal shape, small debris, vegetation, and similar details. Do not put major
+story elements here.
+
+### NEGATIVE PROMPT
+Write a scene-specific negative prompt preventing CGI, glossy 3D render, poster
+lighting, malformed or duplicated objects, wrong aircraft type, impossible
+geometry, floating objects, weak or fantasy explosions, unwanted text, logos,
+watermarks, HUD/UI, gore, and black bars.
 """.strip()
 
 REWRITE_SYSTEM = (
-    "You write production-ready image-generation prompts for YouTube thumbnails. "
-    "You preserve the competitor thumbnail strategy while changing concrete details. "
+    "You are an expert image-prompt editor for realistic YouTube news thumbnails. "
+    "Create minimal, natural variations of a successful reference concept. "
     "Always write the final image-generation prompt in English."
 )
+
+
+_VARIANT_IDS = {
+    "pl": 1, "tr": 2, "cs": 3, "ro": 4, "hu": 5,
+    "sv": 6, "fi": 7, "hr": 8, "da": 9, "bg": 10,
+}
+
+
+def _variant_id(language: str) -> int:
+    code = (language or "").strip().lower()
+    if code in _VARIANT_IDS:
+        return _VARIANT_IDS[code]
+    # Keep custom languages deterministic without making the number visible.
+    return (sum(ord(ch) for ch in code) % 10) + 1
 
 
 def _emit(emit, msg: str):
@@ -110,34 +156,57 @@ def analyze_and_rewrite(image_path: str, language: str, title: str = "", emit=No
     _emit(emit, "Writing thumbnail generation prompt...")
     language_name = lang_utils.configured_language_name(language)
     rewrite_prompt = f"""
-Use the competitor thumbnail analysis as a visual reference only. Do not verify facts and do not make factual claims.
+You will receive the result of a careful reference-image analysis. Convert it into
+one complete standalone image-generation prompt for a new YouTube thumbnail.
 
-Create ONE English image-generation prompt for a new YouTube thumbnail.
-
-Video title:
+VIDEO TITLE (context only):
 {title or '(unknown)'}
 
-Target language for any visible thumbnail text:
-{language_name}
+VARIANT_ID: {_variant_id(language)}
+TARGET LANGUAGE: {language_name}
+PREVIOUS VARIATIONS: none recorded for this production batch.
 
-Write the final image-generation prompt in English only. The target language applies only to visible thumbnail text, and only if visible text is truly needed.
+The output must preserve approximately 85-95 percent of the reference concept.
+This is a minimal variation, not a redesign. Preserve every LOCKED ELEMENT:
+main event and target type, main subject, broad environment, camera distance,
+visual hierarchy, approximate explosion power and importance, correct drone or
+aircraft type, and the relationship between the drone and target.
 
-Competitor analysis:
+Select approximately 3-7 small, natural changes from SAFE VARIABLE ELEMENTS.
+Use VARIANT_ID only as an invisible diversification cue. Do not mention it in
+the generated image. Do not mechanically mirror every variant. Horizontal
+mirroring is optional and only allowed for some variants; if used, correct the
+orientation, smoke drift, lighting, and secondary object positions so it is not a
+simple Photoshop flip.
+
+Preserve realistic damage and previously damaged objects. Preserve the same
+explosion scale: never turn a large explosion into a small fire or a realistic
+detonation into a fantasy/nuclear mushroom cloud. Preserve the correct drone
+type: an FPV multirotor must remain an FPV multirotor, and a fixed-wing drone
+must remain fixed-wing.
+
+The image must be a realistic imperfect news/photo/drone still with restrained
+saturation, natural shadows and reflections, atmospheric haze, mild sensor noise,
+slight JPEG compression, and plausible heat distortion. Avoid glossy CGI,
+movie-poster lighting, perfect symmetry, anime, painting, game render, gore,
+readable text, logos, watermarks, timestamps, HUD/UI, flags, or black bars.
+Require 1920x1080 full-frame 16:9, no letterboxing, no stretched geometry, and a
+sharp readable main hook at small thumbnail size. Any visible text is forbidden;
+the target language is retained only as context for this production.
+
+REFERENCE ANALYSIS:
 {analysis}
 
-Universal rules:
-- Preserve the reference thumbnail's core visual strategy, not the exact image.
-- Preserve the same main visual hook, camera angle, perspective, approximate camera distance, hook position, explosion/fireball scale, drone position logic, broad military/industrial environment, realism level, and YouTube clickability.
-- The main hook must stay large, sharp, and readable at small thumbnail size.
-- If the reference has a large explosion, describe a similarly large, powerful, bright explosion with thick smoke, debris, visible damage, and nearby buildings or vehicles for scale. Do not shrink the explosion, push it into the distance, or turn it into a small fire.
-- If the reference has a drone, keep it airborne and oriented toward the explosion or target area. Do not place the drone on the ground, flying away, or randomly sideways.
-- Preserve any important simple highlight element from the reference, such as a circle or arrow around the drone, but change the exact style slightly.
-- Keep the same broad environment. If the reference looks like a temperate Russian or Eastern European military-industrial area, keep that regional feel: concrete roads, hangars, military buildings, green or gray terrain, utilitarian base layout. Do not turn it into desert, tropical, American, Middle Eastern, mountain, or cinematic fantasy scenery.
-- Change only secondary details: building arrangement, vehicle positions, smoke texture, debris pattern, drone angle slightly, annotation style, color accents, and background layout details.
-- The image must look like a realistic detailed news/photo-style thumbnail, not CGI, not a movie poster, not a game render, not anime, not a painting, not glossy AI art.
-- Avoid flags, readable text, logos, watermarks, timestamps, coordinates, HUD overlays, UI elements, gore, blood, blurry details, distorted people, or deformed vehicles unless the reference clearly has a specific simple annotation.
+Return exactly:
 
-Output only the final image-generation prompt. No explanation.
+### VARIANT PROMPT
+A complete standalone English image-generation prompt. Do not say "same as
+master" and do not rely on the image model remembering another prompt.
+
+### NEGATIVE PROMPT
+The adapted negative prompt.
+
+No explanation or commentary.
 """.strip()
     prompt = _call_thumbnail_step(
         REWRITE_SYSTEM,

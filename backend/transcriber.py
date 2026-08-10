@@ -20,11 +20,23 @@ def _get_whisper_model():
                 import torch
                 import whisper
                 device = "cuda" if torch.cuda.is_available() else "cpu"
-                # large-v3 needs ~10GB VRAM but gives the best Polish/German/Russian/etc.
-                # Override via env var FAA_WHISPER_MODEL if you need to fall back.
-                if device == "cuda":
-                    model_name = os.environ.get("FAA_WHISPER_MODEL", "large-v3")
+                requested = os.environ.get("FAA_WHISPER_MODEL", "").strip()
+                if requested:
+                    model_name = requested
+                elif device == "cuda":
+                    # Select a model that fits the actual GPU instead of
+                    # blindly loading large-v3 on a 6 GB card.
+                    total_vram = torch.cuda.get_device_properties(0).total_memory
+                    if total_vram >= 12 * 1024**3:
+                        model_name = "large-v3"
+                    elif total_vram >= 4 * 1024**3:
+                        model_name = "small"
+                    else:
+                        model_name = "base"
                 else:
+                    # CPU-only machines with 16 GB RAM remain responsive with
+                    # base; small/medium are available through the env override
+                    # but are substantially slower.
                     model_name = "base"
                 print(f"[transcriber] Loading Whisper model ({model_name}) on {device}...", flush=True)
                 _whisper_model = whisper.load_model(model_name, device=device)
