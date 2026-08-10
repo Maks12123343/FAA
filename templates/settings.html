@@ -75,6 +75,36 @@
 </div>
 
 <div class="card">
+  <h2>Automatic Ready Download</h2>
+  <label style="display:flex;align-items:center;gap:10px;color:#ddd;margin:0 0 12px">
+    <input type="checkbox" id="auto_download_enabled" {% if settings.auto_download_enabled %}checked{% endif %} style="width:auto">
+    Download ready videos, metadata and thumbnails automatically
+  </label>
+  <div class="field"><label>FAA Site URL</label>
+    <input type="text" id="auto_download_base_url" value="{{ settings.auto_download_base_url or 'http://127.0.0.1:5050' }}" style="width:100%"></div>
+  <div class="field"><label>Download Folder</label>
+    <input type="text" id="auto_download_out_dir" value="{{ settings.auto_download_out_dir or '' }}" style="width:100%">
+  </div>
+  <div class="grid-2">
+    <div class="field"><label>Check Interval (minutes)</label>
+      <input type="text" id="auto_download_interval_minutes" value="{{ settings.auto_download_interval_minutes or 1 }}"></div>
+    <div class="field"><label>Retry Count</label>
+      <input type="text" id="auto_download_retries" value="{{ settings.auto_download_retries or 5 }}"></div>
+  </div>
+  <div class="field"><label>Language Codes</label>
+    <input type="text" id="auto_download_languages" value="{{ settings.auto_download_languages or 'pl,tr,cs,ro,hu,sv,fi,hr,da,bg' }}" style="width:100%">
+  </div>
+  <label style="display:flex;align-items:center;gap:10px;color:#ddd;margin:8px 0 0">
+    <input type="checkbox" id="auto_download_all_ready" {% if settings.auto_download_all_ready %}checked{% endif %} style="width:auto">
+    Download every ready project, not only the newest per language
+  </label>
+  <label style="display:flex;align-items:center;gap:10px;color:#ddd;margin:8px 0 0">
+    <input type="checkbox" id="auto_download_watch_new_only" {% if settings.auto_download_watch_new_only %}checked{% endif %} style="width:auto">
+    Ignore projects already ready when FAA starts
+  </label>
+</div>
+
+<div class="card">
   <h2>Rewrite</h2>
   <p style="color:#aaa;font-size:13px;margin-bottom:16px">
     OpenAI-compatible API controls for script rewrite, thumbnail prompt rewrite, and metadata rewrite.
@@ -448,6 +478,14 @@ function saveSettings() {
     youtube_api_key_2: document.getElementById('youtube_api_key_2').value,
     youtube_api_key_3: document.getElementById('youtube_api_key_3').value,
     stocks_dir:        document.getElementById('stocks_dir').value,
+    auto_download_enabled:          document.getElementById('auto_download_enabled').checked,
+    auto_download_base_url:         document.getElementById('auto_download_base_url').value.trim(),
+    auto_download_out_dir:          document.getElementById('auto_download_out_dir').value.trim(),
+    auto_download_interval_minutes: parseFloat(document.getElementById('auto_download_interval_minutes').value) || 1,
+    auto_download_retries:          parseInt(document.getElementById('auto_download_retries').value) || 5,
+    auto_download_languages:        document.getElementById('auto_download_languages').value.trim(),
+    auto_download_all_ready:        document.getElementById('auto_download_all_ready').checked,
+    auto_download_watch_new_only:   document.getElementById('auto_download_watch_new_only').checked,
     vertex_project_id: document.getElementById('vertex_project_id').value,
     vertex_location:   document.getElementById('vertex_location').value,
     gemini_model:      document.getElementById('gemini_model').value,

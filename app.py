@@ -17,6 +17,7 @@ from backend import pipeline, media_library, clip_sourcer
 from backend import stocks_library, competitor_finder
 from backend import movie_library, movie_pipeline, war_pipeline
 from backend import writer as writer_backend
+from backend import auto_download_worker
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FAA_SECRET_KEY") or os.urandom(32).hex()
@@ -58,6 +59,9 @@ _job_active = False
 _job_last_msg = ""
 _job_started_at = 0.0
 MAX_LANGUAGE_ATTEMPTS = 3
+
+_auto_download_manager = auto_download_worker.AutoDownloadManager()
+_auto_download_manager.apply_settings(config.load_settings())
 
 _ID_RE = re.compile(r'^[a-z0-9_\-]{1,64}$')
 
@@ -161,6 +165,7 @@ def save_settings():
         else:
             settings[key] = value
     config.save_settings(settings)
+    _auto_download_manager.apply_settings(settings)
     return jsonify({"ok": True})
 
 
@@ -1284,6 +1289,11 @@ def api_status():
         "last_msg": _job_last_msg,
         "started_at": _job_started_at,
     })
+
+
+@app.route("/api/auto-download/status")
+def api_auto_download_status():
+    return jsonify(_auto_download_manager.status())
 
 
 @app.route("/api/job_reset", methods=["POST"])

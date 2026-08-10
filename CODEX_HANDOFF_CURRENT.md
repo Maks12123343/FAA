@@ -436,6 +436,36 @@ python download_ready_from_site.py --out D:\youtube --watch --watch-new-only --i
 Повільне SSH-скачування саме по собі не означає пошкоджений MP4. Перевіряти
 ffprobe і чекати завершений файл без .part.
 
+### Вбудоване автоматичне скачування
+
+FAA тепер має optional background worker `backend/auto_download_worker.py`.
+Він використовує ту саму перевірену логіку `download_ready_from_site.py`, але
+запускається разом із FAA після увімкнення в Settings. Окремо запускати watcher
+тоді не потрібно.
+
+У Settings -> Automatic Ready Download:
+
+~~~text
+Enable: ON
+FAA Site URL: http://127.0.0.1:5050
+Download Folder: шлях до Google Drive, наприклад E:\Мій диск\workspace\FAA_downloads
+Check Interval: 1
+Retry Count: 5
+Language Codes: pl,tr,cs,ro,hu,sv,fi,hr,da,bg
+Download every ready project: ON
+Ignore projects already ready when FAA starts: OFF, якщо треба забрати вже готові
+~~~
+
+Worker створює папку `YYYY-MM-DD`, потім папку української назви мови, і кладе
+туди `video.mp4`, `metadata.txt`, `project.json` та `thumbnail.png`. Він має
+retry, `.part`, MP4/image validation і state-файл `.faa_site_downloaded.json`
+в output folder. Назви мов у downloader збережені нормальною кирилицею.
+
+Worker повинен працювати на клієнтському ПК, який має Google Drive. Якщо
+виробництво на Vast, `FAA Site URL` має вести через SSH tunnel. Якщо на цьому
+ПК локальний FAA вже займає порт 5050, для tunnel використати інший локальний
+порт і вказати відповідний URL у Settings.
+
 ## 14. Qwen cleanup
 
 war_cleanup_text_clips.py і run_text_cleanup_when_idle.py -- optional cleanup

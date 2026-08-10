@@ -67,6 +67,18 @@ DEFAULT_SETTINGS = {
 "gemini_image_model": "gemini-3.1-flash-image",
     "gemini_image_timeout": 360,
 
+    # Automatic download of ready projects (runs locally on the client machine)
+    "auto_download_enabled": False,
+    "auto_download_base_url": "http://127.0.0.1:5050",
+    "auto_download_out_dir": os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "FAA_downloads")),
+    "auto_download_interval_minutes": 1,
+    "auto_download_languages": "pl,tr,cs,ro,hu,sv,fi,hr,da,bg",
+    "auto_download_watch_new_only": False,
+    "auto_download_all_ready": True,
+    "auto_download_retries": 5,
+    "auto_download_timeout": 30,
+    "auto_download_download_timeout": 7200,
+
     # Rewrite API (OpenAI-compatible chat completions)
     "rewrite_active_provider": "a6api",
     "rewrite_providers": {
@@ -171,12 +183,19 @@ def _coerce_settings(data: dict) -> dict:
         "fps":           1,
         "rewrite_chunks": 1,
         "gemini_image_timeout": 30,
+        "auto_download_interval_minutes": 1,
+        "auto_download_retries": 1,
+        "auto_download_timeout": 5,
+        "auto_download_download_timeout": 60,
     }
     bool_fields = {
         "rewrite_script_enabled",
         "rewrite_thumbnail_enabled",
         "rewrite_metadata_enabled",
         "gemini_image_enabled",
+        "auto_download_enabled",
+        "auto_download_watch_new_only",
+        "auto_download_all_ready",
     }
     for key, (lo, hi) in float_fields.items():
         if key in data:

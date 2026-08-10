@@ -403,7 +403,7 @@ def _run_once(args) -> int:
     if downloaded:
         print(f"Batch folder: {batch_dir}")
     print(f"Downloaded: {downloaded}, failed: {failed}")
-    return 0
+    return downloaded
 
 
 def _watch(args) -> int:
