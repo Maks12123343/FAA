@@ -585,7 +585,16 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
     mark_timing("thumbnail")
 
     # ── TTS ────────────────────────────────────────────────────────────────────
-    if not os.path.exists(audio_path):
+    # Do not trust existence alone: a timed-out VoiceGen download can leave a
+    # large but unreadable/zero-duration file, which must be regenerated.
+    cached_audio_duration = _get_duration(audio_path) if os.path.exists(audio_path) else 0.0
+    if cached_audio_duration < MIN_AUDIO_DURATION:
+        if os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+                log("tts", f"Invalid cached voiceover removed ({cached_audio_duration:.1f}s).")
+            except OSError as exc:
+                raise RuntimeError(f"Cannot replace invalid cached voiceover: {exc}") from exc
         log("tts", "Generating voiceover...")
         tts.generate(script, language, audio_path)
         log("tts", "Voiceover done.")
