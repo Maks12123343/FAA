@@ -1,5 +1,6 @@
 param(
-    [string]$RepoDir = "C:\Users\Ukraine\FAA"
+    [string]$RepoDir = (Split-Path -Parent $PSScriptRoot),
+    [string]$PythonPath = "$env:USERPROFILE\FAA-venv\Scripts\python.exe"
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,4 +11,7 @@ if (-not (Test-Path -LiteralPath $envFile)) {
 }
 
 Set-Location -LiteralPath $bridgeDir
-python server.py
+if (-not (Test-Path -LiteralPath $PythonPath)) {
+    $PythonPath = (Get-Command python -ErrorAction Stop).Source
+}
+& $PythonPath server.py
