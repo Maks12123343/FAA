@@ -416,6 +416,122 @@ def _prepare_movie_clip(clip_path: str, out_path: str, uniq_params: dict,
 
 # ── Clip selection ─────────────────────────────────────────────────────────────
 
+def _is_supplement_clip_candidate(clip: dict, used_ids: set) -> bool:
+    """Return whether an index clip is a reasonable emergency montage filler."""
+    path = clip.get("file", "")
+    cid = str(clip.get("id") or path)
+    if not path or not os.path.exists(path) or cid in used_ids:
+        return False
+
+    def _is_true(value) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() not in {"", "0", "false", "no", "off", "none"}
+        return bool(value)
+
+    if any(_is_true(clip.get(key)) for key in (
+        "should_delete", "quarantined", "deleted", "is_mirrored", "mirror",
+        "contains_text", "has_text", "text_only",
+    )):
+        return False
+
+    haystack = " ".join(str(clip.get(key, "")) for key in (
+        "description", "scene_type", "text", "tags",
+    )).lower()
+    bad_markers = (
+        "credits", "title card", "title screen", "text screen", "intertitle",
+        "black screen", "blank screen", "empty frame", "logo", "watermark",
+        "unknown", "static text", "subtitle only",
+    )
+    return not any(marker in haystack for marker in bad_markers)
+
+
+def _extend_prepared_clips_to_audio(
+    prepared: list,
+    clip_data: list,
+    movie_name: str,
+    audio_dur: float,
+    tmp_dir: str,
+    uniq_params: dict,
+    proj_id: str,
+    global_used_ids: set = None,
+    emit=None,
+) -> tuple[list, float, int]:
+    """Append different valid clips until the real video covers the voiceover."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _total_duration(paths: list) -> float:
+        if not paths:
+            return 0.0
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            return sum(max(0.0, float(value or 0.0)) for value in pool.map(_get_duration, paths))
+
+    target_dur = audio_dur + 1.0
+    current_dur = _total_duration(prepared)
+    if current_dur >= target_dur:
+        return prepared, current_dur, 0
+
+    used_ids = {
+        str(cd.get("id") or cd.get("file", ""))
+        for cd in clip_data
+    }
+    used_ids.update(str(cid) for cid in (global_used_ids or set()))
+    candidates = [
+        clip for clip in get_movie_clips(movie_name)
+        if _is_supplement_clip_candidate(clip, used_ids)
+    ]
+    rng = random.Random(f"supplement:{proj_id}")
+    rng.shuffle(candidates)
+
+    added = 0
+    next_index = len(clip_data)
+    for candidate in candidates:
+        if current_dur >= target_dur:
+            break
+
+        cid = str(candidate.get("id") or candidate.get("file", ""))
+        remaining = max(0.5, target_dur - current_dur)
+        max_dur = min(5.0, max(2.0, remaining))
+        out = os.path.join(tmp_dir, f"supplement_{next_index:04d}.mp4")
+        next_index += 1
+
+        ok = _prepare_movie_clip(
+            candidate["file"], out, uniq_params,
+            max_dur=max_dur,
+            effect="none",
+            speed=1.0,
+            allow_hflip=False,
+        )
+        if not ok:
+            continue
+
+        actual_dur = _get_duration(out)
+        if actual_dur <= 0.2:
+            try:
+                os.unlink(out)
+            except OSError:
+                pass
+            continue
+
+        prepared.append(out)
+        extra = dict(candidate)
+        extra["id"] = cid
+        extra["duration"] = round(actual_dur, 3)
+        extra["supplement"] = True
+        clip_data.append(extra)
+        used_ids.add(cid)
+        current_dur += actual_dur
+        added += 1
+
+    msg = (
+        f"Supplement clips: added {added}, actual video coverage "
+        f"{current_dur:.1f}/{audio_dur:.1f}s"
+    )
+    print(f"[movie_pipeline] {msg}", flush=True)
+    if emit:
+        emit("montage", msg)
+    return prepared, current_dur, added
+
+
 def _normalize_character_name(name: str) -> str:
     if not name:
         return ""
@@ -1079,9 +1195,13 @@ def _build_movie_video(clips: list, audio_path: str, output_path: str,
         # Перевіряємо чи відео покриває аудіо; якщо ні — лупимо
         assembled_dur = _get_duration(assembled)
         if assembled_dur < audio_dur - 0.5:
-            print(f"[movie_pipeline] Video {assembled_dur:.1f}s < audio {audio_dur:.1f}s — looping", flush=True)
+            print(
+                f"[movie_pipeline] Video {assembled_dur:.1f}s < audio {audio_dur:.1f}s "
+                "— supplemental clips exhausted; emergency looping",
+                flush=True,
+            )
             if emit:
-                emit("montage", "Extending video to match audio length...")
+                emit("montage", "Supplement clips exhausted; using emergency loop to cover audio...")
             _loop_video_to_duration(assembled, audio_dur + 1.0, raw_video)
         else:
             shutil.copy2(assembled, raw_video)
@@ -1390,6 +1510,21 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
 
         if not prepared:
             raise RuntimeError("No clips survived preparation.")
+
+        prepared, coverage_dur, supplement_count = _extend_prepared_clips_to_audio(
+            prepared=prepared,
+            clip_data=clip_data,
+            movie_name=movie_name,
+            audio_dur=audio_dur,
+            tmp_dir=tmp_dir,
+            uniq_params=uniq_params,
+            proj_id=proj_id,
+            global_used_ids=global_used_ids,
+            emit=emit,
+        )
+        if supplement_count:
+            with open(clips_cache, "w", encoding="utf-8") as f:
+                json.dump(clip_data, f, ensure_ascii=False)
         mark_timing("clip_prepare")
 
         log("montage", f"Assembling {len(prepared)} clips ({audio_dur:.1f}s audio)...")
@@ -1569,6 +1704,18 @@ def produce_from_script(
 
         if not prepared:
             raise RuntimeError("No clips survived preparation.")
+
+        prepared, coverage_dur, supplement_count = _extend_prepared_clips_to_audio(
+            prepared=prepared,
+            clip_data=clip_data,
+            movie_name=movie_name,
+            audio_dur=audio_dur,
+            tmp_dir=tmp_dir,
+            uniq_params=uniq_params,
+            proj_id=proj_id,
+            global_used_ids=global_used_ids,
+            emit=emit,
+        )
 
         log("montage", f"Assembling {len(prepared)} clips ({audio_dur:.1f}s audio)...")
         output_path = os.path.join(proj_dir, f"{proj_id}.mp4")
