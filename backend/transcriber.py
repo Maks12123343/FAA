@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -46,6 +47,14 @@ def _get_whisper_model():
 COOKIES_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
 
 
+def _yt_dlp_command() -> list[str]:
+    """Use the active venv's yt-dlp even when its Scripts dir is not on PATH."""
+    executable = shutil.which("yt-dlp")
+    if executable:
+        return [executable]
+    return [sys.executable, "-m", "yt_dlp"]
+
+
 def _cookies_arg(tmp_dir: str) -> list:
     """Return --cookies <tmpfile> args using a temp copy so yt-dlp can't overwrite the original."""
     if not os.path.exists(COOKIES_FILE):
@@ -60,7 +69,7 @@ def _get_subtitles(url: str, tmp_dir: str) -> str | None:
     """Try to download auto-generated or manual subtitles via yt-dlp."""
     out_tpl = os.path.join(tmp_dir, "subs")
     cmd = [
-        "yt-dlp", "--no-warnings", "--quiet",
+        *_yt_dlp_command(), "--no-warnings", "--quiet",
         "--remote-components", "ejs:github",
         "--js-runtimes", "node",
         "--write-auto-subs", "--write-subs",
@@ -101,7 +110,7 @@ def _whisper_transcribe(url: str, tmp_dir: str) -> str:
     """Download audio and transcribe with Whisper (auto-detects language)."""
     audio_path = os.path.join(tmp_dir, "audio.mp3")
     dl_cmd = [
-        "yt-dlp", "--no-warnings", "--quiet",
+        *_yt_dlp_command(), "--no-warnings", "--quiet",
         "--remote-components", "ejs:github",
         "--js-runtimes", "node",
         "-f", "bestaudio[ext=m4a]/bestaudio",
