@@ -24,8 +24,10 @@ STOCK_CATEGORIES = [
 ]
 
 if platform.system() == "Windows":
-    FFMPEG  = r"C:\ffmpeg-master-latest-win64-gpl\bin\ffmpeg.exe"
-    FFPROBE = r"C:\ffmpeg-master-latest-win64-gpl\bin\ffprobe.exe"
+    _ffmpeg_fixed = r"C:\ffmpeg-master-latest-win64-gpl\bin\ffmpeg.exe"
+    _ffprobe_fixed = r"C:\ffmpeg-master-latest-win64-gpl\bin\ffprobe.exe"
+    FFMPEG  = _ffmpeg_fixed if os.path.exists(_ffmpeg_fixed) else (shutil.which("ffmpeg") or "ffmpeg")
+    FFPROBE = _ffprobe_fixed if os.path.exists(_ffprobe_fixed) else (shutil.which("ffprobe") or "ffprobe")
     VERTEX_CREDENTIALS = r"C:\Users\Ukraine\AppData\Roaming\gcloud\application_default_credentials.json"
     _DEFAULT_STOCKS_DIR = r"G:\My Drive\FAA\stocks"
     _DEFAULT_MOVIES_DIR = r"G:\My Drive\FAA\movies"
