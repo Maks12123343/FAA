@@ -778,6 +778,17 @@ def _parse_metadata_output(text: str) -> dict:
     tags_m = re.search(r"###\s*Optimized Tags:(.*?)$", text, re.DOTALL | re.IGNORECASE)
     if tags_m:
         tags_raw = tags_m.group(1).strip()
+        # Accept comma-separated output as requested, but also tolerate a
+        # model returning one tag per line or Markdown bullets.
+        tags_raw = re.sub(r"```(?:\w+)?", "", tags_raw).strip()
+        if "," not in tags_raw:
+            lines = []
+            for line in tags_raw.splitlines():
+                line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
+                if line:
+                    lines.append(line)
+            if len(lines) > 1:
+                tags_raw = ", ".join(lines)
     tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
 
     tags_len = len(tags_raw)
@@ -918,12 +929,25 @@ def _rewrite_metadata(
     missing = []
     if not result.get("titles"):
         missing.append("titles")
+        if source_title:
+            result["titles"] = [source_title]
+            result["titles_main"] = [source_title]
+            result["title"] = source_title
     if not result.get("description"):
         missing.append("description")
+        result["description"] = source_description or ""
     if not result.get("tags"):
         missing.append("tags")
+        fallback_tags = [str(tag).strip() for tag in (source_tags or []) if str(tag).strip()]
+        result["tags"] = fallback_tags
+        result["tags_raw"] = ", ".join(fallback_tags)
     if missing:
-        raise RuntimeError("Metadata parse missing: " + ", ".join(missing))
+        print(
+            "[rewriter] Metadata fields missing after API response: "
+            + ", ".join(missing)
+            + "; using source metadata fallback",
+            flush=True,
+        )
     print(f"[rewriter] Metadata done — {len(result['titles'])} title options", flush=True)
     return result
 
@@ -951,6 +975,7 @@ def rewrite_all(
     feedback = ""
     orig_len = len(transcript)
     min_chars, max_chars = _length_bounds(orig_len)
+    soft_max_chars = _soft_max_chars(orig_len)
     settings = config.load_settings()
     skip_rewrite = not bool(settings.get("rewrite_script_enabled", True))
 
