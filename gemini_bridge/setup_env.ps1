@@ -25,5 +25,6 @@ $content = @(
     "GEMINI_1PSIDTS=$(Clean-Value $psidts)"
 )
 
-Set-Content -LiteralPath $EnvPath -Value $content -Encoding utf8
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllLines($EnvPath, $content, $utf8NoBom)
 Write-Host "Saved Gemini Bridge settings to $EnvPath"
