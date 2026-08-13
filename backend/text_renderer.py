@@ -110,15 +110,20 @@ def apply_text_overlays(input_path: str, overlays: list, output_path: str):
         filters = [_build_drawtext(o, text_dir, i) for i, o in enumerate(overlays)]
         vf = ",".join(filters)
 
-        subprocess.run(
+        result = subprocess.run(
             [FFMPEG, "-y", "-i", input_path,
              "-vf", vf,
              *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p",
              "-c:a", "copy",
              "-movflags", "+faststart",
              output_path],
-            check=True, timeout=3600,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=3600,
         )
+        if result.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) < 5000:
+            error = result.stderr.decode(errors="replace")[-1200:]
+            raise RuntimeError(f"FFmpeg text overlay failed ({result.returncode}): {error}")
     finally:
         _shutil.rmtree(text_dir, ignore_errors=True)
 

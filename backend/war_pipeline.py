@@ -658,7 +658,38 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
         raise RuntimeError(f"Voiceover too short: {audio_dur:.1f}s (min {MIN_AUDIO_DURATION}s)")
 
     # ── Segments (Whisper 2-5s) ────────────────────────────────────────────────
-    segments = _segments_from_audio(audio_path, audio_dur)
+    # Cache Whisper timestamps so a failed late montage retry does not
+    # transcribe the same voiceover again.
+    segments_cache_path = os.path.join(proj_dir, "whisper_segments.json")
+    audio_stat = os.stat(audio_path)
+    segments = None
+    if os.path.exists(segments_cache_path):
+        try:
+            with open(segments_cache_path, encoding="utf-8") as _sf:
+                cached_segments = json.load(_sf)
+            if (
+                isinstance(cached_segments, dict)
+                and cached_segments.get("audio_size") == audio_stat.st_size
+                and cached_segments.get("audio_mtime") == round(audio_stat.st_mtime, 2)
+                and isinstance(cached_segments.get("segments"), list)
+                and cached_segments["segments"]
+            ):
+                segments = cached_segments["segments"]
+                log("segments", f"Whisper segments cached ({len(segments)} segments)")
+        except Exception as _e:
+            print(f"[war_pipeline] Whisper segment cache ignored: {_e!r}", flush=True)
+    if segments is None:
+        segments = _segments_from_audio(audio_path, audio_dur)
+        with open(segments_cache_path, "w", encoding="utf-8") as _sf:
+            json.dump(
+                {
+                    "audio_size": audio_stat.st_size,
+                    "audio_mtime": round(audio_stat.st_mtime, 2),
+                    "segments": segments,
+                },
+                _sf,
+                ensure_ascii=False,
+            )
     log("segments", f"{len(segments)} segments, last ends at {segments[-1]['end']:.1f}s")
     mark_timing("segments")
 
