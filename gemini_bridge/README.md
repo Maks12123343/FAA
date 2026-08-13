@@ -15,8 +15,9 @@ need to be copied into the repository or refreshed manually before every image.
    powershell -ExecutionPolicy Bypass -File ".\gemini_bridge\setup_browser_profile.ps1"
    ```
 
-   A separate Chrome window opens. Sign in to Gemini there and press Enter in
-   the PowerShell window. The profile is stored outside the repository under
+   A separate **normal** Chrome window opens. Sign in to Gemini there, close
+   that dedicated window, and then press Enter in the PowerShell window. The
+   profile is stored outside the repository under
    `%LOCALAPPDATA%\FAA\gemini_browser_profile`.
 4. Put the same `LOCAL_API_KEY` into FAA Settings under **Gemini Web Image
    Bridge**, enable image generation, and save.
