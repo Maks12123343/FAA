@@ -126,8 +126,10 @@ def _concat_clip_list(clip_paths: list, output: str):
             f.write(f"file '{safe_p}'\n")
     try:
         r = subprocess.run(
-            [FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", list_file,
+            [FFMPEG, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+             "-f", "concat", "-safe", "0", "-i", list_file,
              *config.get_video_encoder_args("ultrafast"), "-pix_fmt", "yuv420p", "-an", output],
+            stdin=subprocess.DEVNULL,
             capture_output=True, timeout=3600,
         )
         if r.returncode != 0:

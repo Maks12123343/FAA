@@ -1017,8 +1017,10 @@ def _concat_clip_list(clip_paths: list, output: str):
             f.write(f"file '{safe_p}'\n")
     try:
         subprocess.run(
-            [config.FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", list_file,
+            [config.FFMPEG, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+             "-f", "concat", "-safe", "0", "-i", list_file,
              *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p", "-an", output],
+            stdin=subprocess.DEVNULL,
             capture_output=True, timeout=3600,
             check=True,
         )
@@ -1213,10 +1215,12 @@ def _build_movie_video(clips: list, audio_path: str, output_path: str,
     if emit:
         emit("montage", "Adding voiceover...")
     r = subprocess.run(
-        [config.FFMPEG, "-y", "-i", raw_video, "-i", audio_path,
-         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-         "-shortest", "-t", str(audio_dur), "-movflags", "+faststart",
-         with_audio],
+        [config.FFMPEG, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+         "-i", raw_video, "-i", audio_path,
+          "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+          "-shortest", "-t", str(audio_dur), "-movflags", "+faststart",
+          with_audio],
+        stdin=subprocess.DEVNULL,
         capture_output=True, timeout=3600,
     )
     if r.returncode != 0:
