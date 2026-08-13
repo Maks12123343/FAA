@@ -75,8 +75,10 @@ def _build_drawtext(overlay: dict, text_dir: str, idx: int) -> str:
 
     enable = f"between(t,{start:.2f},{end:.2f})"
 
-    font_esc = FONT_PATH.replace("\\", "/")
-    txt_esc = txt_file.replace("\\", "/")
+    # In an FFmpeg filtergraph, the colon in a Windows drive path is an
+    # option separator unless it is escaped (C\:/...).
+    font_esc = FONT_PATH.replace("\\", "/").replace(":", r"\:")
+    txt_esc = txt_file.replace("\\", "/").replace(":", r"\:")
 
     return (
         f"drawtext=fontfile='{font_esc}'"
