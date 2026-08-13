@@ -299,11 +299,34 @@ def get_movies_dir() -> str:
 def _qsv_available() -> bool:
     if not hasattr(_qsv_available, "_cached"):
         try:
-            r = __import__("subprocess").run(
+            subprocess = __import__("subprocess")
+            r = subprocess.run(
                 [FFMPEG, "-hide_banner", "-encoders"],
                 capture_output=True, text=True, timeout=10,
             )
-            _qsv_available._cached = "h264_qsv" in r.stdout
+            if "h264_qsv" not in r.stdout:
+                _qsv_available._cached = False
+            else:
+                # FFmpeg can list h264_qsv even when the machine has no
+                # usable Intel iGPU (for example an i5-9400F). Verify a real
+                # encode so clip preparation falls back to libx264 instead of
+                # silently failing every selected clip.
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+                    tmp_path = tmp.name
+                try:
+                    test = subprocess.run(
+                        [FFMPEG, "-y", "-f", "lavfi",
+                         "-i", "color=black:size=256x256:duration=0.1",
+                         "-c:v", "h264_qsv", "-frames:v", "1", tmp_path],
+                        capture_output=True, timeout=15,
+                    )
+                    _qsv_available._cached = test.returncode == 0
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
         except Exception:
             _qsv_available._cached = False
         print(f"[config] h264_qsv available: {_qsv_available._cached}", flush=True)
