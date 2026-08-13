@@ -28,6 +28,10 @@ def finalize_mp4(path: str, fade_in: float = 0.8, emit=None) -> bool:
     cmd = [
         config.FFMPEG,
         "-y",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
         "-i",
         path,
         "-map_metadata",
@@ -64,7 +68,12 @@ def finalize_mp4(path: str, fade_in: float = 0.8, emit=None) -> bool:
         emit("finalize", "Cleaning MP4 metadata and adding fade-in...")
     started = time.time()
     try:
-        r = subprocess.run(cmd, capture_output=True, timeout=3600)
+        r = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=3600,
+        )
         if r.returncode != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) < 100_000:
             err = r.stderr.decode(errors="replace")[-800:] if r else "unknown ffmpeg error"
             print(f"[video_finalize] Final polish failed: {err}", flush=True)
