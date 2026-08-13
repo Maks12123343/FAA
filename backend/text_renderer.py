@@ -106,20 +106,27 @@ def apply_text_overlays(input_path: str, overlays: list, output_path: str):
     import shutil as _shutil
 
     text_dir = tempfile.mkdtemp(prefix="faa_txt_")
+    local_input_path = None
     rendered_path = None
     try:
         filters = [_build_drawtext(o, text_dir, i) for i, o in enumerate(overlays)]
         vf = ",".join(filters)
 
-        # Render locally first. Google Drive's synced filesystem can hold a
-        # newly-created MP4 open and make FFmpeg appear frozen at zero CPU.
+        # Keep both sides of the expensive filter pass local. Google Drive's
+        # synced filesystem can block reads as well as newly-created writes.
+        local_input_fd, local_input_path = tempfile.mkstemp(
+            prefix="faa_overlay_input_", suffix=".mp4"
+        )
+        os.close(local_input_fd)
+        _shutil.copy2(input_path, local_input_path)
+
         rendered_fd, rendered_path = tempfile.mkstemp(
             prefix="faa_overlay_", suffix=".mp4"
         )
         os.close(rendered_fd)
 
         result = subprocess.run(
-            [FFMPEG, "-y", "-i", input_path,
+            [FFMPEG, "-y", "-nostdin", "-i", local_input_path,
              "-vf", vf,
              *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p",
              "-c:a", "copy",
@@ -137,6 +144,11 @@ def apply_text_overlays(input_path: str, overlays: list, output_path: str):
             raise RuntimeError("Final overlay video could not be copied to the project folder")
     finally:
         _shutil.rmtree(text_dir, ignore_errors=True)
+        if local_input_path and os.path.exists(local_input_path):
+            try:
+                os.unlink(local_input_path)
+            except OSError:
+                pass
         if rendered_path and os.path.exists(rendered_path):
             try:
                 os.unlink(rendered_path)
