@@ -28,7 +28,19 @@ if platform.system() == "Windows":
     _ffprobe_fixed = r"C:\ffmpeg-master-latest-win64-gpl\bin\ffprobe.exe"
     FFMPEG  = _ffmpeg_fixed if os.path.exists(_ffmpeg_fixed) else (shutil.which("ffmpeg") or "ffmpeg")
     FFPROBE = _ffprobe_fixed if os.path.exists(_ffprobe_fixed) else (shutil.which("ffprobe") or "ffprobe")
-    VERTEX_CREDENTIALS = r"C:\Users\Ukraine\AppData\Roaming\gcloud\application_default_credentials.json"
+    # Prefer an explicitly supplied local credential path, then the current
+    # Windows user's gcloud ADC location. Do not hard-code the developer's
+    # username: the repo is also run from a different Windows account.
+    _cred_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    _cred_home = os.path.join(
+        os.path.expanduser("~"),
+        "AppData", "Roaming", "gcloud", "application_default_credentials.json",
+    )
+    _cred_legacy = r"C:\Users\Ukraine\AppData\Roaming\gcloud\application_default_credentials.json"
+    VERTEX_CREDENTIALS = next(
+        (p for p in [_cred_env, _cred_home, _cred_legacy] if p and os.path.exists(p)),
+        _cred_env or _cred_home,
+    )
     _DEFAULT_STOCKS_DIR = r"G:\My Drive\FAA\stocks"
     _DEFAULT_MOVIES_DIR = r"G:\My Drive\FAA\movies"
 else:
