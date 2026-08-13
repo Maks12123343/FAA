@@ -55,7 +55,9 @@ def _get_whisper_model():
                 if requested_device == "cuda" and not torch.cuda.is_available():
                     raise RuntimeError("FAA_WHISPER_DEVICE=cuda but CUDA is unavailable in installed PyTorch")
                 device = "cuda" if requested_device != "cpu" and torch.cuda.is_available() else "cpu"
-                model_name = os.environ.get("FAA_WHISPER_MODEL", "large-v3")
+                # GTX 1660/6 GB needs a faster default; override with
+                # FAA_WHISPER_MODEL when higher accuracy is worth the time.
+                model_name = os.environ.get("FAA_WHISPER_MODEL", "small")
                 if device == "cpu":
                     torch.set_num_threads(max(1, os.cpu_count() or 1))
                     try:

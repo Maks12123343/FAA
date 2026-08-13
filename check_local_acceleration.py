@@ -32,7 +32,7 @@ def main() -> int:
         print(f"Torch check failed: {type(exc).__name__}: {exc}")
 
     print(f"Whisper requested device: {os.environ.get('FAA_WHISPER_DEVICE', 'auto')}")
-    print(f"Whisper model: {os.environ.get('FAA_WHISPER_MODEL', 'large-v3')}")
+    print(f"Whisper model: {os.environ.get('FAA_WHISPER_MODEL', 'small')}")
     return 0
 
 
