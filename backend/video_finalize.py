@@ -1,7 +1,9 @@
 """Final MP4 polish: short fade-in and metadata cleanup."""
 
 import os
+import shutil
 import subprocess
+import tempfile
 import time
 
 import config
@@ -16,13 +18,11 @@ def finalize_mp4(path: str, fade_in: float = 0.8, emit=None) -> bool:
     if not path or not os.path.exists(path):
         return False
 
-    root, ext = os.path.splitext(path)
-    tmp = f"{root}.finalizing{ext or '.mp4'}"
-    if os.path.exists(tmp):
-        try:
-            os.unlink(tmp)
-        except Exception:
-            pass
+    local_input_fd, local_input = tempfile.mkstemp(prefix="faa_finalize_in_", suffix=".mp4")
+    os.close(local_input_fd)
+    local_output_fd, local_output = tempfile.mkstemp(prefix="faa_finalize_out_", suffix=".mp4")
+    os.close(local_output_fd)
+    tmp = None
 
     vf = f"fade=t=in:st=0:d={float(fade_in):.2f}" if fade_in and fade_in > 0 else "null"
     cmd = [
@@ -33,7 +33,7 @@ def finalize_mp4(path: str, fade_in: float = 0.8, emit=None) -> bool:
         "-loglevel",
         "error",
         "-i",
-        path,
+        local_input,
         "-map_metadata",
         "-1",
         "-map_chapters",
@@ -61,25 +61,30 @@ def finalize_mp4(path: str, fade_in: float = 0.8, emit=None) -> bool:
         "handler_name=SoundHandler",
         "-movflags",
         "+faststart",
-        tmp,
+        local_output,
     ]
 
     if emit:
         emit("finalize", "Cleaning MP4 metadata and adding fade-in...")
     started = time.time()
     try:
+        # Google Drive can block FFmpeg reads/writes. Keep the expensive
+        # final pass entirely local and copy only the finished MP4 back.
+        shutil.copy2(path, local_input)
         r = subprocess.run(
             cmd,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=3600,
         )
-        if r.returncode != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) < 100_000:
+        if r.returncode != 0 or not os.path.exists(local_output) or os.path.getsize(local_output) < 100_000:
             err = r.stderr.decode(errors="replace")[-800:] if r else "unknown ffmpeg error"
             print(f"[video_finalize] Final polish failed: {err}", flush=True)
             if emit:
                 emit("finalize", "Final metadata/fade step failed; keeping original video.")
             return False
+        tmp = f"{path}.finalizing"
+        shutil.copy2(local_output, tmp)
         os.replace(tmp, path)
         elapsed = time.time() - started
         print(f"[video_finalize] Final polish done in {elapsed:.1f}s: {path}", flush=True)
@@ -92,8 +97,9 @@ def finalize_mp4(path: str, fade_in: float = 0.8, emit=None) -> bool:
             emit("finalize", "Final metadata/fade step failed; keeping original video.")
         return False
     finally:
-        if os.path.exists(tmp):
-            try:
-                os.unlink(tmp)
-            except Exception:
-                pass
+        for cleanup_path in (local_input, local_output, tmp):
+            if cleanup_path and os.path.exists(cleanup_path):
+                try:
+                    os.unlink(cleanup_path)
+                except Exception:
+                    pass
