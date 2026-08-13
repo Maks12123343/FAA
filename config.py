@@ -2,6 +2,7 @@ import json
 import os
 import platform
 import shutil
+import subprocess
 
 DATA_DIR     = os.path.join(os.path.dirname(__file__), "data")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
@@ -316,7 +317,8 @@ def _qsv_available() -> bool:
                     tmp_path = tmp.name
                 try:
                     test = subprocess.run(
-                        [FFMPEG, "-y", "-f", "lavfi",
+                        [FFMPEG, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+                         "-f", "lavfi",
                          "-i", "color=black:size=256x256:duration=0.1",
                          "-c:v", "h264_qsv", "-frames:v", "1", tmp_path],
                         capture_output=True, timeout=15,
@@ -337,7 +339,7 @@ def _nvenc_available() -> bool:
     if not hasattr(_nvenc_available, "_cached"):
         try:
             import tempfile
-            r = __import__("subprocess").run(
+            r = subprocess.run(
                 [FFMPEG, "-hide_banner", "-encoders"],
                 capture_output=True, text=True, timeout=10,
             )
@@ -348,8 +350,9 @@ def _nvenc_available() -> bool:
                 with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
                     tmp_path = tmp.name
                 try:
-                    r2 = __import__("subprocess").run(
-                        [FFMPEG, "-y", "-f", "lavfi",
+                    r2 = subprocess.run(
+                        [FFMPEG, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+                         "-f", "lavfi",
                          "-i", "color=black:size=256x256:duration=0.1",
                          "-c:v", "h264_nvenc", "-frames:v", "1", tmp_path],
                         capture_output=True, timeout=15,
@@ -368,13 +371,17 @@ def _nvenc_available() -> bool:
 
 def get_video_encoder_args(preset: str = "ultrafast", crf: int = None) -> list:
     """Return ffmpeg video encoder args optimized for current platform.
-    Priority:
-      Windows  → h264_qsv  (Intel Quick Sync, iGPU)
-      Linux    → h264_nvenc (NVIDIA GPU, e.g. Paperspace/Vast.ai)
-      Fallback → libx264   (CPU)
+    Priority in auto mode:
+      Windows  → h264_qsv, then h264_nvenc
+      Linux    → h264_nvenc
+      Fallback → libx264 (CPU)
     crf: quality for libx264/nvenc (18=high, 23=default, 28=lower).
     """
-    if platform.system() == "Windows" and _qsv_available():
+    preference = os.environ.get("FAA_VIDEO_ENCODER", "auto").strip().lower()
+    if preference in {"cpu", "libx264", "x264"}:
+        return _libx264_args(preset, crf)
+
+    if preference in {"auto", "qsv"} and platform.system() == "Windows" and _qsv_available():
         qsv_preset_map = {
             "ultrafast": "veryfast",
             "superfast": "veryfast",
@@ -389,7 +396,7 @@ def get_video_encoder_args(preset: str = "ultrafast", crf: int = None) -> list:
             args += ["-global_quality", str(crf)]
         return args
 
-    if platform.system() != "Windows" and _nvenc_available():
+    if preference in {"auto", "nvenc"} and _nvenc_available():
         nvenc_preset_map = {
             "ultrafast": "p1",
             "superfast": "p2",
@@ -404,7 +411,26 @@ def get_video_encoder_args(preset: str = "ultrafast", crf: int = None) -> list:
             args += ["-cq", str(crf)]
         return args
 
+    if preference in {"qsv", "nvenc"}:
+        print(f"[config] requested encoder '{preference}' unavailable; falling back to libx264", flush=True)
+    return _libx264_args(preset, crf)
+
+
+def _libx264_args(preset: str, crf: int | None) -> list:
     args = ["-c:v", "libx264", "-preset", preset]
     if crf is not None:
         args += ["-crf", str(crf)]
     return args
+
+
+def get_video_encoder_name() -> str:
+    """Return and log the actual encoder selected for this machine."""
+    args = get_video_encoder_args("fast")
+    try:
+        name = args[args.index("-c:v") + 1]
+    except (ValueError, IndexError):
+        name = "unknown"
+    if not hasattr(get_video_encoder_name, "_logged"):
+        print(f"[config] selected video encoder: {name} ({' '.join(args)})", flush=True)
+        get_video_encoder_name._logged = True
+    return name

@@ -51,9 +51,24 @@ def _get_whisper_model():
                 # `medium` model is multilingual and handles Polish/German/French/Spanish/Portuguese
                 # well enough to give meaningful clip-matching context.
                 # On a GPU instance (RTX 3060/2080+) it runs in seconds.
+                requested_device = os.environ.get("FAA_WHISPER_DEVICE", "auto").strip().lower()
+                if requested_device == "cuda" and not torch.cuda.is_available():
+                    raise RuntimeError("FAA_WHISPER_DEVICE=cuda but CUDA is unavailable in installed PyTorch")
+                device = "cuda" if requested_device != "cpu" and torch.cuda.is_available() else "cpu"
                 model_name = os.environ.get("FAA_WHISPER_MODEL", "large-v3")
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                print(f"[movie_pipeline] Loading Whisper model ({model_name}) on {device} — first time...", flush=True)
+                if device == "cpu":
+                    torch.set_num_threads(max(1, os.cpu_count() or 1))
+                    try:
+                        torch.set_num_interop_threads(max(1, min(4, os.cpu_count() or 1)))
+                    except RuntimeError:
+                        pass
+                else:
+                    torch.backends.cudnn.benchmark = True
+                print(
+                    f"[movie_pipeline] Loading Whisper model ({model_name}) on {device} "
+                    f"(torch={torch.__version__}, cuda={torch.cuda.is_available()}) — first time...",
+                    flush=True,
+                )
                 _WHISPER_MODEL = _whisper.load_model(model_name, device=device)
                 print(f"[movie_pipeline] Whisper model loaded ({model_name}/{device}).", flush=True)
     return _WHISPER_MODEL
@@ -84,7 +99,14 @@ def _segments_from_audio(audio_path: str, audio_dur: float) -> list:
 
         print(f"[movie_pipeline] Step 2/4: Transcribing (may be slow on weak hardware)...", flush=True)
         t1 = _time.time()
-        result = model.transcribe(audio_path, word_timestamps=False, language=None)
+        device = next(model.parameters()).device.type
+        result = model.transcribe(
+            audio_path,
+            word_timestamps=False,
+            language=None,
+            fp16=(device == "cuda"),
+            verbose=False,
+        )
         print(f"[movie_pipeline] Step 2/4: Transcription done ({_time.time()-t1:.1f}s)", flush=True)
 
         raw_segs = result.get("segments", [])
@@ -395,11 +417,13 @@ def _prepare_movie_clip(clip_path: str, out_path: str, uniq_params: dict,
 
     try:
         r = subprocess.run(
-            [config.FFMPEG, "-y", "-i", clip_path,
+            [config.FFMPEG, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+             "-i", clip_path,
              "-vf", vf,
              *config.get_video_encoder_args("ultrafast"),
              "-pix_fmt", "yuv420p", "-an", "-t", str(max_dur), out_path],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=60,
         )
         if r.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) < 5000:
             if os.path.exists(out_path):
@@ -1010,6 +1034,12 @@ def _select_clips_for_segments(segments: list, movie_name: str,
     return selected
 
 def _concat_clip_list(clip_paths: list, output: str):
+    encoder_name = config.get_video_encoder_name()
+    print(
+        f"[movie_pipeline] FFmpeg concat: {len(clip_paths)} clips -> "
+        f"{os.path.basename(output)} ({encoder_name})",
+        flush=True,
+    )
     list_file = output + ".txt"
     with open(list_file, "w", encoding="utf-8") as f:
         for p in clip_paths:
@@ -1024,6 +1054,8 @@ def _concat_clip_list(clip_paths: list, output: str):
             capture_output=True, timeout=3600,
             check=True,
         )
+        if not os.path.exists(output) or os.path.getsize(output) < 5000:
+            raise RuntimeError(f"FFmpeg produced an invalid output: {output}")
     finally:
         if os.path.exists(list_file):
             os.unlink(list_file)
@@ -1086,7 +1118,7 @@ def _xfade_join(segment_files: list, output: str, fade_dur: float = 0.35,
         prev_label = out_label
 
     r = subprocess.run(
-        [config.FFMPEG, "-y"] + inputs +
+        [config.FFMPEG, "-y", "-nostdin", "-hide_banner", "-loglevel", "error"] + inputs +
         ["-filter_complex", ";".join(filters),
          "-map", "[vout]",
          *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p", "-an", output],
@@ -1099,11 +1131,11 @@ def _xfade_join(segment_files: list, output: str, fade_dur: float = 0.35,
 def _loop_video_to_duration(video_path: str, target_dur: float, output: str):
     """Лупить відео до потрібної тривалості через stream_loop."""
     subprocess.run(
-        [config.FFMPEG, "-y",
+        [config.FFMPEG, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
          "-stream_loop", "-1", "-i", video_path,
          "-t", f"{target_dur:.3f}",
          *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p", "-an", output],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600,
     )
 
 
@@ -1163,6 +1195,12 @@ def _build_movie_video(clips: list, audio_path: str, output_path: str,
     with_audio = os.path.join(proj_dir, "_with_audio_movie.mp4")
 
     audio_dur = _get_duration(audio_path)
+    encoder_name = config.get_video_encoder_name()
+    print(
+        f"[movie_pipeline] Assembly resources: encoder={encoder_name}, "
+        f"cpu_threads={os.cpu_count() or 1}, clips={len(clips)}",
+        flush=True,
+    )
 
     # Групуємо кліпи
     groups = []
@@ -1183,6 +1221,11 @@ def _build_movie_video(clips: list, audio_path: str, output_path: str,
                 seg_files.append(seg)
             if emit and n_groups > 5 and (g_idx + 1) % max(1, n_groups // 5) == 0:
                 emit("montage", f"Building segments: {g_idx + 1}/{n_groups} ({int((g_idx+1)/n_groups*100)}%)")
+            if (g_idx + 1) % max(1, n_groups // 10) == 0 or g_idx + 1 == n_groups:
+                print(
+                    f"[movie_pipeline] Segment assembly progress: {g_idx + 1}/{n_groups}",
+                    flush=True,
+                )
 
         if not seg_files:
             raise RuntimeError("No segments created during assembly")
@@ -1195,6 +1238,9 @@ def _build_movie_video(clips: list, audio_path: str, output_path: str,
             shutil.copy2(seg_files[0], assembled)
         else:
             _concat_clip_list(seg_files, assembled)
+
+        if not os.path.exists(assembled) or os.path.getsize(assembled) < 5000:
+            raise RuntimeError("Segment join produced an invalid video")
 
         # Перевіряємо чи відео покриває аудіо; якщо ні — лупимо
         assembled_dur = _get_duration(assembled)
@@ -1220,8 +1266,7 @@ def _build_movie_video(clips: list, audio_path: str, output_path: str,
           "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
           "-shortest", "-t", str(audio_dur), "-movflags", "+faststart",
           with_audio],
-        stdin=subprocess.DEVNULL,
-        capture_output=True, timeout=3600,
+        stdin=subprocess.DEVNULL, capture_output=True, timeout=3600,
     )
     if r.returncode != 0:
         print(f"[movie_pipeline] Audio copy failed: {r.stderr.decode(errors='replace')[-500:]}", flush=True)
