@@ -81,12 +81,19 @@ def _load_library_index(niche: str) -> list:
 
     # Пробуємо кілька відомих шляхів
     app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # On Windows the repo may live in ``workspace\FAA`` while the shared
+    # Google Drive keeps the library in the sibling ``workspace\gdrive``.
+    # Keep the configured/legacy roots, but also discover that layout from the
+    # repo location so settings copied from the server are not required.
+    workspace_root = os.path.dirname(app_root)
     movie_roots = [
         config.get_movies_dir(),
         "/workspace/FAA/movies",
         os.path.join(app_root, "movies"),
         os.path.join(app_root, "..", "movies"),
         os.path.join(app_root, "..", "..", "FAA", "movies"),
+        os.path.join(app_root, "..", "gdrive", "movies"),
+        os.path.join(workspace_root, "gdrive", "movies"),
     ]
     candidates = [
         os.path.join(root, niche, "index.json")
@@ -110,19 +117,30 @@ def _load_library_index(niche: str) -> list:
     print(f"[war_pipeline] Loaded {len(clips)} clips in {time.time()-t0:.1f}s", flush=True)
 
     movie_root = os.path.dirname(os.path.dirname(index_path))
+    # The war index stores Linux paths such as
+    # /workspace/gdrive/library/russia_ukraine_war/....  On the shared drive
+    # the index is under .../gdrive/movies, while the actual clips are under
+    # the sibling .../gdrive/library directory.
+    gdrive_root = os.path.dirname(movie_root)
+    library_root = os.path.join(gdrive_root, "library")
 
     def _resolve_clip_file(raw_path: str) -> str:
         if not raw_path or os.path.exists(raw_path):
             return raw_path
         normalized = str(raw_path).replace("\\", "/")
-        marker = f"/movies/{niche}/"
-        if marker in normalized:
-            relative = normalized.split(marker, 1)[1]
-            candidate = os.path.join(movie_root, niche, *relative.split("/"))
-            if os.path.exists(candidate):
-                return candidate
+        normalized_for_marker = "/" + normalized.lstrip("/")
+        for marker, base_root in (
+            (f"/library/{niche}/", library_root),
+            (f"/movies/{niche}/", movie_root),
+        ):
+            if marker in normalized_for_marker:
+                relative = normalized_for_marker.split(marker, 1)[1]
+                candidate = os.path.join(base_root, niche, *relative.split("/"))
+                if os.path.exists(candidate):
+                    return candidate
         relative = normalized.lstrip("/")
         for candidate in (
+            os.path.join(library_root, *relative.split("/")),
             os.path.join(movie_root, niche, *relative.split("/")),
             os.path.join(movie_root, *relative.split("/")),
         ):
