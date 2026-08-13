@@ -454,6 +454,7 @@ def _extend_prepared_clips_to_audio(
     uniq_params: dict,
     proj_id: str,
     global_used_ids: set = None,
+    candidate_clips: list = None,
     emit=None,
 ) -> tuple[list, float, int]:
     """Append different valid clips until the real video covers the voiceover."""
@@ -475,8 +476,9 @@ def _extend_prepared_clips_to_audio(
         for cd in clip_data
     }
     used_ids.update(str(cid) for cid in (global_used_ids or set()))
+    source_candidates = candidate_clips if candidate_clips is not None else get_movie_clips(movie_name)
     candidates = [
-        clip for clip in get_movie_clips(movie_name)
+        clip for clip in source_candidates
         if _is_supplement_clip_candidate(clip, used_ids)
     ]
     rng = random.Random(f"supplement:{proj_id}")

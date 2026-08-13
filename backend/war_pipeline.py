@@ -51,6 +51,7 @@ from backend.movie_pipeline import (
     _segments_from_audio,
     _prepare_movie_clip,
     _build_movie_video,
+    _extend_prepared_clips_to_audio,
     make_uniq_params_for_language,
     MIN_AUDIO_DURATION,
 )
@@ -79,10 +80,18 @@ def _load_library_index(niche: str) -> list:
             return _INDEX_CACHE[niche]
 
     # Пробуємо кілька відомих шляхів
+    app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    movie_roots = [
+        config.get_movies_dir(),
+        "/workspace/FAA/movies",
+        os.path.join(app_root, "movies"),
+        os.path.join(app_root, "..", "movies"),
+        os.path.join(app_root, "..", "..", "FAA", "movies"),
+    ]
     candidates = [
-        f"/workspace/FAA/movies/{niche}/index.json",
-        os.path.join(config.PROJECTS_DIR, "..", "movies", niche, "index.json"),
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "movies", niche, "index.json"),
+        os.path.join(root, niche, "index.json")
+        for root in movie_roots
+        if root
     ]
     index_path = None
     for p in candidates:
@@ -100,11 +109,34 @@ def _load_library_index(niche: str) -> list:
     clips = data.get("clips", [])
     print(f"[war_pipeline] Loaded {len(clips)} clips in {time.time()-t0:.1f}s", flush=True)
 
+    movie_root = os.path.dirname(os.path.dirname(index_path))
+
+    def _resolve_clip_file(raw_path: str) -> str:
+        if not raw_path or os.path.exists(raw_path):
+            return raw_path
+        normalized = str(raw_path).replace("\\", "/")
+        marker = f"/movies/{niche}/"
+        if marker in normalized:
+            relative = normalized.split(marker, 1)[1]
+            candidate = os.path.join(movie_root, niche, *relative.split("/"))
+            if os.path.exists(candidate):
+                return candidate
+        relative = normalized.lstrip("/")
+        for candidate in (
+            os.path.join(movie_root, niche, *relative.split("/")),
+            os.path.join(movie_root, *relative.split("/")),
+        ):
+            if os.path.exists(candidate):
+                return candidate
+        return raw_path
+
     # Валідація: залишаємо тільки з ембеддингом та існуючим файлом
     valid = []
     missing_file = 0
     missing_emb = 0
-    for c in clips:
+    for original in clips:
+        c = dict(original)
+        c["file"] = _resolve_clip_file(c.get("file", ""))
         if not c.get("embedding"):
             missing_emb += 1
             continue
@@ -698,6 +730,21 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
 
         if not prepared:
             raise RuntimeError("No clips survived preparation.")
+
+        prepared, coverage_dur, supplement_count = _extend_prepared_clips_to_audio(
+            prepared=prepared,
+            clip_data=clip_data,
+            movie_name=niche,
+            audio_dur=audio_dur,
+            tmp_dir=tmp_dir,
+            uniq_params=uniq_params,
+            proj_id=proj_id,
+            candidate_clips=clips,
+            emit=emit,
+        )
+        if supplement_count:
+            with open(clips_cache, "w", encoding="utf-8") as f:
+                json.dump(clip_data, f, ensure_ascii=False)
         mark_timing("clip_prepare")
 
         log("montage", f"Assembling {len(prepared)} clips ({audio_dur:.1f}s audio)...")
