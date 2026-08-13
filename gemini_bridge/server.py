@@ -24,7 +24,7 @@ from flask import Flask, jsonify, request
 
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(ROOT, ".env"))
+load_dotenv(os.path.join(ROOT, ".env"), override=True)
 
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "4981"))
@@ -33,6 +33,14 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-image").strip()
 LANGUAGE = os.environ.get("GEMINI_LANGUAGE", "en").strip() or "en"
 REQUEST_TIMEOUT = max(30, min(900, int(os.environ.get("REQUEST_TIMEOUT_SECONDS", "360"))))
 MAX_IMAGE_BYTES = max(1, int(os.environ.get("MAX_IMAGE_BYTES", str(50 * 1024 * 1024))))
+_default_browser_profile = os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+    "FAA", "gemini_browser_profile",
+)
+GEMINI_BROWSER_PROFILE = os.path.abspath(
+    os.path.expandvars(os.environ.get("GEMINI_BROWSER_PROFILE", _default_browser_profile))
+)
+GEMINI_BROWSER_MODE = os.environ.get("GEMINI_BROWSER_MODE", "auto").strip().lower()
 
 GEMINI_APP = "https://gemini.google.com/app"
 GEMINI_GENERATE = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
@@ -187,9 +195,81 @@ class GeminiWebClient:
         self.language = LANGUAGE
         self.available_models: set[str] = set()
         self.initialized_at = 0.0
+        self._playwright = None
+        self._browser_context = None
+        self._browser_page = None
+
+    def _browser_enabled(self) -> bool:
+        if GEMINI_BROWSER_MODE in {"0", "false", "off", "cookies"}:
+            return False
+        if GEMINI_BROWSER_MODE in {"1", "true", "on", "browser"}:
+            return True
+        return os.path.isdir(GEMINI_BROWSER_PROFILE)
+
+    def _reset_browser(self) -> None:
+        try:
+            if self._browser_context is not None and not self._browser_context.is_closed():
+                self._browser_context.close()
+        except Exception:
+            pass
+        try:
+            if self._playwright is not None:
+                self._playwright.stop()
+        except Exception:
+            pass
+        self._browser_page = None
+        self._browser_context = None
+        self._playwright = None
+
+    def _browser_session(self) -> tuple[str, list[dict]]:
+        """Open the persistent signed-in Gemini profile and return page/cookies."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError(
+                "Browser mode requires Playwright. Run setup_browser_profile.ps1 first."
+            ) from exc
+
+        if self._browser_context is not None and self._browser_context.is_closed():
+            self._reset_browser()
+        if self._browser_context is None:
+            os.makedirs(GEMINI_BROWSER_PROFILE, exist_ok=True)
+            self._playwright = sync_playwright().start()
+            try:
+                self._browser_context = self._playwright.chromium.launch_persistent_context(
+                    user_data_dir=GEMINI_BROWSER_PROFILE,
+                    channel="chrome",
+                    headless=False,
+                    viewport={"width": 1280, "height": 900},
+                )
+            except Exception:
+                self._reset_browser()
+                raise
+
+        pages = self._browser_context.pages
+        self._browser_page = pages[0] if pages else self._browser_context.new_page()
+        self._browser_page.goto(f"{GEMINI_APP}?hl=en", wait_until="domcontentloaded", timeout=60000)
+        self._browser_page.wait_for_timeout(1500)
+        body = self._browser_page.content()
+        cookies = self._browser_context.cookies(["https://gemini.google.com", "https://www.google.com"])
+        return body, cookies
+
+    def _apply_browser_cookies(self, cookies: list[dict]) -> None:
+        self.session.cookies.clear()
+        for cookie in cookies:
+            name = cookie.get("name", "")
+            if name:
+                self.session.cookies.set(
+                    name,
+                    cookie.get("value", ""),
+                    domain=cookie.get("domain") or ".google.com",
+                    path=cookie.get("path") or "/",
+                )
 
     @property
     def configured(self) -> bool:
+        if self._browser_enabled():
+            return os.path.isdir(GEMINI_BROWSER_PROFILE)
         return bool(_clean_cookie(os.environ.get("GEMINI_1PSID")) and _clean_cookie(os.environ.get("GEMINI_1PSIDTS")))
 
     def _set_primary_cookies(self):
@@ -208,24 +288,33 @@ class GeminiWebClient:
     def initialize(self, force: bool = False):
         with self.lock:
             if not self.configured:
+                if self._browser_enabled():
+                    raise RuntimeError(
+                        f"Gemini browser profile is missing: {GEMINI_BROWSER_PROFILE}. "
+                        "Run setup_browser_profile.ps1 and sign in once."
+                    )
                 raise RuntimeError("Gemini bridge is missing GEMINI_1PSID and GEMINI_1PSIDTS")
             if self.at and not force and time.time() - self.initialized_at < 900:
                 return
-            self._set_primary_cookies()
-            headers = {
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Origin": "https://gemini.google.com",
-                "Referer": "https://gemini.google.com/",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "X-Same-Domain": "1",
-                "User-Agent": USER_AGENT,
-            }
-            self.session.get("https://www.google.com/", headers=headers, timeout=30)
-            response = self.session.get(f"{GEMINI_APP}?hl=en", headers=headers, timeout=30)
-            response.raise_for_status()
-            body = response.text
+            if self._browser_enabled():
+                body, cookies = self._browser_session()
+                self._apply_browser_cookies(cookies)
+            else:
+                self._set_primary_cookies()
+                headers = {
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Origin": "https://gemini.google.com",
+                    "Referer": "https://gemini.google.com/",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "X-Same-Domain": "1",
+                    "User-Agent": USER_AGENT,
+                }
+                self.session.get("https://www.google.com/", headers=headers, timeout=30)
+                response = self.session.get(f"{GEMINI_APP}?hl=en", headers=headers, timeout=30)
+                response.raise_for_status()
+                body = response.text
             at = _first_match(body, _TOKEN_PATTERNS["at"])
             if not at:
                 raise RuntimeError("Gemini session token SNlM0e was not found; cookies may be expired")
@@ -336,6 +425,8 @@ class GeminiWebClient:
                 except Exception as exc:
                     last_error = exc
                     self.at = ""
+                    if self._browser_enabled():
+                        self._reset_browser()
                     if attempt < 3:
                         time.sleep(attempt * 2)
             raise RuntimeError(f"Gemini image generation failed after 3 attempts: {last_error}")
@@ -362,6 +453,8 @@ def health():
         "ok": True,
         "configured": client.configured,
         "initialized": bool(client.at),
+        "browser_mode": client._browser_enabled(),
+        "browser_profile": GEMINI_BROWSER_PROFILE if client._browser_enabled() else "",
         "model": GEMINI_MODEL,
         "bind": HOST,
         "port": PORT,

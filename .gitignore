@@ -39,6 +39,7 @@ application_default_credentials.json
 # Local Gemini Web bridge secrets/cache
 gemini_bridge/.env
 gemini_bridge/.cookies/
+gemini_bridge/browser_profile/
 gemini_bridge/last_response.txt
 
 # Local deploy secrets (never push)
