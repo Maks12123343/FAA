@@ -126,7 +126,8 @@ def apply_text_overlays(input_path: str, overlays: list, output_path: str):
         os.close(rendered_fd)
 
         result = subprocess.run(
-            [FFMPEG, "-y", "-nostdin", "-i", local_input_path,
+            [FFMPEG, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+             "-i", local_input_path,
              "-vf", vf,
              *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p",
              "-c:a", "copy",
