@@ -106,9 +106,17 @@ def apply_text_overlays(input_path: str, overlays: list, output_path: str):
     import shutil as _shutil
 
     text_dir = tempfile.mkdtemp(prefix="faa_txt_")
+    rendered_path = None
     try:
         filters = [_build_drawtext(o, text_dir, i) for i, o in enumerate(overlays)]
         vf = ",".join(filters)
+
+        # Render locally first. Google Drive's synced filesystem can hold a
+        # newly-created MP4 open and make FFmpeg appear frozen at zero CPU.
+        rendered_fd, rendered_path = tempfile.mkstemp(
+            prefix="faa_overlay_", suffix=".mp4"
+        )
+        os.close(rendered_fd)
 
         result = subprocess.run(
             [FFMPEG, "-y", "-i", input_path,
@@ -116,16 +124,24 @@ def apply_text_overlays(input_path: str, overlays: list, output_path: str):
              *config.get_video_encoder_args("fast"), "-pix_fmt", "yuv420p",
              "-c:a", "copy",
              "-movflags", "+faststart",
-             output_path],
+             rendered_path],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=3600,
         )
-        if result.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) < 5000:
+        if result.returncode != 0 or not os.path.exists(rendered_path) or os.path.getsize(rendered_path) < 5000:
             error = result.stderr.decode(errors="replace")[-1200:]
             raise RuntimeError(f"FFmpeg text overlay failed ({result.returncode}): {error}")
+        _shutil.copy2(rendered_path, output_path)
+        if not os.path.exists(output_path) or os.path.getsize(output_path) < 5000:
+            raise RuntimeError("Final overlay video could not be copied to the project folder")
     finally:
         _shutil.rmtree(text_dir, ignore_errors=True)
+        if rendered_path and os.path.exists(rendered_path):
+            try:
+                os.unlink(rendered_path)
+            except OSError:
+                pass
 
 
 def generate_stat_overlays(script: str, audio_duration: float) -> list:
