@@ -5,6 +5,7 @@ import binascii
 from io import BytesIO
 import os
 import tempfile
+import time
 
 import requests
 from PIL import Image, ImageOps
@@ -137,14 +138,35 @@ def generate_thumbnail(prompt: str, output_path: str, emit=None) -> bool:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(prefix="thumbnail_generated.", suffix=".part", dir=os.path.dirname(output_path))
     try:
-        with os.fdopen(fd, "wb") as f:
+        # Eventlet's Windows monkey patch cannot wrap a regular file descriptor
+        # with os.fdopen. Close it first and reopen the path normally.
+        os.close(fd)
+        fd = None
+        with open(tmp_path, "wb") as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, output_path)
+        last_error = None
+        for attempt in range(4):
+            try:
+                os.replace(tmp_path, output_path)
+                break
+            except PermissionError as exc:
+                last_error = exc
+                time.sleep(0.25 * (attempt + 1))
+        else:
+            raise last_error
     finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     if not is_valid_thumbnail(output_path):
         raise RuntimeError("Saved thumbnail failed the 1920x1080 PNG validation")
     _emit(emit, f"Google Flow thumbnail saved at 1920x1080: {output_path}")

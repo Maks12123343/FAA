@@ -64,7 +64,12 @@ def _atomic_write_json(path: str, data: dict) -> None:
     os.makedirs(directory, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".part", dir=directory)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        # Eventlet replaces os.fdopen with GreenPipe. That implementation cannot
+        # wrap regular Windows file handles, so close the mkstemp descriptor and
+        # reopen the path through Python's normal file object.
+        os.close(fd)
+        fd = None
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
@@ -78,6 +83,11 @@ def _atomic_write_json(path: str, data: dict) -> None:
                 time.sleep(0.25 * (attempt + 1))
         raise last_error
     finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         if os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
@@ -85,11 +95,13 @@ def _atomic_write_json(path: str, data: dict) -> None:
                 pass
 
 
-def _safe_save_cache(path: str, data: dict) -> None:
+def _safe_save_cache(path: str, data: dict) -> bool:
     try:
         _atomic_write_json(path, data)
+        return True
     except Exception as exc:
         print(f"[rewriter] Cache write warning ({path}): {exc}", flush=True)
+        return False
 
 
 def _rewrite_cache_blueprint(
@@ -446,8 +458,8 @@ def _rewrite_script(transcript: str, language: str, video_title: str,
                 "next_tail": prev_tail if i < len(chunks) - 1 else "",
             })
             if cache_path:
-                _safe_save_cache(cache_path, cache_state)
-                print(f"[rewriter]   -> chunk {i+1} cached", flush=True)
+                if _safe_save_cache(cache_path, cache_state):
+                    print(f"[rewriter]   -> chunk {i+1} cached", flush=True)
 
     full_script = "\n\n".join(rewritten_parts)
     _LAST_REWRITTEN_PARTS = list(rewritten_parts)
@@ -1029,8 +1041,8 @@ def _rewrite_metadata(
         raw = _call_metadata_part(system_full, label, user_msg, required_marker)
         metadata_cache["parts"][label] = raw
         if metadata_cache_path:
-            _safe_save_cache(metadata_cache_path, metadata_cache)
-            print(f"[rewriter]   -> {label} cached for retry safety", flush=True)
+            if _safe_save_cache(metadata_cache_path, metadata_cache):
+                print(f"[rewriter]   -> {label} cached for retry safety", flush=True)
         return raw
 
     # Shared style guidance used in every mini-call.
@@ -1376,8 +1388,8 @@ def rewrite_all(
         # Reload first so entries written by _rewrite_script are preserved.
         rewrite_cache_state = _load_rewrite_cache(rewrite_cache_file, rewrite_blueprint)
         rewrite_cache_state["final_script"] = script
-        _safe_save_cache(rewrite_cache_file, rewrite_cache_state)
-        print("[rewriter] Final script cached for retry safety", flush=True)
+        if _safe_save_cache(rewrite_cache_file, rewrite_cache_state):
+            print("[rewriter] Final script cached for retry safety", flush=True)
 
     skip_metadata = not bool(settings.get("rewrite_metadata_enabled", True))
     if skip_metadata:
