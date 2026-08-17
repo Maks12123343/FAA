@@ -111,16 +111,20 @@
   </p>
   <div class="grid-2">
     <div class="field">
-      <label>Active Provider</label>
+      <label>Primary Provider</label>
       <select id="rewrite_active_provider" onchange="onRewriteProviderChange()"></select>
     </div>
     <div class="field">
+      <label>Fallback Provider</label>
+      <select id="rewrite_fallback_provider" onchange="onRewriteFallbackChange()"></select>
+    </div>
+  </div>
+  <div class="field">
       <label>Provider Name</label>
       <div style="display:flex;gap:8px">
         <input type="text" id="rewrite_provider_name" value="" style="flex:1">
         <button type="button" class="btn" onclick="addRewriteProvider()" style="white-space:nowrap">+ Add</button>
       </div>
-    </div>
   </div>
   <div class="field">
     <label>API Key</label>
@@ -262,6 +266,7 @@ function _esc(s) {
 
 const rewriteProviders = {{ settings.rewrite_providers|tojson }};
 let currentRewriteProvider = {{ (settings.rewrite_active_provider or 'a6api')|tojson }};
+let currentRewriteFallbackProvider = {{ (settings.rewrite_fallback_provider or '')|tojson }};
 
 function providerDefaults() {
   return {
@@ -307,6 +312,9 @@ function ensureRewriteProviders() {
     rewriteProviders[id] = {...data, ...(rewriteProviders[id] || {})};
   });
   if (!rewriteProviders[currentRewriteProvider]) currentRewriteProvider = 'a6api';
+  if (!rewriteProviders[currentRewriteFallbackProvider] || currentRewriteFallbackProvider === currentRewriteProvider) {
+    currentRewriteFallbackProvider = '';
+  }
 
   const legacy = {
     api_key: document.getElementById('rewrite_api_key').value.trim(),
@@ -355,12 +363,41 @@ function renderRewriteProviderSelect() {
     if (id === currentRewriteProvider) opt.selected = true;
     sel.appendChild(opt);
   });
+
+  const fallback = document.getElementById('rewrite_fallback_provider');
+  fallback.innerHTML = '';
+  const disabled = document.createElement('option');
+  disabled.value = '';
+  disabled.textContent = 'Disabled (no fallback)';
+  fallback.appendChild(disabled);
+  Object.entries(rewriteProviders).forEach(([id, provider]) => {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = `${provider.name || id} (${id})`;
+    if (id === currentRewriteFallbackProvider) opt.selected = true;
+    fallback.appendChild(opt);
+  });
 }
 
 function onRewriteProviderChange() {
   saveRewriteProviderDraft();
   currentRewriteProvider = document.getElementById('rewrite_active_provider').value;
+  if (currentRewriteFallbackProvider === currentRewriteProvider) {
+    currentRewriteFallbackProvider = '';
+  }
+  renderRewriteProviderSelect();
   loadRewriteProviderDraft(currentRewriteProvider);
+}
+
+function onRewriteFallbackChange() {
+  const selected = document.getElementById('rewrite_fallback_provider').value;
+  if (selected && selected === currentRewriteProvider) {
+    alert('Fallback provider must be different from the primary provider.');
+    currentRewriteFallbackProvider = '';
+  } else {
+    currentRewriteFallbackProvider = selected;
+  }
+  renderRewriteProviderSelect();
 }
 
 function addRewriteProvider() {
@@ -466,6 +503,7 @@ function saveSettings() {
 
   const data = {
     rewrite_active_provider: currentRewriteProvider,
+    rewrite_fallback_provider: currentRewriteFallbackProvider,
     rewrite_providers: rewriteProviders,
     rewrite_api_key:   document.getElementById('rewrite_api_key').value.trim(),
     rewrite_model:     document.getElementById('rewrite_model').value,

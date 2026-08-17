@@ -96,6 +96,7 @@ DEFAULT_SETTINGS = {
 
     # Rewrite API (OpenAI-compatible chat completions)
     "rewrite_active_provider": "a6api",
+    "rewrite_fallback_provider": "",
     "rewrite_providers": {
         "a6api": {
             "name": "A6API",

@@ -118,24 +118,18 @@ def _responses_url(api_url: str) -> str:
     return "https://a6api.com/v1/responses"
 
 
-def _rewrite_settings() -> tuple[str, str, str, str, str, str]:
-    settings = config.load_settings()
-    active_provider = (
-        settings.get("rewrite_active_provider")
-        or os.environ.get("REWRITE_PROVIDER")
-        or "a6api"
-    )
+def _provider_settings(settings: dict, provider_id: str, allow_legacy: bool) -> tuple[str, str, str, str, str, str]:
     providers = settings.get("rewrite_providers") if isinstance(settings.get("rewrite_providers"), dict) else {}
-    provider = providers.get(active_provider) if isinstance(providers.get(active_provider), dict) else {}
-    provider_name = (provider.get("name") or str(active_provider or "Rewrite API")).strip()
+    provider = providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else {}
+    provider_name = (provider.get("name") or str(provider_id or "Rewrite API")).strip()
 
-    legacy_api_key = settings.get("rewrite_api_key", "")
+    legacy_api_key = settings.get("rewrite_api_key", "") if allow_legacy else ""
     provider_api_key = provider.get("api_key", "")
     use_provider_fields = bool(str(provider_api_key or "").strip())
     api_key = (
         provider_api_key
         or legacy_api_key
-        or os.environ.get("REWRITE_API_KEY", "")
+        or (os.environ.get("REWRITE_API_KEY", "") if allow_legacy else "")
     ).strip()
     if not api_key:
         raise RuntimeError(f"No rewrite API key configured in Settings for provider: {provider_name}.")
@@ -146,31 +140,41 @@ def _rewrite_settings() -> tuple[str, str, str, str, str, str]:
 
     api_url = (
         (provider.get("api_url") if use_provider_fields else "")
-        or settings.get("rewrite_api_url")
-        or os.environ.get("REWRITE_API_URL")
+        or (settings.get("rewrite_api_url") if allow_legacy else "")
+        or (os.environ.get("REWRITE_API_URL") if allow_legacy else "")
         or "https://a6api.com/v1/chat/completions"
     )
     model = (
         (provider.get("model") if use_provider_fields else "")
-        or settings.get("rewrite_model")
-        or os.environ.get("REWRITE_MODEL")
+        or (settings.get("rewrite_model") if allow_legacy else "")
+        or (os.environ.get("REWRITE_MODEL") if allow_legacy else "")
         or "gpt-5.5"
     )
     reasoning = (
         (provider.get("reasoning_effort") if use_provider_fields else "")
-        or settings.get("rewrite_reasoning_effort")
-        or os.environ.get("REWRITE_REASONING_EFFORT")
+        or (settings.get("rewrite_reasoning_effort") if allow_legacy else "")
+        or (os.environ.get("REWRITE_REASONING_EFFORT") if allow_legacy else "")
         or "high"
     )
     if str(reasoning).strip().lower() in ("", "none", "off", "false", "0"):
         reasoning = ""
     max_tokens_raw = (
         (provider.get("max_tokens") if use_provider_fields else "")
-        or settings.get("rewrite_max_tokens")
-        or os.environ.get("REWRITE_MAX_TOKENS")
+        or (settings.get("rewrite_max_tokens") if allow_legacy else "")
+        or (os.environ.get("REWRITE_MAX_TOKENS") if allow_legacy else "")
         or "12000"
     )
     return provider_name, api_url, api_key, model, reasoning, max_tokens_raw
+
+
+def _rewrite_settings() -> tuple[str, str, str, str, str, str]:
+    settings = config.load_settings()
+    active_provider = (
+        settings.get("rewrite_active_provider")
+        or os.environ.get("REWRITE_PROVIDER")
+        or "a6api"
+    )
+    return _provider_settings(settings, active_provider, allow_legacy=True)
 
 
 def _messages_to_responses_input(system: str, messages: list) -> str:
@@ -349,19 +353,63 @@ def call_rewrite_api(
     emit=None,
     step_label: str = "api",
 ) -> tuple[str, str]:
-    """Call the rewrite API (currently A6API/OpenAI-compatible)."""
-    provider_name, api_url, api_key, model, reasoning_effort, max_tokens_raw = _rewrite_settings()
-    return _call_openai_compatible(
-        provider_name=provider_name,
-        api_url=api_url,
-        api_key=api_key,
-        model=model,
-        system=system,
-        messages=messages,
-        timeout=timeout,
-        max_retries=max_retries,
-        emit=emit,
-        step_label=step_label,
-        reasoning_effort=reasoning_effort,
-        max_tokens_raw=max_tokens_raw,
+    """Call the primary rewrite provider, then an optional configured fallback."""
+    settings = config.load_settings()
+    primary_id = (
+        settings.get("rewrite_active_provider")
+        or os.environ.get("REWRITE_PROVIDER")
+        or "a6api"
     )
+    fallback_id = str(settings.get("rewrite_fallback_provider") or "").strip()
+
+    try:
+        provider_name, api_url, api_key, model, reasoning_effort, max_tokens_raw = _provider_settings(
+            settings, primary_id, allow_legacy=True
+        )
+        return _call_openai_compatible(
+            provider_name=provider_name,
+            api_url=api_url,
+            api_key=api_key,
+            model=model,
+            system=system,
+            messages=messages,
+            timeout=timeout,
+            max_retries=max_retries,
+            emit=emit,
+            step_label=step_label,
+            reasoning_effort=reasoning_effort,
+            max_tokens_raw=max_tokens_raw,
+        )
+    except Exception as primary_error:
+        if not fallback_id or fallback_id == primary_id:
+            raise
+        print(
+            f"[api_client] Primary provider {primary_id!r} failed after retries; "
+            f"switching to fallback {fallback_id!r}",
+            flush=True,
+        )
+        if emit:
+            emit(step_label, f"Primary provider failed; switching to fallback {fallback_id}")
+        try:
+            provider_name, api_url, api_key, model, reasoning_effort, max_tokens_raw = _provider_settings(
+                settings, fallback_id, allow_legacy=False
+            )
+            return _call_openai_compatible(
+                provider_name=provider_name,
+                api_url=api_url,
+                api_key=api_key,
+                model=model,
+                system=system,
+                messages=messages,
+                timeout=timeout,
+                max_retries=max_retries,
+                emit=emit,
+                step_label=step_label,
+                reasoning_effort=reasoning_effort,
+                max_tokens_raw=max_tokens_raw,
+            )
+        except Exception as fallback_error:
+            raise RuntimeError(
+                f"Primary rewrite provider {primary_id!r} failed: {primary_error}; "
+                f"fallback provider {fallback_id!r} also failed: {fallback_error}"
+            ) from fallback_error
