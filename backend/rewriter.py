@@ -1,7 +1,9 @@
 import json
+import hashlib
 import os
 import re
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -49,6 +51,126 @@ def _rewrite_chunk_count() -> int:
 
 NUM_CHUNKS = 6
 _LAST_REWRITTEN_PARTS = []
+REWRITE_CACHE_VERSION = 1
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _atomic_write_json(path: str, data: dict) -> None:
+    """Write cache state without leaving a half-written JSON file after interruption."""
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".part", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        last_error = None
+        for attempt in range(4):
+            try:
+                os.replace(tmp_path, path)
+                return
+            except PermissionError as exc:
+                last_error = exc
+                time.sleep(0.25 * (attempt + 1))
+        raise last_error
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _safe_save_cache(path: str, data: dict) -> None:
+    try:
+        _atomic_write_json(path, data)
+    except Exception as exc:
+        print(f"[rewriter] Cache write warning ({path}): {exc}", flush=True)
+
+
+def _rewrite_cache_blueprint(
+    transcript: str,
+    language: str,
+    video_title: str,
+    feedback: str,
+    test_mode: bool,
+) -> dict:
+    prompt_file = REWRITE_PROMPT_TEST_FILE if test_mode else REWRITE_PROMPT_FILE
+    system_prompt = _load_prompt(prompt_file, language)
+    chunk_count = _rewrite_chunk_count()
+    chunks = _split_into_chunks(transcript, chunk_count)
+    signature_payload = {
+        "version": REWRITE_CACHE_VERSION,
+        "transcript_sha256": _sha256_text(transcript),
+        "system_prompt_sha256": _sha256_text(system_prompt),
+        "language": language,
+        "video_title": video_title,
+        "feedback": feedback,
+        "test_mode": bool(test_mode),
+        "chunk_count": chunk_count,
+        "chunk_sha256": [_sha256_text(chunk) for chunk in chunks],
+        "length_ratios": [MIN_LENGTH_RATIO, TARGET_LENGTH_RATIO, MAX_LENGTH_RATIO],
+    }
+    signature = _sha256_text(json.dumps(signature_payload, ensure_ascii=False, sort_keys=True))
+    return {
+        "signature": signature,
+        "signature_payload": signature_payload,
+        "system_prompt": system_prompt,
+        "chunks": chunks,
+    }
+
+
+def _rewrite_cache_path(cache_dir: str | None) -> str | None:
+    return os.path.join(cache_dir, "rewrite_chunks.json") if cache_dir else None
+
+
+def _load_rewrite_cache(cache_path: str | None, blueprint: dict) -> dict:
+    empty = {
+        "version": REWRITE_CACHE_VERSION,
+        "signature": blueprint["signature"],
+        "signature_payload": blueprint["signature_payload"],
+        "entries": [],
+    }
+    if not cache_path or not os.path.exists(cache_path):
+        return empty
+    try:
+        with open(cache_path, encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("version") != REWRITE_CACHE_VERSION or data.get("signature") != blueprint["signature"]:
+            print("[rewriter] Chunk cache belongs to different rewrite input; starting fresh", flush=True)
+            return empty
+        entries = data.get("entries")
+        if not isinstance(entries, list):
+            return empty
+        valid_entries = []
+        chunks = blueprint["chunks"]
+        for index, entry in enumerate(entries[:len(chunks)]):
+            if not isinstance(entry, dict):
+                break
+            if entry.get("source_sha256") != _sha256_text(chunks[index]):
+                break
+            if not isinstance(entry.get("part"), str) or not entry["part"].strip():
+                break
+            valid_entries.append(entry)
+        data["entries"] = valid_entries
+        return data
+    except Exception as exc:
+        print(f"[rewriter] Chunk cache ignored: {exc}", flush=True)
+        return empty
+
+
+def _local_context_summary(text: str, max_chars: int = 600) -> str:
+    """Build continuity context locally so a chunk does not spend another model request."""
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
+    if not sentences:
+        return text[-max_chars:]
+    candidates = sentences[-4:]
+    result = " ".join(candidates)
+    return result[-max_chars:]
 
 
 def _extract_code_block(text: str) -> str:
@@ -101,24 +223,6 @@ def _split_into_chunks(transcript: str, num_chunks: int = NUM_CHUNKS) -> list:
         start = best
     chunks.append(transcript[start:].strip())
     return chunks
-
-
-def _get_summary(text: str, language: str, timeout: int = 120) -> str:
-    """
-    Швидкий summary у 2-3 реченнях — щоб наступний chunk знав контекст.
-    """
-    system = (
-        "You write brief 2-3 sentence summaries of transcript chunks. "
-        "Focus on: who is involved, what happened, key facts. "
-        "Reply with summary text only, no preamble."
-    )
-    user_msg = f"Language: {language}\n\nSummarize in 2-3 sentences:\n\n{text}"
-    try:
-        result, _ = _call_claude(system, [{"role": "user", "content": user_msg}], timeout=timeout)
-        return result.strip()[:600]
-    except Exception as e:
-        print(f"[rewriter] Summary failed ({e}), using first 300 chars", flush=True)
-        return text[:300]
 
 
 def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
@@ -243,7 +347,8 @@ def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
 
 
 def _rewrite_script(transcript: str, language: str, video_title: str,
-                    feedback: str = "", test_mode: bool = False) -> str:
+                    feedback: str = "", test_mode: bool = False,
+                    cache_dir: str | None = None) -> str:
     """
     Rewrite transcript у NUM_CHUNKS частин.
     Кожна частина шле окремий запит з коротким контекстом попередніх.
@@ -254,16 +359,29 @@ def _rewrite_script(transcript: str, language: str, video_title: str,
     orig_len = len(transcript)
     min_chars, max_chars = _length_bounds(orig_len)
 
-    prompt_file = REWRITE_PROMPT_TEST_FILE if test_mode else REWRITE_PROMPT_FILE
-    system = _load_prompt(prompt_file, language)
-
-    chunk_count = _rewrite_chunk_count()
-    chunks = _split_into_chunks(transcript, chunk_count)
+    blueprint = _rewrite_cache_blueprint(
+        transcript=transcript,
+        language=language,
+        video_title=video_title,
+        feedback=feedback,
+        test_mode=test_mode,
+    )
+    system = blueprint["system_prompt"]
+    chunks = blueprint["chunks"]
+    chunk_count = len(chunks)
+    cache_path = _rewrite_cache_path(cache_dir)
+    cache_state = _load_rewrite_cache(cache_path, blueprint)
+    cached_entries = cache_state["entries"]
     print(
         f"[rewriter] Split transcript into {len(chunks)} chunks "
         f"(requested {chunk_count}): {[len(c) for c in chunks]} chars",
         flush=True,
     )
+    if cached_entries:
+        print(
+            f"[rewriter] Resuming from chunk cache: {len(cached_entries)}/{len(chunks)} complete",
+            flush=True,
+        )
 
     rewritten_parts = []
     prev_summary = ""
@@ -279,37 +397,57 @@ def _rewrite_script(transcript: str, language: str, video_title: str,
         else:
             position = "middle"
 
-        print(f"[rewriter] Chunk {i+1}/{len(chunks)} ({position}, {len(chunk)} chars)...", flush=True)
-        part = _rewrite_chunk(
-            chunk=chunk,
-            position=position,
-            language=language,
-            video_title=video_title,
-            system_prompt=system,
-            prev_summary=prev_summary,
-            prev_tail=prev_tail,
-            feedback=feedback if i == 0 else "",  # feedback тільки в перший
-            timeout=300,
-            total_len=orig_len,
-            total_min=min_chars,
-            total_max=max_chars,
-            total_target=int(orig_len * TARGET_LENGTH_RATIO),
-        )
-        print(f"[rewriter]   → rewrote to {len(part)} chars", flush=True)
+        if i < len(cached_entries):
+            entry = cached_entries[i]
+            part = entry["part"]
+            print(
+                f"[rewriter] Chunk {i+1}/{len(chunks)} cached ({len(part)} chars)",
+                flush=True,
+            )
+        else:
+            print(f"[rewriter] Chunk {i+1}/{len(chunks)} ({position}, {len(chunk)} chars)...", flush=True)
+            part = _rewrite_chunk(
+                chunk=chunk,
+                position=position,
+                language=language,
+                video_title=video_title,
+                system_prompt=system,
+                prev_summary=prev_summary,
+                prev_tail=prev_tail,
+                feedback=feedback if i == 0 else "",  # feedback тільки в перший
+                timeout=300,
+                total_len=orig_len,
+                total_min=min_chars,
+                total_max=max_chars,
+                total_target=int(orig_len * TARGET_LENGTH_RATIO),
+            )
+            print(f"[rewriter]   → rewrote to {len(part)} chars", flush=True)
         rewritten_parts.append(part)
 
         # Готуємо контекст для наступного chunk
         if i < len(chunks) - 1:
-            # summary всього що вже переписано (компактно)
-            combined_so_far = "\n\n".join(rewritten_parts)
-            # Беремо summary тільки якщо накопичили багато — інакше просто перші 500 chars
-            if len(combined_so_far) > 2000:
-                prev_summary = _get_summary(combined_so_far[-3000:], language)
+            entry = cached_entries[i] if i < len(cached_entries) else None
+            cached_summary = entry.get("next_summary") if entry else None
+            cached_tail = entry.get("next_tail") if entry else None
+            if isinstance(cached_summary, str) and isinstance(cached_tail, str):
+                prev_summary = cached_summary
+                prev_tail = cached_tail
             else:
-                prev_summary = combined_so_far[:500]
-            # Останні 2-3 речення попереднього chunk — для плавного переходу
-            sents = re.split(r"(?<=[.!?])\s+", part.strip())
-            prev_tail = " ".join(sents[-3:])[:400]
+                combined_so_far = "\n\n".join(rewritten_parts)
+                prev_summary = _local_context_summary(combined_so_far[-3000:])
+                sents = re.split(r"(?<=[.!?])\s+", part.strip())
+                prev_tail = " ".join(sents[-3:])[-400:]
+
+        if i >= len(cached_entries):
+            cache_state["entries"].append({
+                "source_sha256": _sha256_text(chunk),
+                "part": part,
+                "next_summary": prev_summary if i < len(chunks) - 1 else "",
+                "next_tail": prev_tail if i < len(chunks) - 1 else "",
+            })
+            if cache_path:
+                _safe_save_cache(cache_path, cache_state)
+                print(f"[rewriter]   -> chunk {i+1} cached", flush=True)
 
     full_script = "\n\n".join(rewritten_parts)
     _LAST_REWRITTEN_PARTS = list(rewritten_parts)
@@ -849,6 +987,7 @@ def _rewrite_metadata(
     source_title: str,
     source_description: str,
     source_tags: list,
+    cache_dir: str | None = None,
 ) -> dict:
     """
     Generate metadata in 3 SEPARATE Opus calls (title / description / tags).
@@ -860,6 +999,39 @@ def _rewrite_metadata(
     """
     system_full = _load_prompt(METADATA_PROMPT_FILE, language)
     tags_str = ", ".join(source_tags) if source_tags else ""
+    metadata_cache_path = os.path.join(cache_dir, "rewrite_metadata_parts.json") if cache_dir else None
+    metadata_signature = _sha256_text(json.dumps({
+        "version": 1,
+        "system_prompt_sha256": _sha256_text(system_full),
+        "language": language,
+        "source_title": source_title,
+        "source_description": source_description,
+        "source_tags": source_tags or [],
+    }, ensure_ascii=False, sort_keys=True))
+    metadata_cache = {"version": 1, "signature": metadata_signature, "parts": {}}
+    if metadata_cache_path and os.path.exists(metadata_cache_path):
+        try:
+            with open(metadata_cache_path, encoding="utf-8") as f:
+                loaded_cache = json.load(f)
+            if loaded_cache.get("version") == 1 and loaded_cache.get("signature") == metadata_signature:
+                if isinstance(loaded_cache.get("parts"), dict):
+                    metadata_cache = loaded_cache
+            else:
+                print("[rewriter] Metadata cache belongs to different input; starting fresh", flush=True)
+        except Exception as exc:
+            print(f"[rewriter] Metadata cache ignored: {exc}", flush=True)
+
+    def metadata_part(label: str, user_msg: str, required_marker: str) -> str:
+        cached = metadata_cache["parts"].get(label)
+        if isinstance(cached, str) and required_marker.lower() in cached.lower():
+            print(f"[rewriter]   -> {label} cached", flush=True)
+            return cached
+        raw = _call_metadata_part(system_full, label, user_msg, required_marker)
+        metadata_cache["parts"][label] = raw
+        if metadata_cache_path:
+            _safe_save_cache(metadata_cache_path, metadata_cache)
+            print(f"[rewriter]   -> {label} cached for retry safety", flush=True)
+        return raw
 
     # Shared style guidance used in every mini-call.
     style = (
@@ -889,7 +1061,7 @@ def _rewrite_metadata(
         f"5. Title in {language} || Ukrainian translation\n"
     )
     print("[rewriter]   → titles...", flush=True)
-    titles_raw = _call_metadata_part(system_full, "titles", title_user, "### Optimized Titles:")
+    titles_raw = metadata_part("titles", title_user, "### Optimized Titles:")
 
     # ── Call 2: description ───────────────────────────────────────────────────
     desc_user = (
@@ -902,7 +1074,7 @@ def _rewrite_metadata(
         f"<the rewritten description here>\n"
     )
     print("[rewriter]   → description...", flush=True)
-    desc_raw = _call_metadata_part(system_full, "description", desc_user, "### Optimized Description:")
+    desc_raw = metadata_part("description", desc_user, "### Optimized Description:")
 
     # ── Call 3: tags ──────────────────────────────────────────────────────────
     tags_user = (
@@ -917,7 +1089,7 @@ def _rewrite_metadata(
         f"tag1, tag2, tag3, ...\n"
     )
     print("[rewriter]   → tags...", flush=True)
-    tags_raw_resp = _call_metadata_part(system_full, "tags", tags_user, "### Optimized Tags:")
+    tags_raw_resp = metadata_part("tags", tags_user, "### Optimized Tags:")
 
     # Combine the three fragments into the format _parse_metadata_output expects.
     combined = (
@@ -963,6 +1135,7 @@ def rewrite_all(
     source_description: str = "",
     source_tags: list = None,
     test_mode: bool = False,
+    cache_dir: str | None = None,
 ) -> dict:
     """
     Call 1: rewrite script (rewrite_prompt.txt) з quality check і retry.
@@ -978,13 +1151,39 @@ def rewrite_all(
     soft_max_chars = _soft_max_chars(orig_len)
     settings = config.load_settings()
     skip_rewrite = not bool(settings.get("rewrite_script_enabled", True))
+    rewrite_blueprint = None
+    rewrite_cache_state = None
+    rewrite_cache_file = None
+    cached_final_script = ""
+    if not skip_rewrite and cache_dir:
+        rewrite_blueprint = _rewrite_cache_blueprint(
+            transcript=transcript,
+            language=language_name,
+            video_title=source_title,
+            feedback="",
+            test_mode=test_mode,
+        )
+        rewrite_cache_file = _rewrite_cache_path(cache_dir)
+        rewrite_cache_state = _load_rewrite_cache(rewrite_cache_file, rewrite_blueprint)
+        candidate = rewrite_cache_state.get("final_script")
+        if isinstance(candidate, str) and candidate.strip():
+            cached_final_script = candidate
 
     if skip_rewrite:
         print("[rewriter] script rewrite disabled: using original transcript as script", flush=True)
         script = transcript.strip()
+    elif cached_final_script:
+        script = cached_final_script
+        print(f"[rewriter] Final script cached ({len(script)} chars)", flush=True)
     elif test_mode:
         print("[rewriter] TEST MODE: using short prompt (~750 words), skipping quality check", flush=True)
-        script = _rewrite_script(transcript, language_name, source_title, test_mode=True)
+        script = _rewrite_script(
+            transcript,
+            language_name,
+            source_title,
+            test_mode=True,
+            cache_dir=cache_dir,
+        )
         print(f"[rewriter] TEST MODE: script done ({len(script)} chars)", flush=True)
     else:
         print(
@@ -1007,7 +1206,14 @@ def rewrite_all(
                 + (f" (feedback: {feedback[:80]}...)" if feedback else ""),
                 flush=True,
             )
-            script = _rewrite_script(transcript, language_name, source_title, feedback=feedback, test_mode=False)
+            script = _rewrite_script(
+                transcript,
+                language_name,
+                source_title,
+                feedback=feedback,
+                test_mode=False,
+                cache_dir=cache_dir,
+            )
 
             # If the model overshot the max length, compress the whole script with an LLM
             # pass instead of cutting off sentences from the end.
@@ -1166,6 +1372,13 @@ def rewrite_all(
                 flush=True,
             )
 
+    if not skip_rewrite and not cached_final_script and rewrite_cache_file and rewrite_cache_state is not None:
+        # Reload first so entries written by _rewrite_script are preserved.
+        rewrite_cache_state = _load_rewrite_cache(rewrite_cache_file, rewrite_blueprint)
+        rewrite_cache_state["final_script"] = script
+        _safe_save_cache(rewrite_cache_file, rewrite_cache_state)
+        print("[rewriter] Final script cached for retry safety", flush=True)
+
     skip_metadata = not bool(settings.get("rewrite_metadata_enabled", True))
     if skip_metadata:
         print("[rewriter] metadata rewrite disabled: using source metadata without rewrite", flush=True)
@@ -1183,6 +1396,7 @@ def rewrite_all(
             source_title       = source_title,
             source_description = source_description,
             source_tags        = source_tags or [],
+            cache_dir          = cache_dir,
         )
 
     return {

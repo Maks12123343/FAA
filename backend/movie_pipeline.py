@@ -1429,6 +1429,7 @@ def produce(prepare_id: str, movie_name: str, language: str, emit=None,
             source_description  = state.get("source_description", ""),
             source_tags         = state.get("source_tags", []),
             test_mode           = test_mode,
+            cache_dir           = proj_dir,
         )
         script = result["script"]
         if len(script.split()) < 100:

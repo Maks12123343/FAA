@@ -356,6 +356,7 @@ def produce(prepare_id: str, youtube_urls: list, language: str, emit=None) -> di
             source_title       = top_video["title"],
             source_description = source_meta.get("description", ""),
             source_tags        = source_meta.get("tags", []),
+            cache_dir          = project_dir,
         )
 
         script      = rewrite_result.get("script", "")
