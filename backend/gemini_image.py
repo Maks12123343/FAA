@@ -87,6 +87,15 @@ def _normalize_png(data: bytes) -> bytes:
         raise RuntimeError("Gemini bridge returned an unreadable image") from exc
 
 
+def is_valid_thumbnail(path: str) -> bool:
+    try:
+        with Image.open(path) as image:
+            image.load()
+            return image.format == "PNG" and image.size == THUMBNAIL_SIZE
+    except Exception:
+        return False
+
+
 def generate_thumbnail(prompt: str, output_path: str, emit=None) -> bool:
     """Generate and atomically save a thumbnail. Returns False when disabled."""
     cfg = _settings()
@@ -113,7 +122,7 @@ def generate_thumbnail(prompt: str, output_path: str, emit=None) -> bool:
         "Accept": "application/json",
         "User-Agent": "FAA/1.0",
     }
-    _emit(emit, "Generating thumbnail through Gemini Web...")
+    _emit(emit, "Generating thumbnail through Google Flow...")
     response = requests.post(endpoint, json=payload, headers=headers, timeout=cfg["timeout"])
     if response.status_code >= 400:
         detail = (response.text or "")[:500]
@@ -136,5 +145,7 @@ def generate_thumbnail(prompt: str, output_path: str, emit=None) -> bool:
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
-    _emit(emit, f"Gemini thumbnail saved: {output_path}")
+    if not is_valid_thumbnail(output_path):
+        raise RuntimeError("Saved thumbnail failed the 1920x1080 PNG validation")
+    _emit(emit, f"Google Flow thumbnail saved at 1920x1080: {output_path}")
     return True

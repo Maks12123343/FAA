@@ -623,15 +623,31 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
             print(f"[war_pipeline] thumbnail step failed: {_e!r}", flush=True)
     # ---- end thumbnail ----
     _thumb_image_path = os.path.join(proj_dir, "thumbnail_generated.png")
-    if _thumb_prompt and bool(_settings.get("gemini_image_enabled", False)):
-        if os.path.exists(_thumb_image_path):
-            log("thumbnail_image", "Gemini thumbnail cached.")
+    _thumbnail_enabled = bool(_settings.get("gemini_image_enabled", False))
+    if _thumbnail_enabled and not manual_mode and not bool(
+        _settings.get("rewrite_thumbnail_enabled", True)
+    ):
+        raise RuntimeError(
+            "Google Flow is enabled, but thumbnail prompt rewriting is disabled in Settings."
+        )
+    if _thumbnail_enabled and not _skip_thumbnail:
+        if not _thumb_prompt:
+            raise RuntimeError(
+                "Thumbnail generation is enabled, but the thumbnail prompt could not be created."
+            )
+        if os.path.exists(_thumb_image_path) and gemini_image.is_valid_thumbnail(_thumb_image_path):
+            log("thumbnail_image", "Google Flow thumbnail cached.")
         else:
+            if os.path.exists(_thumb_image_path):
+                os.remove(_thumb_image_path)
+                log("thumbnail_image", "Invalid cached thumbnail removed.")
             try:
                 gemini_image.generate_thumbnail(_thumb_prompt, _thumb_image_path, emit=emit)
             except Exception as _e:
-                # Image generation is optional and must never abort video production.
-                log("thumbnail_image", f"Gemini image generation skipped: {_e}")
+                # A checked Flow option means the finished project must contain
+                # the image. Raising here lets the language-level retry reuse the
+                # cached script/metadata/prompt and retry only the missing image.
+                raise RuntimeError(f"Google Flow thumbnail generation failed: {_e}") from _e
     mark_timing("thumbnail")
 
     # ── TTS ────────────────────────────────────────────────────────────────────

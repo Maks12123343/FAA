@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -247,13 +248,20 @@ def _thumbnail_url(args, project_id: str) -> str:
 
 
 def _validate_image(path: Path) -> None:
-    header = path.read_bytes()[:16]
-    if not (
-        header.startswith(b"\x89PNG\r\n\x1a\n")
-        or header.startswith(b"\xff\xd8\xff")
-        or header.startswith(b"RIFF")
-    ):
-        raise RuntimeError("invalid thumbnail image")
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            image.verify()
+        with Image.open(path) as image:
+            if image.size != (1920, 1080):
+                raise RuntimeError(
+                    f"invalid thumbnail dimensions: {image.size[0]}x{image.size[1]}"
+                )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"invalid thumbnail image: {exc}") from exc
 
 
 def _validate_mp4(path: Path) -> None:
@@ -353,16 +361,27 @@ def _run_once(args) -> int:
     for item in projects:
         pid = item["project_id"]
         dest_dir = None
+        staged_paths = []
         try:
             item = _project_metadata(args, pid)
             lang_folder = _language_folder(item)
             dest_dir = batch_dir / lang_folder
             dest_video, dest_meta, dest_info, dest_thumbnail = _dest_paths(dest_dir)
 
+            # Keep the final names invisible until the complete package has
+            # downloaded and validated. A failed thumbnail must not leave a
+            # finished video behind and force the retry into video_2.mp4.
+            token = uuid.uuid4().hex
+            stage_video = dest_dir / f".{token}.video.stage"
+            stage_meta = dest_dir / f".{token}.metadata.stage"
+            stage_info = dest_dir / f".{token}.project.stage"
+            stage_thumbnail = dest_dir / f".{token}.thumbnail.stage"
+            staged_paths = [stage_video, stage_meta, stage_info, stage_thumbnail]
+
             print(f"[download] {pid} -> {dest_dir}")
             _download_file(
                 _video_url(args, pid),
-                dest_video,
+                stage_video,
                 args.retries,
                 args.download_timeout,
                 validator=_validate_mp4,
@@ -370,14 +389,22 @@ def _run_once(args) -> int:
             if item.get("thumbnail_image_url"):
                 _download_file(
                     urllib.parse.urljoin(args.base_url.rstrip("/") + "/", item["thumbnail_image_url"]),
-                    dest_thumbnail,
+                    stage_thumbnail,
                     args.retries,
                     min(args.download_timeout, 300),
                     accept="image/png,image/jpeg,image/webp,*/*",
                     validator=_validate_image,
                 )
-            dest_meta.write_text(_metadata_text(item), encoding="utf-8")
-            dest_info.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
+            stage_meta.write_text(_metadata_text(item), encoding="utf-8")
+            stage_info.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            if item.get("thumbnail_image_url"):
+                stage_thumbnail.replace(dest_thumbnail)
+            stage_meta.replace(dest_meta)
+            stage_info.replace(dest_info)
+            # Publish the video last. The ready package is therefore never
+            # mistaken for a completed download after a mid-commit interruption.
+            stage_video.replace(dest_video)
 
             state.setdefault("downloaded", {})[pid] = {
                 "language": item.get("language", ""),
@@ -391,12 +418,24 @@ def _run_once(args) -> int:
             downloaded += 1
             print(f"[done] {lang_folder}")
         except KeyboardInterrupt:
+            for staged in staged_paths:
+                try:
+                    staged.unlink(missing_ok=True)
+                    staged.with_name(staged.name + ".part").unlink(missing_ok=True)
+                except OSError:
+                    pass
             if dest_dir is not None:
                 _prune_empty_dirs(dest_dir, out_dir)
             raise
         except Exception as e:
             failed += 1
             print(f"[error] {pid}: {e}", file=sys.stderr)
+            for staged in staged_paths:
+                try:
+                    staged.unlink(missing_ok=True)
+                    staged.with_name(staged.name + ".part").unlink(missing_ok=True)
+                except OSError:
+                    pass
             if dest_dir is not None:
                 _prune_empty_dirs(dest_dir, out_dir)
 
