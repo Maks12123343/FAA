@@ -75,12 +75,12 @@ DEFAULT_SETTINGS = {
     "vertex_location": "us-central1",
     "gemini_model": "gemini-2.5-flash",
 
-    # Gemini Web image bridge (local service; Google cookies stay outside FAA settings)
+    # Google Flow image bridge (local service; browser profile stays outside the repo)
     "gemini_image_enabled": False,
     "gemini_image_bridge_url": "http://127.0.0.1:4981",
     "gemini_image_api_key": "",
-"gemini_image_model": "gemini-3.1-flash-image",
-    "gemini_image_timeout": 360,
+    "gemini_image_model": "flow-nano-pro",
+    "gemini_image_timeout": 600,
 
     # Automatic download of ready projects (runs locally on the client machine)
     "auto_download_enabled": False,
@@ -230,7 +230,7 @@ def _coerce_settings(data: dict) -> dict:
                 if key == "rewrite_chunks":
                     val = min(10, val)
                 if key == "gemini_image_timeout":
-                    val = min(900, val)
+                    val = min(1800, val)
                 data[key] = val
             except (TypeError, ValueError):
                 data.pop(key, None)

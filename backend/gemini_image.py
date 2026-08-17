@@ -1,4 +1,4 @@
-"""FAA client for the local Gemini Web image bridge."""
+"""FAA client for the local Google Flow image bridge."""
 
 import base64
 import binascii
@@ -42,8 +42,8 @@ def _settings():
             or bridge_env.get("LOCAL_API_KEY")
             or os.environ.get("LOCAL_API_KEY", "")
         ).strip(),
-        "model": str(settings.get("gemini_image_model", "gemini-3.1-flash-image")).strip(),
-        "timeout": max(30, min(900, int(settings.get("gemini_image_timeout", 360) or 360))),
+        "model": str(settings.get("gemini_image_model", "flow-nano-pro")).strip(),
+        "timeout": max(600, min(1800, int(settings.get("gemini_image_timeout", 600) or 600))),
     }
 
 

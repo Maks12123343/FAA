@@ -193,13 +193,13 @@
 </div>
 
 <div class="card">
-  <h2>Gemini Web Image Bridge</h2>
+  <h2>Google Flow Image Bridge</h2>
   <p style="color:#aaa;font-size:13px;margin-bottom:16px">
-    Optional local image generation for YouTube thumbnails. Google session cookies stay in the bridge .env and are never stored here.
+    Local YouTube thumbnail generation through a dedicated signed-in Chrome profile. Google cookies are kept by Chrome, not in FAA settings.
   </p>
   <label style="display:flex;align-items:center;gap:10px;color:#ddd;margin:0 0 12px">
     <input type="checkbox" id="gemini_image_enabled" {% if settings.gemini_image_enabled %}checked{% endif %} style="width:auto">
-    Generate thumbnail image with Gemini Web
+    Generate thumbnail image with Google Flow
   </label>
   <div class="grid-2">
     <div class="field"><label>Bridge URL</label>
@@ -209,9 +209,13 @@
   </div>
   <div class="grid-2">
     <div class="field"><label>Image Model</label>
-      <input type="text" id="gemini_image_model" value="{{ settings.gemini_image_model or 'gemini-3.1-flash-image' }}"></div>
+      <select id="gemini_image_model">
+        <option value="flow-nano-pro" {% if settings.gemini_image_model in ['flow-nano-pro', 'gemini-3.1-flash-image', 'gemini-3-pro-image-preview', 'gemini-3-pro-image-preview-11-2025', ''] %}selected{% endif %}>Nano Banana Pro</option>
+        <option value="flow-nano2" {% if settings.gemini_image_model == 'flow-nano2' %}selected{% endif %}>Nano Banana 2</option>
+        <option value="flow-image4" {% if settings.gemini_image_model == 'flow-image4' %}selected{% endif %}>Imagen 4</option>
+      </select></div>
     <div class="field"><label>Timeout (seconds)</label>
-      <input type="text" id="gemini_image_timeout" value="{{ settings.gemini_image_timeout or 360 }}"></div>
+      <input type="text" id="gemini_image_timeout" value="{{ settings.gemini_image_timeout or 600 }}"></div>
   </div>
 </div>
 

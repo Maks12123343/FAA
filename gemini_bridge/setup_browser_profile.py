@@ -1,53 +1,45 @@
-"""Create a persistent, separate Chrome profile for the Gemini bridge."""
+"""Cross-platform one-time Google Flow profile setup."""
 
 from __future__ import annotations
 
 import os
 import subprocess
+import sys
+from pathlib import Path
 
-DEFAULT_PROFILE = os.path.join(
-    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
-    "FAA",
-    "gemini_browser_profile",
-)
-PROFILE = os.path.abspath(
-    os.path.expandvars(os.environ.get("GEMINI_BROWSER_PROFILE", DEFAULT_PROFILE))
-)
-GEMINI_URL = "https://gemini.google.com/app?hl=en"
+from dotenv import dotenv_values
 
 
-def _chrome_path() -> str | None:
-    candidates = [
-        os.path.join(os.environ.get("PROGRAMFILES", ""), "Google", "Chrome", "Application", "chrome.exe"),
-        os.path.join(os.environ.get("PROGRAMFILES(X86)", ""), "Google", "Chrome", "Application", "chrome.exe"),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
-    ]
-    return next((path for path in candidates if path and os.path.isfile(path)), None)
+ROOT = Path(__file__).resolve().parent
+VALUES = dotenv_values(ROOT / ".env")
+PROFILE = str(VALUES.get("FLOW_PROFILE") or "faa").strip()
+FLOW_HOME = os.path.abspath(os.path.expandvars(str(
+    VALUES.get("FLOW_HOME")
+    or Path(os.environ.get("LOCALAPPDATA", Path.home())) / "FAA" / "flow_browser"
+)))
 
 
 def main() -> int:
-    os.makedirs(PROFILE, exist_ok=True)
-    print(f"Gemini bridge profile: {PROFILE}")
-    chrome_path = _chrome_path()
-    if not chrome_path:
-        raise RuntimeError("Google Chrome was not found. Install Chrome first.")
-
-    print("Opening a normal Chrome window (not an automated browser).")
-    print("Sign in to Gemini, then CLOSE this dedicated Chrome window.")
-    chrome = subprocess.Popen([
-        chrome_path,
-        f"--user-data-dir={PROFILE}",
-        "--no-first-run",
-        "--no-default-browser-check",
-        GEMINI_URL,
-    ])
-    try:
-        input("Press Enter only after the dedicated Chrome window is closed...")
-    finally:
-        if chrome.poll() is None:
-            print("Chrome is still open. Close it before starting the bridge.")
-    print("Gemini browser profile saved. The bridge can now refresh this session automatically.")
-    return 0
+    env = os.environ.copy()
+    env.update({
+        "GFLOW_CLI_HOME": FLOW_HOME,
+        "GFLOW_CLI_PROFILE": PROFILE,
+        "GFLOW_CLI_HEADLESS": "false",
+    })
+    command = [
+        sys.executable, "-m", "gflow_cli", "auth", "login",
+        "--profile", PROFILE,
+        "--browser", "chrome",
+    ]
+    print("Opening a dedicated Chrome profile for Google Flow.")
+    result = subprocess.run(command, env=env, check=False)
+    if result.returncode:
+        return result.returncode
+    return subprocess.run(
+        [sys.executable, "-m", "gflow_cli", "auth", "status", "--profile", PROFILE],
+        env=env,
+        check=False,
+    ).returncode
 
 
 if __name__ == "__main__":

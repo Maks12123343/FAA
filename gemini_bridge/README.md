@@ -1,39 +1,68 @@
-# Gemini Web Image Bridge
+# Google Flow Image Bridge
 
-This is an optional local bridge for generating thumbnail images through the
-Gemini Web session. It binds to `127.0.0.1` and requires a separate local API
-key. Browser mode uses a separate persistent Chrome profile, so cookies do not
-need to be copied into the repository or refreshed manually before every image.
+This localhost-only bridge lets FAA generate YouTube thumbnails through the
+real Google Flow web application in a headed Chrome session. FAA keeps using
+the OpenAI-compatible `POST /v1/images/generations` endpoint on
+`127.0.0.1:4981`, while the bridge delegates browser automation to the pinned
+MIT-licensed `gflow-cli` driver.
 
-## Setup
+The Google login is stored outside the repository in a dedicated persistent
+Chrome profile. Chrome owns the cookie jar and refreshes an ordinary valid
+Google session automatically. No Google cookies, password, or 2FA secret are
+stored in `.env`.
 
-1. Copy `.env.example` to `.env`.
-2. Set a long random `LOCAL_API_KEY`.
-3. Run the one-time browser setup from the repository root:
+## One-time setup on the production PC
 
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File ".\gemini_bridge\setup_browser_profile.ps1"
-   ```
-
-   A separate **normal** Chrome window opens. Sign in to Gemini there, close
-   that dedicated window, and then press Enter in the PowerShell window. The
-   profile is stored outside the repository under
-   `%LOCALAPPDATA%\FAA\gemini_browser_profile`.
-4. Put the same `LOCAL_API_KEY` into FAA Settings under **Gemini Web Image
-   Bridge**, enable image generation, and save.
-
-The old `GEMINI_1PSID` and `GEMINI_1PSIDTS` cookie fields remain only as a
-fallback. With `GEMINI_BROWSER_MODE=auto`, an existing browser profile takes
-priority. If Google signs the profile out, sign in again in the same bridge
-window; no cookie copying is needed.
-
-Start the bridge and FAA together from the repository root with:
+From the FAA repository root:
 
 ```powershell
-.\start_faa_with_gemini.ps1
+powershell -ExecutionPolicy Bypass -File ".\gemini_bridge\setup_browser_profile.ps1"
 ```
 
-The bridge exposes only the local `/health`, `/v1/models`, and
-`/v1/images/generations` endpoints. Generated images are stored in each FAA
-project as `thumbnail_generated.png` and are included by the downloader as
-`thumbnail.png`.
+The script:
+
+1. Creates `gemini_bridge\.env` with a random local bridge key when missing.
+2. Installs the pinned Flow driver into the FAA Python environment.
+3. Opens a dedicated real Chrome profile.
+4. Waits while you sign in to Google and verifies the Flow session without
+   spending credits.
+
+Do not open that dedicated profile yourself while FAA is generating. Each Flow
+request opens a headed Chrome window with the same profile and closes it after
+the image is downloaded. The normal personal Chrome profile can stay open.
+
+## FAA settings
+
+Enable **Google Flow Image Bridge** and use:
+
+- Bridge URL: `http://127.0.0.1:4981`
+- Local Bridge API Key: the `LOCAL_API_KEY` value from `gemini_bridge\.env`
+- Image Model: `flow-nano-pro`
+- Timeout: `600`
+
+Flow is forced to one output at `16:9`. FAA then normalizes the returned image
+to exact `1920x1080` and saves it as `thumbnail_generated.png`.
+
+## Start
+
+Start Flow bridge and FAA together:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\start_faa_with_gemini.ps1"
+```
+
+## Session recovery
+
+Normal cookie expiry is handled by Chrome's persistent profile. The bridge
+also retries transient Flow/UI failures. If Google fully signs the account out
+or requires password/2FA again, unattended recovery is intentionally not
+attempted. Re-run the one-time setup command and sign in in the opened window.
+
+Useful checks:
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:4981/health"
+```
+
+Authenticated session status is available at `/auth/status` with the same
+local Bearer key used by FAA.
