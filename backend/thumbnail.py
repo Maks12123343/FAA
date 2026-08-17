@@ -11,58 +11,483 @@ from backend import languages as lang_utils
 THUMBNAIL_ATTEMPTS = 3
 
 ANALYSIS_PROMPT = """
-You are an expert visual analyst, reverse-prompt engineer, and YouTube thumbnail
-image-generation prompt writer.
+You are a professional visual reverse-engineering system for YouTube thumbnail generation.
 
-Analyze the provided reference thumbnail as a visual reference only. Analyze the
-actual pixels, not the apparent topic. Do not verify facts and do not claim that
-the scene is real. Reconstruct the CORE PHOTOGRAPHIC SCENE in enough detail that
-another image model could create a very similar news photograph.
+Your job is to analyze the PROVIDED REFERENCE IMAGE and write a highly accurate English image-generation prompt that reconstructs the reference as closely as possible.
 
-Inspect all of the following:
-- aspect ratio, full-frame 16:9 composition, camera height, distance, and angle;
-- foreground, middle ground, background, empty sky/terrain, and visual balance;
-- exact visual hierarchy and approximate frame positions and sizes of key objects;
-- the main subject, vehicles, buildings, roads, bridges, ships, aircraft, drones,
-  industrial or military equipment, and their orientation and interaction;
-- explosion location, fireball scale, flame shape, smoke density and direction,
-  debris, heat distortion, impact point, visible damage, and nearby scale cues;
-- terrain, architecture, vegetation, weather, haze, lighting, color palette,
-  shadows, reflections, sensor noise, motion blur, and realistic compression;
-- visible circles, arrows, labels, outlines, or other thumbnail effects.
+Your task is NOT to improve the composition.
+Your task is NOT to invent a better scene.
+Your task is NOT to reinterpret the story.
 
-If black bars are present, ignore them and reconstruct the underlying scene as a
-full 16:9 frame. Preserve the main hook and its scale. Do not turn a close,
-dramatic subject into a distant landscape. Identify specific-looking objects
-without inventing exact model numbers that are not visually clear. Warn against
-CGI, a movie poster, a game render, glossy AI art, or fantasy scenery when the
-reference is a realistic news/photo/drone still.
+**THE REFERENCE IMAGE IS THE SOURCE OF TRUTH.**
 
-Return exactly these four sections and nothing else:
+The generated MASTER PROMPT must preserve the visible image as literally as possible.
+
+---
+
+# CRITICAL RULE: REFERENCE FIRST
+
+Before describing anything, visually inspect the actual reference.
+
+Do not infer scene layout from the topic.
+
+Do not assume where objects "should" be.
+
+Do not reverse directions.
+
+Do not change camera side.
+
+Do not invent a different landscape.
+
+Do not redesign vehicles, bridges, ships, buildings, roads, or explosions unless the reference itself is visually ambiguous.
+
+When uncertain, use a slightly more generic description rather than inventing a specific detail.
+
+---
+
+# 1. BUILD A VISUAL COORDINATE MAP FIRST
+
+Internally divide the image into:
+
+- upper-left
+- upper-center
+- upper-right
+- center-left
+- center
+- center-right
+- lower-left
+- lower-center
+- lower-right
+
+Identify the exact approximate location of every major visual element.
+
+Determine:
+
+- where the main subject begins and ends;
+- where the road / bridge / ship / railway / coastline actually runs;
+- which direction vehicles face;
+- which direction the convoy travels;
+- where the explosion originates;
+- where the smoke rises;
+- where the highlighted drone is located;
+- which side contains foreground objects;
+- which side contains background objects.
+
+**Do not write the final prompt until these spatial relationships are consistent.**
+
+Before finalizing, verify:
+
+1. LEFT and RIGHT are correct.
+2. FOREGROUND and BACKGROUND are correct.
+3. The road / bridge / ship direction matches the image.
+4. The explosion is on the correct object and in the correct part of the frame.
+5. The drone is in the correct quadrant.
+6. The camera viewpoint matches the image.
+
+---
+
+# 2. PRESERVE THE ORIGINAL COMPOSITION
+
+The MASTER PROMPT must recreate the reference composition approximately 95–100%.
+
+Preserve:
+
+- main camera angle;
+- camera height;
+- camera side;
+- crop;
+- perspective;
+- focal distance;
+- dominant object positions;
+- road direction;
+- convoy direction;
+- ship direction;
+- bridge orientation;
+- explosion location;
+- smoke location;
+- drone position;
+- foreground/background balance.
+
+Do not intentionally mirror anything.
+
+Do not rotate the scene.
+
+Do not shift the main subject.
+
+Do not change the basic geometry.
+
+This first stage creates the ORIGINAL MASTER VERSION only.
+
+---
+
+# 3. DO NOT OVER-SPECIFY UNCERTAIN DETAILS
+
+Only describe exact vehicle, aircraft, drone, ship, weapon, or infrastructure details when they are visually clear.
+
+For example:
+
+If a truck appears to be a generic Soviet/Russian heavy military cargo truck, describe it that way.
+
+Do NOT invent a precise model unless the reference clearly supports it.
+
+If the drone payload is visible but unclear, describe:
+
+"visible attached payload"
+
+instead of inventing exact dimensions, mounting hardware, or warhead construction.
+
+Avoid unnecessary numerical constraints such as:
+
+- exact object percentages;
+- exact focal length;
+- exact meter distances;
+- exact vehicle counts when partially obscured.
+
+Use visual relationships instead:
+
+"large enough to remain clearly visible in thumbnail scale"
+
+"slightly smaller than"
+
+"occupying the upper-right portion"
+
+"close to the foreground"
+
+---
+
+# 4. MAIN SUBJECT
+
+Identify the actual dominant physical subject.
+
+Examples:
+
+- military convoy;
+- train;
+- warship;
+- bomber;
+- oil terminal;
+- bridge;
+- military base.
+
+Describe its:
+
+- exact approximate frame position;
+- orientation;
+- scale;
+- visible type;
+- colors;
+- wear;
+- damage;
+- relationship to the explosion.
+
+Do not substitute a different subject type.
+
+---
+
+# 5. VEHICLES AND EQUIPMENT
+
+Reproduce the visible vehicle/equipment mix as accurately as possible.
+
+Preserve:
+
+- approximate number visible;
+- foreground vehicle positions;
+- convoy density;
+- tank/truck distribution;
+- vehicle orientation;
+- vehicle colors;
+- whether vehicles are intact, burning, overturned, or destroyed.
+
+Do not add large new categories of vehicles that do not exist in the reference.
+
+Do not make all vehicles identical.
+
+Maintain physically realistic:
+
+- wheel placement;
+- tracks;
+- suspension;
+- contact with ground;
+- vehicle scale;
+- shadows;
+- perspective.
+
+---
+
+# 6. EXPLOSION
+
+If an explosion is present, reproduce its visual importance faithfully.
+
+Analyze:
+
+- exact impact location;
+- whether it originates from a vehicle, ship, aircraft, building, tank, roadway, bridge, storage tank, etc.;
+- width;
+- height;
+- flame geometry;
+- amount of visible white/yellow core;
+- orange flame lobes;
+- dark internal flame cavities;
+- lower fire connection to the target;
+- debris;
+- dust;
+- reflections.
+
+The explosion may preserve the slightly exaggerated YouTube-thumbnail scale visible in the reference.
+
+However:
+
+Do not make it dramatically larger than the reference.
+Do not make it smaller.
+Do not detach it from the target.
+Do not convert it into a nuclear blast.
+Do not invent a perfect mushroom cloud.
+
+---
+
+# 7. DAMAGE MUST MATCH THE REFERENCE
+
+Carefully distinguish between:
+
+- main blast damage;
+- previously damaged vehicles or structures;
+- secondary fires;
+- older smoke;
+- debris;
+- intact objects.
+
+If the reference shows several damaged vehicles before or behind the main explosion, preserve them.
+
+If the main aircraft itself is damaged, describe the aircraft itself as damaged.
+
+Do not mistakenly place all damage beside the subject.
+
+If the reference shows an intact foreground vehicle, keep it intact.
+
+---
+
+# 8. SMOKE
+
+Match:
+
+- density;
+- height;
+- width;
+- direction;
+- number of smoke sources;
+- color layers;
+- interaction with the background.
+
+Describe only the smoke direction actually visible.
+
+Do not automatically use "drifting left" or "drifting right".
+
+Infer it from the reference.
+
+---
+
+# 9. DRONE / AIRCRAFT
+
+Identify the actual visible type.
+
+Possible types include:
+
+- FPV quadcopter;
+- fixed-wing one-way attack drone;
+- reconnaissance UAV.
+
+Preserve the correct type.
+
+Do not transform:
+
+FPV drone → fixed-wing aircraft
+fixed-wing drone → FPV quadcopter
+drone → fighter jet
+drone → helicopter
+
+Describe:
+
+- frame quadrant;
+- approximate orientation;
+- visible top / side / underside;
+- banking;
+- descent direction;
+- target relationship.
+
+If the drone is descending toward the target, explicitly describe the downward trajectory.
+
+If a yellow oval surrounds the drone, preserve exactly ONE yellow oval.
+
+Do not invent arrows, labels, text, or additional annotations.
+
+---
+
+# 10. LOCATION
+
+Describe the actual visible environment.
+
+Do not exaggerate environmental adjectives.
+
+For example, if the reference shows dry rolling grassland, use:
+
+"open dry rolling steppe with muted grass and sparse vegetation"
+
+Do NOT automatically change this into:
+
+"barren treeless highland"
+
+unless the reference truly looks that way.
+
+Match:
+
+- terrain;
+- vegetation;
+- water;
+- hills;
+- road surface;
+- buildings;
+- industrial infrastructure;
+- weather;
+- sky;
+- haze.
+
+---
+
+# 11. PHOTOGRAPHIC CHARACTER
+
+The generated image must look like the reference photographically.
+
+If the reference looks like a compressed online news photograph, preserve:
+
+- slightly imperfect sharpness;
+- mild JPEG compression;
+- natural sensor noise;
+- restrained saturation;
+- atmospheric haze;
+- moderate detail falloff;
+- realistic motion blur;
+- natural shadows;
+- physically believable smoke and fire;
+- slightly clipped explosion highlights;
+- imperfect background clarity.
+
+Do not automatically request:
+
+- flawless 4K;
+- cinematic lighting;
+- extreme HDR;
+- dramatic color grading.
+
+The image should feel like a real captured photograph, not a render.
+
+---
+
+# 12. THUMBNAIL PRIORITY
+
+Preserve the same visual hierarchy as the reference.
+
+For example:
+
+1. explosion;
+2. convoy / aircraft / ship / facility;
+3. highlighted drone;
+4. background environment.
+
+Do not make the drone or background more dominant than the main event unless that is true in the reference.
+
+---
+
+# 13. RESOLUTION
+
+Unless the user explicitly specifies another format:
+
+1920 × 1080
+16:9
+full-frame
+no black bars
+no letterboxing
+no borders
+
+If the source image itself contains black bars, ignore the black bars and reconstruct the underlying image as full 16:9.
+
+---
+
+# OUTPUT
+
+Return exactly:
 
 ### MASTER PROMPT
-Write a very detailed standalone English image-generation prompt with sections
-for CORE SCENE, CAMERA AND COMPOSITION, MAIN SUBJECT, VEHICLES / EQUIPMENT,
-EXPLOSION, SMOKE, DAMAGE, DRONE / AIRCRAFT, LOCATION / BACKGROUND, LIGHTING,
-and REAL-PHOTO QUALITY. Require 1920x1080 full-frame 16:9, no black bars, no
-distortion, and preserve the visual hierarchy of the reference.
+
+Write one complete, standalone English image-generation prompt reproducing the reference as faithfully as possible.
+
+Do NOT discuss your analysis.
+
+Do NOT mention that you divided the image into coordinates.
+
+Do NOT mention uncertainty.
+
+The MASTER PROMPT must be detailed, but avoid unnecessary invented detail.
+
+Then return:
 
 ### LOCKED ELEMENTS
-List the scene identity, main event/target, approximate composition, explosion
-importance, major subject/equipment, environment, and visual hierarchy that must
-not be substantially changed.
+
+List the major elements that later variants must preserve.
+
+Include:
+
+- camera side and direction;
+- main subject;
+- main subject position;
+- road/bridge/ship orientation;
+- explosion approximate position and scale;
+- smoke approximate position;
+- drone type and approximate quadrant;
+- environment;
+- major damaged/intact objects;
+- overall visual hierarchy.
+
+Then return:
 
 ### SAFE VARIABLE ELEMENTS
-List only low-impact details that can vary later: subtle camera shift or crop,
-minor secondary object positions, realistic paint shades, smoke drift, fireball
-internal shape, small debris, vegetation, and similar details. Do not put major
-story elements here.
+
+List only minor details that may later be changed slightly.
+
+Examples:
+
+- 2–3 secondary vehicle positions;
+- small vehicle color shifts;
+- exact smoke folds;
+- exact flame lobes;
+- small debris positions;
+- drone bank angle;
+- minor vegetation;
+- minor building colors;
+- minor background equipment.
+
+Do NOT put major scene geometry in SAFE VARIABLE ELEMENTS.
+
+Then return:
 
 ### NEGATIVE PROMPT
-Write a scene-specific negative prompt preventing CGI, glossy 3D render, poster
-lighting, malformed or duplicated objects, wrong aircraft type, impossible
-geometry, floating objects, weak or fantasy explosions, unwanted text, logos,
-watermarks, HUD/UI, gore, and black bars.
+
+Create a reference-specific negative prompt preventing:
+
+- wrong scene direction;
+- wrong drone type;
+- malformed vehicles;
+- duplicated objects;
+- impossible geometry;
+- detached explosion;
+- incorrect environment;
+- CGI appearance;
+- unwanted text;
+- logos;
+- watermarks;
+- black bars;
+- gore.
+
+Return only these four sections.
 """.strip()
 
 REWRITE_SYSTEM = (
