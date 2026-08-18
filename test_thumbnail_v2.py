@@ -205,9 +205,67 @@ def _parse_json_response(value: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Thumbnail analysis returned invalid JSON: {exc}") from exc
     hooks = result.get("locked_click_hooks")
-    if not isinstance(hooks, list) or len(hooks) < 3:
-        raise RuntimeError("Thumbnail analysis returned fewer than 3 locked click hooks")
+    if not isinstance(hooks, list) or not hooks:
+        raise RuntimeError("Thumbnail analysis returned no locked click hooks")
+    result["locked_click_hooks"] = [
+        hook for hook in hooks
+        if isinstance(hook, dict) and str(hook.get("description") or "").strip()
+    ]
+    if not result["locked_click_hooks"]:
+        raise RuntimeError("Thumbnail analysis returned no usable locked click hooks")
     return result
+
+
+def _complete_locked_hooks(analysis: dict[str, Any]) -> dict[str, Any]:
+    """Fill a short hook list from facts GPT already returned in the same JSON."""
+    hooks = list(analysis.get("locked_click_hooks") or [])
+    seen = {str(item.get("description", "")).strip().lower() for item in hooks}
+
+    candidates: list[dict[str, Any]] = []
+    dominant = analysis.get("dominant_event")
+    if isinstance(dominant, dict) and dominant.get("description"):
+        candidates.append({
+            "description": str(dominant["description"]),
+            "position": str(dominant.get("position") or "as described in the reference"),
+            "must_preserve": True,
+        })
+    for subject in analysis.get("secondary_subjects") or []:
+        if isinstance(subject, dict) and subject.get("description"):
+            candidates.append({
+                "description": str(subject["description"]),
+                "position": str(subject.get("position") or "as described in the reference"),
+                "must_preserve": True,
+            })
+    aircraft = analysis.get("aircraft_or_drone")
+    if isinstance(aircraft, dict) and aircraft.get("present") and aircraft.get("visible_type"):
+        candidates.append({
+            "description": f"Visible aircraft or drone: {aircraft['visible_type']}",
+            "position": str(aircraft.get("position") or "as described in the reference"),
+            "must_preserve": True,
+        })
+    annotation = analysis.get("annotation")
+    if isinstance(annotation, dict) and annotation.get("present") and annotation.get("target"):
+        candidates.append({
+            "description": f"Editor annotation targeting {annotation['target']}",
+            "position": str(annotation.get("position") or "as described in the reference"),
+            "must_preserve": True,
+        })
+    if analysis.get("camera_and_crop"):
+        candidates.append({
+            "description": f"Reference camera and crop: {analysis['camera_and_crop']}",
+            "position": "full-frame composition",
+            "must_preserve": True,
+        })
+
+    for candidate in candidates:
+        key = candidate["description"].strip().lower()
+        if key and key not in seen:
+            hooks.append(candidate)
+            seen.add(key)
+        if len(hooks) >= 3:
+            break
+    analysis["locked_click_hooks"] = hooks[:5]
+    return analysis
 
 
 def _image_data_url(path: Path) -> str:
@@ -369,7 +427,10 @@ def generate_one(args: argparse.Namespace, state: dict[str, Any], image_path: Pa
                     "image again and return ONLY one valid JSON object matching the exact schema."
                 ),
             }]
-            print("[thumbnail-v2] Byesu analysis returned invalid JSON; retrying once...", flush=True)
+            print(
+                "[thumbnail-v2] Analysis response did not satisfy the JSON schema; retrying once...",
+                flush=True,
+            )
         analysis_text = _call_provider(
             ANALYSIS_SYSTEM,
             messages,
@@ -378,7 +439,7 @@ def generate_one(args: argparse.Namespace, state: dict[str, Any], image_path: Pa
             "thumbnail_v2_analysis",
         )
         try:
-            analysis = _parse_json_response(analysis_text)
+            analysis = _complete_locked_hooks(_parse_json_response(analysis_text))
             break
         except RuntimeError as exc:
             analysis_error = exc
