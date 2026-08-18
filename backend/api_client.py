@@ -188,6 +188,55 @@ def _messages_to_responses_input(system: str, messages: list) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
+def _has_image_content(messages: list) -> bool:
+    for message in messages or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and part.get("type") in {"image_url", "input_image"}:
+                return True
+    return False
+
+
+def _messages_to_responses_multimodal_input(system: str, messages: list) -> list:
+    """Convert OpenAI chat image parts to Responses input_image blocks."""
+    items = []
+    if system:
+        items.append({
+            "role": "system",
+            "content": [{"type": "input_text", "text": system}],
+        })
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user")
+        content = message.get("content", "")
+        blocks = []
+        if isinstance(content, str):
+            blocks.append({"type": "input_text", "text": content})
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, str):
+                    blocks.append({"type": "input_text", "text": part})
+                    continue
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                if part_type in {"text", "input_text"} and part.get("text") is not None:
+                    blocks.append({"type": "input_text", "text": str(part["text"])})
+                elif part_type == "image_url":
+                    image = part.get("image_url") or {}
+                    image_url = image.get("url") if isinstance(image, dict) else image
+                    if image_url:
+                        blocks.append({"type": "input_image", "image_url": image_url})
+                elif part_type == "input_image" and part.get("image_url"):
+                    blocks.append({"type": "input_image", "image_url": part["image_url"]})
+        if blocks:
+            items.append({"role": role, "content": blocks})
+    return items
+
+
 def _extract_responses_text(data: dict) -> tuple[str, str]:
     parts = []
     for item in data.get("output") or []:
@@ -249,6 +298,46 @@ def _call_rewrite_responses(
     return _extract_responses_text(data)
 
 
+def _call_multimodal_responses(
+    api_url: str,
+    api_key: str,
+    model: str,
+    system: str,
+    messages: list,
+    timeout: int,
+    max_tokens_raw,
+    reasoning_effort: str,
+) -> tuple[str, str]:
+    import requests
+
+    payload = {
+        "model": model,
+        "input": _messages_to_responses_multimodal_input(system, messages),
+    }
+    if reasoning_effort:
+        payload["reasoning"] = {"effort": reasoning_effort}
+    try:
+        max_tokens = int(max_tokens_raw)
+        if max_tokens > 0:
+            payload["max_output_tokens"] = max_tokens
+    except (TypeError, ValueError):
+        pass
+    body = json.dumps(_clean_for_json(payload), ensure_ascii=False).encode("utf-8")
+    resp = requests.post(
+        _responses_url(api_url),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": "FAA/1.0",
+            "Accept": "application/json",
+        },
+        data=body,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return _extract_responses_text(resp.json())
+
+
 def _call_openai_compatible(
     provider_name: str,
     api_url: str,
@@ -264,6 +353,31 @@ def _call_openai_compatible(
     max_tokens_raw: str = "12000",
 ) -> tuple[str, str]:
     import requests
+
+    # OmniRoute's ChatGPT/Codex bridge expects image parts through the
+    # Responses API as input_image, not Chat Completions image_url blocks.
+    if _has_image_content(messages):
+        last_err = None
+        for attempt in range(max_retries):
+            try:
+                return _call_multimodal_responses(
+                    api_url=api_url,
+                    api_key=api_key,
+                    model=model,
+                    system=system,
+                    messages=messages,
+                    timeout=timeout,
+                    max_tokens_raw=max_tokens_raw,
+                    reasoning_effort=reasoning_effort,
+                )
+            except Exception as exc:
+                last_err = f"{type(exc).__name__}: {exc} attempt {attempt + 1}"
+                print(f"[api_client] {provider_name} multimodal: {last_err}", flush=True)
+                if attempt < max_retries - 1:
+                    wait = 5 * (attempt + 1)
+                    print(f"[api_client] Retry in {wait}s...", flush=True)
+                    time.sleep(wait)
+        raise RuntimeError(f"{provider_name} multimodal failed: {last_err}")
 
     payload = {
         "model": model,
