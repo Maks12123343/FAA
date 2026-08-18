@@ -421,78 +421,97 @@ def generate_one(args: argparse.Namespace, state: dict[str, Any], image_path: Pa
     project_id = _project_id(args.prepare_id, language)
     output_dir = _find_output_dir(args.downloads_root, project_id, language)
     output_path = output_dir / "thumbnail_2.png"
+    analysis_path = output_dir / "thumbnail_2_analysis.json"
+    prompt_path = output_dir / "thumbnail_2_prompt.txt"
     if output_path.exists() and not args.force:
         raise RuntimeError(f"Output already exists (use --force to replace it): {output_path}")
 
-    data_url = _image_data_url(image_path)
-    analysis_messages = [{
-        "role": "user",
-        "content": [
-            {"type": "image_url", "image_url": {"url": data_url}},
-            {"type": "text", "text": ANALYSIS_PROMPT},
-        ],
-    }]
     analysis = None
-    analysis_error = None
-    for format_attempt in range(2):
-        messages = analysis_messages
-        if format_attempt:
-            messages = analysis_messages + [{
-                "role": "user",
-                "content": (
-                    "Your previous answer was not valid JSON. Analyze the same supplied "
-                    "image again and return ONLY one valid JSON object matching the exact schema."
-                ),
-            }]
-            print(
-                "[thumbnail-v2] Analysis response did not satisfy the JSON schema; retrying once...",
-                flush=True,
-            )
-        analysis_text = _call_provider(
-            ANALYSIS_SYSTEM,
-            messages,
-            args.analysis_provider_id,
-            args.analysis_model,
-            "thumbnail_v2_analysis",
-        )
+    final_prompt = ""
+    if not args.refresh_analysis and analysis_path.is_file() and prompt_path.is_file():
         try:
-            analysis = _complete_locked_hooks(_parse_json_response(analysis_text))
-            break
-        except RuntimeError as exc:
-            analysis_error = exc
-    if analysis is None:
-        raise RuntimeError(
-            f"{args.analysis_provider_id or 'primary'} thumbnail analysis failed JSON validation: "
-            f"{analysis_error}"
-        )
+            cached_analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+            cached_prompt = prompt_path.read_text(encoding="utf-8")
+            if isinstance(cached_analysis, dict) and "### VARIANT PROMPT" in cached_prompt:
+                analysis = cached_analysis
+                final_prompt = cached_prompt
+                print(
+                    "[thumbnail-v2] Analysis and prompt cached; skipping Byesu requests.",
+                    flush=True,
+                )
+        except (OSError, ValueError):
+            analysis = None
 
-    rewrite_text = REWRITE_PROMPT.format(
-        analysis_json=json.dumps(analysis, ensure_ascii=False, indent=2),
-        source_title=state.get("source_title") or "(unknown)",
-        language=language,
-        variant_cue=VARIANT_CUES.get(language, "Keep the reference crop and vary only minor natural details."),
-    )
-    final_prompt = _call_provider(
-        REWRITE_SYSTEM,
-        [{
+    if analysis is None:
+        data_url = _image_data_url(image_path)
+        analysis_messages = [{
             "role": "user",
             "content": [
                 {"type": "image_url", "image_url": {"url": data_url}},
-                {"type": "text", "text": rewrite_text},
+                {"type": "text", "text": ANALYSIS_PROMPT},
             ],
-        }],
-        args.rewrite_provider_id,
-        args.rewrite_model,
-        "thumbnail_v2_rewrite",
-    )
-    if "### VARIANT PROMPT" not in final_prompt:
-        raise RuntimeError("Thumbnail rewrite did not return a VARIANT PROMPT section")
+        }]
+        analysis_error = None
+        for format_attempt in range(2):
+            messages = analysis_messages
+            if format_attempt:
+                messages = analysis_messages + [{
+                    "role": "user",
+                    "content": (
+                        "Your previous answer did not satisfy the required schema. "
+                        "Analyze the same supplied image again and return ONLY one valid "
+                        "JSON object matching the exact schema."
+                    ),
+                }]
+                print(
+                    "[thumbnail-v2] Analysis response did not satisfy the JSON schema; retrying once...",
+                    flush=True,
+                )
+            analysis_text = _call_provider(
+                ANALYSIS_SYSTEM,
+                messages,
+                args.analysis_provider_id,
+                args.analysis_model,
+                "thumbnail_v2_analysis",
+            )
+            try:
+                analysis = _complete_locked_hooks(_parse_json_response(analysis_text))
+                break
+            except RuntimeError as exc:
+                analysis_error = exc
+        if analysis is None:
+            raise RuntimeError(
+                f"{args.analysis_provider_id or 'primary'} thumbnail analysis failed JSON validation: "
+                f"{analysis_error}"
+            )
+
+        rewrite_text = REWRITE_PROMPT.format(
+            analysis_json=json.dumps(analysis, ensure_ascii=False, indent=2),
+            source_title=state.get("source_title") or "(unknown)",
+            language=language,
+            variant_cue=VARIANT_CUES.get(language, "Keep the reference crop and vary only minor natural details."),
+        )
+        final_prompt = _call_provider(
+            REWRITE_SYSTEM,
+            [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "text", "text": rewrite_text},
+                ],
+            }],
+            args.rewrite_provider_id,
+            args.rewrite_model,
+            "thumbnail_v2_rewrite",
+        )
+        if "### VARIANT PROMPT" not in final_prompt:
+            raise RuntimeError("Thumbnail rewrite did not return a VARIANT PROMPT section")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "thumbnail_2_analysis.json").write_text(
+    analysis_path.write_text(
         json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    (output_dir / "thumbnail_2_prompt.txt").write_text(final_prompt, encoding="utf-8")
+    prompt_path.write_text(final_prompt, encoding="utf-8")
     _generate_flow(final_prompt, output_path)
     print(f"[thumbnail-v2] SAVED: {output_path}", flush=True)
     return output_path
@@ -528,6 +547,11 @@ def parse_args() -> argparse.Namespace:
         help="FAA_downloads root; defaults beside the FAA repository",
     )
     parser.add_argument("--force", action="store_true", help="Replace an existing thumbnail_2.png")
+    parser.add_argument(
+        "--refresh-analysis",
+        action="store_true",
+        help="Ignore cached analysis/prompt and call the text provider again",
+    )
     return parser.parse_args()
 
 
