@@ -248,6 +248,18 @@ def _call_provider(
     return _clean_model_text(text)
 
 
+def _provider_description(provider_id: str, model_override: str) -> tuple[str, str]:
+    """Return the configured provider/model without exposing credentials."""
+    if not provider_id:
+        settings = config.load_settings()
+        provider_id = str(settings.get("rewrite_active_provider") or "a6api")
+    settings = config.load_settings()
+    name, _url, _key, model, _effort, _max_tokens = api_client._provider_settings(
+        settings, provider_id, allow_legacy=False
+    )
+    return name, model_override or model
+
+
 def _find_output_dir(downloads_root: Path, project_id: str, language: str) -> Path:
     folder_name = LANGUAGE_FOLDERS.get(language, language)
     if downloads_root.is_dir():
@@ -334,20 +346,40 @@ def generate_one(args: argparse.Namespace, state: dict[str, Any], image_path: Pa
         raise RuntimeError(f"Output already exists (use --force to replace it): {output_path}")
 
     data_url = _image_data_url(image_path)
-    analysis_text = _call_provider(
-        ANALYSIS_SYSTEM,
-        [{
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": data_url}},
-                {"type": "text", "text": ANALYSIS_PROMPT},
-            ],
-        }],
-        args.provider_id,
-        args.analysis_model,
-        "thumbnail_v2_analysis",
-    )
-    analysis = _parse_json_response(analysis_text)
+    analysis_messages = [{
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": data_url}},
+            {"type": "text", "text": ANALYSIS_PROMPT},
+        ],
+    }]
+    analysis = None
+    analysis_error = None
+    for format_attempt in range(2):
+        messages = analysis_messages
+        if format_attempt:
+            messages = analysis_messages + [{
+                "role": "user",
+                "content": (
+                    "Your previous answer was not valid JSON. Analyze the same supplied "
+                    "image again and return ONLY one valid JSON object matching the exact schema."
+                ),
+            }]
+            print("[thumbnail-v2] Byesu analysis returned invalid JSON; retrying once...", flush=True)
+        analysis_text = _call_provider(
+            ANALYSIS_SYSTEM,
+            messages,
+            args.analysis_provider_id,
+            args.analysis_model,
+            "thumbnail_v2_analysis",
+        )
+        try:
+            analysis = _parse_json_response(analysis_text)
+            break
+        except RuntimeError as exc:
+            analysis_error = exc
+    if analysis is None:
+        raise RuntimeError(f"Byesu thumbnail analysis failed JSON validation: {analysis_error}")
 
     rewrite_text = REWRITE_PROMPT.format(
         analysis_json=json.dumps(analysis, ensure_ascii=False, indent=2),
@@ -364,7 +396,7 @@ def generate_one(args: argparse.Namespace, state: dict[str, Any], image_path: Pa
                 {"type": "text", "text": rewrite_text},
             ],
         }],
-        args.provider_id,
+        args.rewrite_provider_id,
         args.rewrite_model,
         "thumbnail_v2_rewrite",
     )
@@ -387,8 +419,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--prepare-id", required=True, help="For example: war_1786969946")
     parser.add_argument("--languages", default="tr", help="Comma-separated language codes; default: tr")
-    parser.add_argument("--provider-id", default="", help="Saved rewrite provider ID; blank uses primary/fallback routing")
-    parser.add_argument("--analysis-model", default="", help="Optional model override for visual analysis")
+    parser.add_argument(
+        "--analysis-provider-id",
+        default="byesu",
+        help="Saved provider used only for reference-image analysis; default: byesu",
+    )
+    parser.add_argument(
+        "--rewrite-provider-id",
+        default="",
+        help="Saved provider used only to rewrite the final image prompt; blank uses primary/fallback routing",
+    )
+    parser.add_argument(
+        "--provider-id",
+        default="",
+        help="Deprecated alias for --rewrite-provider-id (kept for existing commands)",
+    )
+    parser.add_argument("--analysis-model", default="", help="Optional Byesu model override for visual analysis")
     parser.add_argument("--rewrite-model", default="", help="Optional model override for prompt rewriting")
     parser.add_argument(
         "--downloads-root",
@@ -402,6 +448,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.provider_id:
+        if args.rewrite_provider_id and args.rewrite_provider_id != args.provider_id:
+            raise RuntimeError("Use either --provider-id or --rewrite-provider-id, not conflicting values")
+        args.rewrite_provider_id = args.provider_id
     prepare_dir = Path(config.PROJECTS_DIR) / f"_prepare_{args.prepare_id}"
     state_path = prepare_dir / "state.json"
     image_path = prepare_dir / "thumbnail.jpg"
@@ -417,6 +467,20 @@ def main() -> int:
     print(f"[thumbnail-v2] Reference: {image_path}", flush=True)
     print(f"[thumbnail-v2] Source: {state.get('source_url', '')}", flush=True)
     print(f"[thumbnail-v2] Languages: {', '.join(languages)}", flush=True)
+    analysis_name, analysis_model = _provider_description(
+        args.analysis_provider_id, args.analysis_model
+    )
+    rewrite_name, rewrite_model = _provider_description(
+        args.rewrite_provider_id, args.rewrite_model
+    )
+    print(
+        f"[thumbnail-v2] Analysis route: {analysis_name} ({analysis_model})",
+        flush=True,
+    )
+    print(
+        f"[thumbnail-v2] Prompt rewrite route: {rewrite_name} ({rewrite_model})",
+        flush=True,
+    )
     for language in languages:
         generate_one(args, state, image_path, language)
     return 0
