@@ -9,7 +9,9 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
+import subprocess
 import tempfile
 from typing import Any
 
@@ -233,6 +235,48 @@ def _complete_locked_hooks(analysis: dict[str, Any]) -> dict[str, Any]:
 def _image_data_url(path: Path) -> str:
     mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
     return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+
+
+def _download_thumbnail_with_ytdlp(source_url: str, destination: Path) -> Path:
+    """Download only the source video's thumbnail through yt-dlp, never the video."""
+    with tempfile.TemporaryDirectory(prefix="faa_thumbnail_source_") as temp_dir:
+        temp_root = Path(temp_dir) / "source"
+        command = [
+            sys.executable,
+            "-m",
+            "yt_dlp",
+            "--no-playlist",
+            "--skip-download",
+            "--write-thumbnail",
+            "--convert-thumbnails",
+            "jpg",
+            "--no-write-info-json",
+            "--output",
+            str(temp_root) + ".%(ext)s",
+            source_url,
+        ]
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()[-1200:]
+            raise RuntimeError(f"yt-dlp could not download the source thumbnail: {detail}")
+
+        candidates = sorted(
+            item for item in Path(temp_dir).glob("source.*")
+            if item.is_file() and item.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+        )
+        if not candidates:
+            raise RuntimeError("yt-dlp completed but did not save a thumbnail image")
+
+        source_path = candidates[0]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        final_path = destination.with_suffix(source_path.suffix.lower())
+        shutil.copyfile(source_path, final_path)
+        return final_path
 
 
 def _call_provider(
@@ -494,6 +538,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prepare-id", required=True, help="For example: war_1786969946")
     parser.add_argument("--languages", default="tr", help="Comma-separated language codes; default: tr")
     parser.add_argument(
+        "--source-url",
+        default="",
+        help="YouTube URL; if omitted, the script asks for it interactively",
+    )
+    parser.add_argument(
         "--analysis-provider-id",
         default="byesu",
         help="Saved provider used for the one-shot visual audit and prompt; default: byesu",
@@ -544,18 +593,36 @@ def main() -> int:
         args.rewrite_provider_id = args.provider_id
     prepare_dir = Path(config.PROJECTS_DIR) / f"_prepare_{args.prepare_id}"
     state_path = prepare_dir / "state.json"
-    image_path = args.reference_image or (prepare_dir / "thumbnail.jpg")
     if not state_path.is_file():
         raise RuntimeError(f"Prepare state not found: {state_path}")
-    if not image_path.is_file():
-        raise RuntimeError(f"Reference thumbnail not found: {image_path}")
     state = json.loads(state_path.read_text(encoding="utf-8"))
+    source_url = args.source_url.strip()
+    if args.reference_image:
+        if source_url:
+            raise RuntimeError("Use either --source-url or --reference-image, not both")
+        image_path = args.reference_image
+        if not image_path.is_file():
+            raise RuntimeError(f"Reference thumbnail not found: {image_path}")
+        source_url = "(manual reference image)"
+    else:
+        if not source_url:
+            source_url = input("Paste the YouTube source-video URL: ").strip()
+        if not source_url:
+            raise RuntimeError("A YouTube source URL is required")
+        source_path = prepare_dir / f"{args.output_stem}_source"
+        print("[thumbnail-v2] Downloading source thumbnail with yt-dlp (video download disabled)...", flush=True)
+        image_path = _download_thumbnail_with_ytdlp(source_url, source_path)
+        print(f"[thumbnail-v2] Source thumbnail saved: {image_path}", flush=True)
+
+    # The downloaded image, not the old prepare state, is the only visual source of truth.
+    state["source_title"] = "(ignore title; use only the supplied reference pixels)"
+
     languages = [item.strip().lower() for item in args.languages.split(",") if item.strip()]
     if not languages:
         raise RuntimeError("No languages selected")
 
     print(f"[thumbnail-v2] Reference: {image_path}", flush=True)
-    print(f"[thumbnail-v2] Source: {state.get('source_url', '')}", flush=True)
+    print(f"[thumbnail-v2] Source video: {source_url}", flush=True)
     print(f"[thumbnail-v2] Languages: {', '.join(languages)}", flush=True)
     prompt_name, prompt_model = _provider_description(
         args.analysis_provider_id, args.analysis_model or args.rewrite_model
