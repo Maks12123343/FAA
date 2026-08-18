@@ -195,7 +195,11 @@ def _parse_json_response(value: str) -> dict[str, Any]:
     start = text.find("{")
     end = text.rfind("}")
     if start < 0 or end <= start:
-        raise RuntimeError("Thumbnail analysis did not return JSON")
+        preview = re.sub(r"\s+", " ", text)[:300]
+        raise RuntimeError(
+            "Thumbnail analysis did not return JSON"
+            + (f"; response preview: {preview!r}" if preview else "; response was empty")
+        )
     try:
         result = json.loads(text[start : end + 1])
     except json.JSONDecodeError as exc:
@@ -379,7 +383,10 @@ def generate_one(args: argparse.Namespace, state: dict[str, Any], image_path: Pa
         except RuntimeError as exc:
             analysis_error = exc
     if analysis is None:
-        raise RuntimeError(f"Byesu thumbnail analysis failed JSON validation: {analysis_error}")
+        raise RuntimeError(
+            f"{args.analysis_provider_id or 'primary'} thumbnail analysis failed JSON validation: "
+            f"{analysis_error}"
+        )
 
     rewrite_text = REWRITE_PROMPT.format(
         analysis_json=json.dumps(analysis, ensure_ascii=False, indent=2),
