@@ -81,13 +81,14 @@ DEFAULT_SETTINGS = {
     "gemini_image_api_key": "",
     "gemini_image_model": "flow-nano-pro",
     "gemini_image_timeout": 600,
+    "gemini_image_double_preview": False,
 
     # Automatic download of ready projects (runs locally on the client machine)
     "auto_download_enabled": False,
     "auto_download_base_url": "http://127.0.0.1:5050",
     "auto_download_out_dir": os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "FAA_downloads")),
     "auto_download_interval_minutes": 1,
-    "auto_download_languages": "pl,tr,cs,ro,hu,sv,fi,hr,da,bg",
+    "auto_download_languages": "fi,hu,bg,da,de,ro,sv,cs,tr,pl,ja,it,sk,ko,es",
     "auto_download_watch_new_only": False,
     "auto_download_all_ready": True,
     "auto_download_retries": 5,
@@ -148,18 +149,24 @@ DEFAULT_SETTINGS = {
     "youtube_api_key_3": "",
 
     # Voice profiles: language code → voice settings
+    "voice_profiles_version": 2,
     "voice_profiles": {
-        "en": {"name": "English Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
-        "pl": {"name": "Polish Voice",  "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
-        "de": {"name": "German Voice",  "voice_id": "", "stability": 0.80, "similarity_boost": 0.75, "speed": 1.0},
-        "fr": {"name": "French Voice",  "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
-        "es": {"name": "Spanish Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
-        "it": {"name": "Italian Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
-        "pt": {"name": "Portuguese Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "fi": {"name": "Finnish Voice", "voice_id": "ESapivUCtGNuYKDCwzcI", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "hu": {"name": "Hungarian Voice", "voice_id": "M336tBVZHWWiWb4R54ui", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "bg": {"name": "Bulgarian Voice", "voice_id": "iWNf11sz1GrUE4ppxTOL", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "da": {"name": "Danish Voice", "voice_id": "ygiXC2Oa1BiHksD3WkJZ", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "de": {"name": "German Voice", "voice_id": "jdKpAe6rxAe99tFGbsAc", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "ro": {"name": "Romanian Voice", "voice_id": "8nBBDfYxYXmDNaqTCxPH", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "sv": {"name": "Swedish Voice", "voice_id": "QTGiyJvep6bcx4WD1qAq", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "cs": {"name": "Czech Voice", "voice_id": "7FpO7yFcBAfqM6vZJCg7", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "tr": {"name": "Turkish Voice", "voice_id": "LCHGt3rsPMP50Vs28amI", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "pl": {"name": "Polish Voice", "voice_id": "1nUkvoDFCcCTjJk9U8mL", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "ja": {"name": "Japanese Voice", "voice_id": "H8ZPDxbrPcks5hEsi2fq", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "it": {"name": "Italian Voice", "voice_id": "fzDFBB4mgvMlL36gPXcz", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "sk": {"name": "Slovak Voice", "voice_id": "Zai7B4Aol2bJtneyq0L1", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "ko": {"name": "Korean Voice", "voice_id": "8lidWTlnwgjObqCImnE2", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
+        "es": {"name": "Spanish Voice", "voice_id": "OjrdP8Z2fWjVyt0scrL7", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
         "uk": {"name": "Ukrainian Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
-        "ru": {"name": "Russian Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
-        "tr": {"name": "Turkish Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
-        "sv": {"name": "Swedish Voice", "voice_id": "", "stability": 0.85, "similarity_boost": 0.75, "speed": 1.0},
     },
 
     # Unofficial Gemini cookie API (optional — doubles throughput alongside Vertex AI)
@@ -209,6 +216,7 @@ def _coerce_settings(data: dict) -> dict:
         "rewrite_thumbnail_enabled",
         "rewrite_metadata_enabled",
         "gemini_image_enabled",
+        "gemini_image_double_preview",
         "auto_download_enabled",
         "auto_download_watch_new_only",
         "auto_download_all_ready",
@@ -267,6 +275,18 @@ def load_settings() -> dict:
         data = json.load(f)
     known_data = {key: value for key, value in data.items() if key in DEFAULT_SETTINGS}
     merged = _coerce_settings({**DEFAULT_SETTINGS, **known_data})
+    # One-time migration for the built-in VoiceGen language set. The settings
+    # file is intentionally ignored by Git, so existing installations need a
+    # local migration after pulling the updated defaults. Keep all unrelated
+    # settings (including credentials) untouched.
+    if data.get("voice_profiles_version") != DEFAULT_SETTINGS["voice_profiles_version"]:
+        merged["voice_profiles"] = {
+            code: dict(profile)
+            for code, profile in DEFAULT_SETTINGS["voice_profiles"].items()
+        }
+        merged["voice_profiles_version"] = DEFAULT_SETTINGS["voice_profiles_version"]
+        merged["auto_download_languages"] = DEFAULT_SETTINGS["auto_download_languages"]
+        save_settings(merged)
     _settings_cache["data"] = merged
     _settings_cache["mtime"] = mtime
     return merged.copy()

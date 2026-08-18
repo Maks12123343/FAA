@@ -84,7 +84,7 @@ def _is_inside_dir(path: str, parent: str) -> bool:
 def _niches() -> list:
     niches = []
     for f in os.listdir(config.NICHES_DIR):
-        if f.endswith(".json"):
+        if f.endswith(".json") and f[:-5] == "russia_ukraine_war":
             path = os.path.join(config.NICHES_DIR, f)
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -567,6 +567,12 @@ def _ready_project_item(project_id: str, project_dir: str) -> dict | None:
         ),
         None,
     )
+    thumbnail_image_urls = []
+    if thumbnail_image_path:
+        thumbnail_image_urls.append(f"/api/projects/{project_id}/thumbnail")
+    second_thumbnail_path = os.path.join(project_dir, "thumbnail_generated_2.png")
+    if os.path.exists(second_thumbnail_path):
+        thumbnail_image_urls.append(f"/api/projects/{project_id}/thumbnail/2")
     raw_lang = _infer_project_language(project_id, meta)
     lang = _canonical_ready_language(raw_lang)
     return {
@@ -581,6 +587,7 @@ def _ready_project_item(project_id: str, project_dir: str) -> dict | None:
         "tags_raw": meta.get("tags_raw", ""),
         "thumbnail_prompt": thumbnail_prompt,
         "thumbnail_image_url": f"/api/projects/{project_id}/thumbnail" if thumbnail_image_path else "",
+        "thumbnail_image_urls": thumbnail_image_urls,
         "video_size": size,
         "mtime": mtime,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime)),
@@ -651,6 +658,20 @@ def api_project_thumbnail(project_id):
         if os.path.exists(path) and _is_inside_dir(path, config.PROJECTS_DIR):
             return send_file(path)
     return jsonify({"error": "Thumbnail not found"}), 404
+
+
+@app.route("/api/projects/<project_id>/thumbnail/<int:variant>")
+def api_project_thumbnail_variant(project_id, variant):
+    safe_id = os.path.basename(project_id)
+    project_dir = os.path.join(config.PROJECTS_DIR, safe_id)
+    if not _is_inside_dir(project_dir, config.PROJECTS_DIR):
+        return jsonify({"error": "Invalid project id"}), 400
+    if variant != 2:
+        return jsonify({"error": "Thumbnail variant not found"}), 404
+    path = os.path.join(project_dir, "thumbnail_generated_2.png")
+    if os.path.exists(path) and _is_inside_dir(path, config.PROJECTS_DIR):
+        return send_file(path)
+    return jsonify({"error": "Thumbnail variant not found"}), 404
 
 
 @app.route("/api/download/<project_id>")

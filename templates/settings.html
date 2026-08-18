@@ -92,7 +92,7 @@
       <input type="text" id="auto_download_retries" value="{{ settings.auto_download_retries or 5 }}"></div>
   </div>
   <div class="field"><label>Language Codes</label>
-    <input type="text" id="auto_download_languages" value="{{ settings.auto_download_languages or 'pl,tr,cs,ro,hu,sv,fi,hr,da,bg' }}" style="width:100%">
+    <input type="text" id="auto_download_languages" value="{{ settings.auto_download_languages or 'fi,hu,bg,da,de,ro,sv,cs,tr,pl,ja,it,sk,ko,es' }}" style="width:100%">
   </div>
   <label style="display:flex;align-items:center;gap:10px;color:#ddd;margin:8px 0 0">
     <input type="checkbox" id="auto_download_all_ready" {% if settings.auto_download_all_ready %}checked{% endif %} style="width:auto">
@@ -204,6 +204,10 @@
   <label style="display:flex;align-items:center;gap:10px;color:#ddd;margin:0 0 12px">
     <input type="checkbox" id="gemini_image_enabled" {% if settings.gemini_image_enabled %}checked{% endif %} style="width:auto">
     Generate thumbnail image with Google Flow
+  </label>
+  <label style="display:flex;align-items:center;gap:10px;color:#ddd;margin:0 0 12px">
+    <input type="checkbox" id="gemini_image_double_preview" {% if settings.gemini_image_double_preview %}checked{% endif %} style="width:auto">
+    Generate two independent thumbnails per language
   </label>
   <div class="grid-2">
     <div class="field"><label>Bridge URL</label>
@@ -532,6 +536,7 @@ function saveSettings() {
     vertex_location:   document.getElementById('vertex_location').value,
     gemini_model:      document.getElementById('gemini_model').value,
     gemini_image_enabled:     document.getElementById('gemini_image_enabled').checked,
+    gemini_image_double_preview: document.getElementById('gemini_image_double_preview').checked,
     gemini_image_bridge_url:  document.getElementById('gemini_image_bridge_url').value.trim(),
     gemini_image_api_key:     document.getElementById('gemini_image_api_key').value.trim(),
     gemini_image_model:       document.getElementById('gemini_image_model').value.trim(),

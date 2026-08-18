@@ -39,14 +39,11 @@ label { display: block; font-size: 13px; color: #aaa; margin-bottom: 6px; }
 </style>
 </head>
 <body>
-<nav>
-  <span class="logo">FAA</span>
-  <a href="/" {% if request.path == '/' %}class="active"{% endif %}>Generate</a>
-  <a href="/library" {% if request.path == '/library' %}class="active"{% endif %}>Library</a>
-  <a href="/competitors" {% if request.path == '/competitors' %}class="active"{% endif %}>Competitors</a>
-  <a href="/writer" {% if request.path == '/writer' %}class="active"{% endif %}>Writer</a>
-  <a href="/settings" {% if request.path == '/settings' %}class="active"{% endif %}>Settings</a>
-</nav>
+  <nav>
+    <span class="logo">FAA</span>
+    <a href="/" {% if request.path == '/' %}class="active"{% endif %}>Generate</a>
+    <a href="/settings" {% if request.path == '/settings' %}class="active"{% endif %}>Settings</a>
+  </nav>
 <div class="container">
   {% block content %}{% endblock %}
 </div>

@@ -16,7 +16,7 @@ from pathlib import Path
 
 DEFAULT_BASE_URL = "http://localhost:5050"
 DEFAULT_OUT_DIR = r"D:\youtube"
-DEFAULT_LANGUAGES = "pl,tr,cs,ro,hu,sv,fi,hr,da,bg"
+DEFAULT_LANGUAGES = "fi,hu,bg,da,de,ro,sv,cs,tr,pl,ja,it,sk,ko,es"
 DEFAULT_INTERVAL_MINUTES = 30
 
 LANGUAGE_FOLDERS = {
@@ -109,8 +109,14 @@ def _metadata_text(item: dict) -> str:
     thumbnail_prompt = str(item.get("thumbnail_prompt") or "").strip()
     if thumbnail_prompt:
         lines.extend(["", "### Thumbnail Prompt:", thumbnail_prompt])
-    if item.get("thumbnail_image_url"):
-        lines.extend(["", "### Generated Thumbnail:", "thumbnail.png"])
+    thumbnail_urls = item.get("thumbnail_image_urls") or (
+        [item["thumbnail_image_url"]] if item.get("thumbnail_image_url") else []
+    )
+    if thumbnail_urls:
+        lines.extend(["", "### Generated Thumbnails:"])
+        for idx in range(len(thumbnail_urls)):
+            name = "thumbnail.png" if idx == 0 else f"thumbnail_{idx + 1}.png"
+            lines.append(name)
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -158,7 +164,10 @@ def _dest_paths(dest_dir: Path) -> tuple:
             dest_dir / "thumbnail.png",
         )
     n = 2
-    while (dest_dir / f"video_{n}.mp4").exists():
+    while (
+        (dest_dir / f"video_{n}.mp4").exists()
+        or (dest_dir / f"thumbnail_{n}.png").exists()
+    ):
         n += 1
     return (
         dest_dir / f"video_{n}.mp4",
@@ -166,6 +175,23 @@ def _dest_paths(dest_dir: Path) -> tuple:
         dest_dir / f"project_{n}.json",
         dest_dir / f"thumbnail_{n}.png",
     )
+
+
+def _thumbnail_dest_paths(dest_dir: Path, first: Path, count: int) -> list[Path]:
+    """Return collision-free names for every thumbnail in one project."""
+    if count <= 0:
+        return []
+    paths = [first]
+    used = {first.name}
+    next_number = 2
+    while len(paths) < count:
+        candidate = dest_dir / f"thumbnail_{next_number}.png"
+        next_number += 1
+        if candidate.name in used or candidate.exists():
+            continue
+        paths.append(candidate)
+        used.add(candidate.name)
+    return paths
 
 
 def _download_file(url: str, dest: Path, retries: int, timeout: int, *, accept: str = "video/mp4,*/*", validator=None) -> None:
@@ -367,6 +393,12 @@ def _run_once(args) -> int:
             lang_folder = _language_folder(item)
             dest_dir = batch_dir / lang_folder
             dest_video, dest_meta, dest_info, dest_thumbnail = _dest_paths(dest_dir)
+            thumbnail_urls = item.get("thumbnail_image_urls") or (
+                [item["thumbnail_image_url"]] if item.get("thumbnail_image_url") else []
+            )
+            thumbnail_dest_paths = _thumbnail_dest_paths(
+                dest_dir, dest_thumbnail, len(thumbnail_urls)
+            )
 
             # Keep the final names invisible until the complete package has
             # downloaded and validated. A failed thumbnail must not leave a
@@ -375,8 +407,11 @@ def _run_once(args) -> int:
             stage_video = dest_dir / f".{token}.video.stage"
             stage_meta = dest_dir / f".{token}.metadata.stage"
             stage_info = dest_dir / f".{token}.project.stage"
-            stage_thumbnail = dest_dir / f".{token}.thumbnail.stage"
-            staged_paths = [stage_video, stage_meta, stage_info, stage_thumbnail]
+            stage_thumbnails = [
+                dest_dir / f".{token}.thumbnail_{idx}.stage"
+                for idx in range(1, len(thumbnail_urls) + 1)
+            ]
+            staged_paths = [stage_video, stage_meta, stage_info, *stage_thumbnails]
 
             print(f"[download] {pid} -> {dest_dir}")
             _download_file(
@@ -386,9 +421,9 @@ def _run_once(args) -> int:
                 args.download_timeout,
                 validator=_validate_mp4,
             )
-            if item.get("thumbnail_image_url"):
+            for thumbnail_url, stage_thumbnail in zip(thumbnail_urls, stage_thumbnails):
                 _download_file(
-                    urllib.parse.urljoin(args.base_url.rstrip("/") + "/", item["thumbnail_image_url"]),
+                    urllib.parse.urljoin(args.base_url.rstrip("/") + "/", thumbnail_url),
                     stage_thumbnail,
                     args.retries,
                     min(args.download_timeout, 300),
@@ -398,8 +433,8 @@ def _run_once(args) -> int:
             stage_meta.write_text(_metadata_text(item), encoding="utf-8")
             stage_info.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
 
-            if item.get("thumbnail_image_url"):
-                stage_thumbnail.replace(dest_thumbnail)
+            for stage_thumbnail, dest_thumbnail_path in zip(stage_thumbnails, thumbnail_dest_paths):
+                stage_thumbnail.replace(dest_thumbnail_path)
             stage_meta.replace(dest_meta)
             stage_info.replace(dest_info)
             # Publish the video last. The ready package is therefore never

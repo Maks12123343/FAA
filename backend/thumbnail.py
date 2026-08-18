@@ -497,6 +497,87 @@ REWRITE_SYSTEM = (
 )
 
 
+ONE_SHOT_PROMPT = r"""
+You are reverse-engineering the PROVIDED REFERENCE IMAGE for a high-performing
+YouTube breaking-news thumbnail. Inspect the actual attached pixels carefully;
+they are the only visual source of truth. The title is context only.
+
+Create one complete, self-contained English prompt for Google Flow. Flow will
+receive only your written prompt, not the image, so every important visual fact
+must be described explicitly. The new thumbnail must be at least as powerful,
+realistic, readable, and clickable as the reference, while remaining a new
+variation rather than a one-to-one copy.
+
+LOCK THE REFERENCE:
+- Preserve the exact visible location type, camera height and angle, crop,
+  horizon, perspective, land/water relationship, and visual hierarchy.
+- Describe the left, center, right, foreground, middle ground, and background.
+- Preserve the location fingerprint: major tanks, roads, pipe corridors,
+  docks, shoreline, water, vessels, buildings, and large empty areas.
+- Preserve the same destruction footprint: which structures, tanks, platforms,
+  vehicles, decks, roads, and roofs are burning, damaged, collapsed, blackened,
+  or still intact. Do not replace visible destruction with a clean facility.
+- Do not invent a different landscape, country, architecture, aircraft type,
+  or story. Do not make the main event smaller, weaker, farther away, or less
+  colorful than the reference.
+
+If an explosion is visible, describe its exact position and footprint, its
+relation to nearby objects, the broad multi-lobed fireball, bright yellow-white
+core, orange and red-orange flames, dark cavities, sparks, debris, heat haze,
+ground/structure connection, smoke volume, smoke direction, and the visible
+damage below it. The explosion must remain a dominant, powerful, realistic
+click hook, never a small fire, distant flash, or firecracker.
+
+If a drone or aircraft is visible, preserve its category, size, position,
+silhouette, and relationship to the blast. Make it clearly pitched and tilted
+downward toward the explosion, as if descending in an attack run: its nose or
+front and flight axis point toward the blast, with a natural slight bank. It
+must not look level, stationary, flying away, or unrelated to the strike.
+Preserve its recognizable proportions and position. If a yellow circle or oval
+is visible, preserve exactly one similar highlight around the same target, in
+the same general position, with similar thickness, color, and visibility.
+
+Use full-frame 1920x1080, 16:9, no borders or black bars. Make it look like a
+real compressed breaking-news aerial photograph or video still: natural light,
+realistic geometry, restrained saturation, believable smoke/fire, shadows,
+reflections, haze, mild sensor noise, and slight JPEG compression. No readable
+text, logos, captions, watermarks, HUD, CGI, cartoon style, poster design, or
+fantasy elements.
+
+Allow only tiny changes to secondary smoke curls, minor debris, reflections,
+subtle haze, or cloud texture. Do not change the location, camera composition,
+dominant event, explosion scale, destruction footprint, drone position, drone
+relationship to the blast, annotation target, or visual hierarchy.
+
+The final negative prompt must prevent weak/small explosions, wrong locations,
+changed camera angles, distant panoramas, reduced destruction, intact
+replacement structures, level or unrelated aircraft, aircraft flying away,
+wrong aircraft types, missing annotations, random text, logos, watermarks,
+CGI, cartoon rendering, and obvious AI artifacts.
+
+VIDEO TITLE (context only):
+{title}
+
+TARGET LANGUAGE (no text should appear in the image): {language}
+
+Return exactly these three sections and nothing else:
+
+### VISUAL AUDIT
+Give a concrete factual audit of the actual image, including location
+fingerprint, camera/crop, dominant subjects and positions, explosion structure
+and scale, visible damage, drone attack trajectory, annotation, colors,
+lighting, and safe micro-variations. Do not invent facts.
+
+### VARIANT PROMPT
+Write one long, detailed, standalone English production prompt for Google Flow.
+Do not say “use the reference image” or rely on any unavailable image.
+
+### NEGATIVE PROMPT
+Write a compact negative prompt protecting the scene, composition, scale,
+destruction, drone trajectory, annotation, and photorealistic thumbnail quality.
+""".strip()
+
+
 _VARIANT_IDS = {
     "pl": 1, "tr": 2, "cs": 3, "ro": 4, "hu": 5,
     "sv": 6, "fi": 7, "hr": 8, "da": 9, "bg": 10,
@@ -553,92 +634,51 @@ def _call_thumbnail_step(system: str, messages: list, label: str, emit=None) -> 
     raise RuntimeError(f"{label} failed after {THUMBNAIL_ATTEMPTS} attempts: {last_err}")
 
 
-def analyze_and_rewrite(image_path: str, language: str, title: str = "", emit=None) -> dict:
-    """Analyze a competitor thumbnail and return a prompt for a new one.
+def _thumbnail_section(text: str, heading: str, next_heading: str | None = None) -> str:
+    value = str(text or "").strip()
+    start = value.find(heading)
+    if start < 0:
+        raise RuntimeError(f"Thumbnail one-shot response is missing {heading}")
+    start += len(heading)
+    end = len(value)
+    if next_heading:
+        next_pos = value.find(next_heading, start)
+        if next_pos >= 0:
+            end = next_pos
+    section = value[start:end].strip()
+    if not section:
+        raise RuntimeError(f"Thumbnail one-shot response has empty {heading}")
+    return section
 
-    Returns {"prompt": str, "analysis": str}. Any API failure is raised to the
-    caller; the pipeline catches it and continues without a thumbnail prompt.
-    """
+
+def analyze_and_rewrite(image_path: str, language: str, title: str = "", emit=None) -> dict:
+    """Use one multimodal rewrite request to analyze and rewrite a thumbnail."""
     if not image_path or not os.path.exists(image_path):
         return {"prompt": "", "analysis": ""}
 
-    _emit(emit, "Analyzing source thumbnail...")
+    _emit(emit, "Analyzing and rewriting source thumbnail in one request...")
     data_url = _image_data_url(image_path)
-
-    analysis = _call_thumbnail_step(
-        "You are a precise YouTube thumbnail design analyst.",
+    language_name = lang_utils.configured_language_name(language)
+    one_shot_prompt = ONE_SHOT_PROMPT.format(
+        title=title or "(unknown)",
+        language=language_name,
+    )
+    raw = _call_thumbnail_step(
+        REWRITE_SYSTEM,
         [{
             "role": "user",
             "content": [
                 {"type": "image_url", "image_url": {"url": data_url}},
-                {"type": "text", "text": ANALYSIS_PROMPT},
+                {"type": "text", "text": one_shot_prompt},
             ],
         }],
-        "Thumbnail analysis",
+        "Thumbnail one-shot analysis and prompt",
         emit=emit,
     )
-
-    _emit(emit, "Writing thumbnail generation prompt...")
-    language_name = lang_utils.configured_language_name(language)
-    rewrite_prompt = f"""
-You will receive the result of a careful reference-image analysis. Convert it into
-one complete standalone image-generation prompt for a new YouTube thumbnail.
-
-VIDEO TITLE (context only):
-{title or '(unknown)'}
-
-VARIANT_ID: {_variant_id(language)}
-TARGET LANGUAGE: {language_name}
-PREVIOUS VARIATIONS: none recorded for this production batch.
-
-The output must preserve approximately 85-95 percent of the reference concept.
-This is a minimal variation, not a redesign. Preserve every LOCKED ELEMENT:
-main event and target type, main subject, broad environment, camera distance,
-visual hierarchy, approximate explosion power and importance, correct drone or
-aircraft type, and the relationship between the drone and target.
-
-Select approximately 3-7 small, natural changes from SAFE VARIABLE ELEMENTS.
-Use VARIANT_ID only as an invisible diversification cue. Do not mention it in
-the generated image. Do not mechanically mirror every variant. Horizontal
-mirroring is optional and only allowed for some variants; if used, correct the
-orientation, smoke drift, lighting, and secondary object positions so it is not a
-simple Photoshop flip.
-
-Preserve realistic damage and previously damaged objects. Preserve the same
-explosion scale: never turn a large explosion into a small fire or a realistic
-detonation into a fantasy/nuclear mushroom cloud. Preserve the correct drone
-type: an FPV multirotor must remain an FPV multirotor, and a fixed-wing drone
-must remain fixed-wing.
-
-The image must be a realistic imperfect news/photo/drone still with restrained
-saturation, natural shadows and reflections, atmospheric haze, mild sensor noise,
-slight JPEG compression, and plausible heat distortion. Avoid glossy CGI,
-movie-poster lighting, perfect symmetry, anime, painting, game render, gore,
-readable text, logos, watermarks, timestamps, HUD/UI, flags, or black bars.
-Require 1920x1080 full-frame 16:9, no letterboxing, no stretched geometry, and a
-sharp readable main hook at small thumbnail size. Any visible text is forbidden;
-the target language is retained only as context for this production.
-
-REFERENCE ANALYSIS:
-{analysis}
-
-Return exactly:
-
-### VARIANT PROMPT
-A complete standalone English image-generation prompt. Do not say "same as
-master" and do not rely on the image model remembering another prompt.
-
-### NEGATIVE PROMPT
-The adapted negative prompt.
-
-No explanation or commentary.
-""".strip()
-    prompt = _call_thumbnail_step(
-        REWRITE_SYSTEM,
-        [{"role": "user", "content": rewrite_prompt}],
-        "Thumbnail prompt rewrite",
-        emit=emit,
-    )
+    analysis = _thumbnail_section(raw, "### VISUAL AUDIT", "### VARIANT PROMPT")
+    variant = _thumbnail_section(raw, "### VARIANT PROMPT", "### NEGATIVE PROMPT")
+    negative = _thumbnail_section(raw, "### NEGATIVE PROMPT")
+    prompt = f"### VARIANT PROMPT\n{variant}\n\n### NEGATIVE PROMPT\n{negative}"
 
     return {
         "prompt": (prompt or "").strip(),

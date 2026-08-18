@@ -575,11 +575,19 @@ socket.on('produce_done', data => {
         <button type="button" class="btn" style="margin-top:8px;padding:5px 10px;font-size:11px" onclick="copyText(this.parentElement.querySelector('.thumbnail-prompt-text').textContent, this)">Copy Prompt</button>
       </div>`
     : '';
-  const thumbnailImageHtml = data.thumbnail_image_url
+  const thumbnailUrls = Array.isArray(data.thumbnail_image_urls) && data.thumbnail_image_urls.length
+    ? data.thumbnail_image_urls
+    : (data.thumbnail_image_url ? [data.thumbnail_image_url] : []);
+  const thumbnailImageHtml = thumbnailUrls.length
     ? `<div style="margin:12px 0">
-        <div style="color:#a78bfa;font-size:12px;font-weight:700;margin-bottom:6px">Generated Thumbnail:</div>
-        <img src="${escHtml(data.thumbnail_image_url)}" alt="Generated thumbnail" style="display:block;width:min(100%,640px);aspect-ratio:16/9;object-fit:cover;border-radius:8px;border:1px solid #374151;background:#111827">
-        <a class="btn" style="display:inline-block;margin-top:8px;padding:5px 10px;font-size:11px" href="${escHtml(data.thumbnail_image_url)}" download>Download Thumbnail</a>
+        <div style="color:#a78bfa;font-size:12px;font-weight:700;margin-bottom:8px">Generated Thumbnail${thumbnailUrls.length > 1 ? 's' : ''}:</div>
+        <div style="display:flex;flex-wrap:wrap;gap:14px">
+          ${thumbnailUrls.map((url, i) => `<div style="min-width:260px;flex:1 1 360px;max-width:640px">
+            <div style="color:#9ca3af;font-size:11px;margin-bottom:5px">Thumbnail ${i + 1}</div>
+            <img src="${escHtml(url)}" alt="Generated thumbnail ${i + 1}" style="display:block;width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;border:1px solid #374151;background:#111827">
+            <a class="btn" style="display:inline-block;margin-top:8px;padding:5px 10px;font-size:11px" href="${escHtml(url)}" download>Download Thumbnail ${i + 1}</a>
+          </div>`).join('')}
+        </div>
       </div>`
     : '';
   const timings = data.timings || {};

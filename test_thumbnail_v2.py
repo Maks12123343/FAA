@@ -54,71 +54,137 @@ REWRITE_SYSTEM = (
 
 
 ONE_SHOT_PROMPT = r"""
-Inspect the PROVIDED REFERENCE IMAGE at maximum visual care. The image itself
-is the only source of truth; the title is context only. First reason internally
-about the composition, then write a new standalone image-generation prompt for
-a controlled variation. Do not output your hidden reasoning.
+You are reverse-engineering the PROVIDED REFERENCE IMAGE for a high-performing
+YouTube breaking-news thumbnail. The image is attached in this same message and
+is the only visual source of truth. Inspect its actual pixels carefully before
+writing anything. The video title is context only and must never override what
+is visible.
 
-This must be a universal instruction that works for any reference image. Never
-assume or invent a port, terminal, explosion, drone, aircraft, ship, weapon,
-building, landscape, or annotation unless it is visibly present in the image.
+Your task is to produce a complete, self-contained English prompt for Google
+Flow. Flow will receive only your written prompt and will NOT receive the
+reference image, so every important visual fact must be written explicitly.
 
-The generated variation must preserve the reference as a spatial blueprint:
-- Keep the same camera viewpoint, crop, horizon, perspective, information
-  density, visual hierarchy, and relationships between all important subjects.
-- Preserve every dominant click hook as closely as possible to the reference,
-  including its original position, footprint, size, scale, orientation,
-  proportions, spacing, and visual prominence.
-- If an explosion or other dominant event is visible, keep its original
-  position, size, shape scale, origin, and relationship to nearby objects.
-  Never move it to a different part of the frame or weaken it into a minor
-  detail. Keep it realistic rather than turning it into a fantasy or nuclear
-  blast.
-- If a drone or aircraft is visible, preserve its exact visible category,
-  approximate position, size, orientation, wing/body proportions, and relation
-  to the scene. Do not replace it with another aircraft type.
-- If a circle, oval, arrow, outline, or other annotation is visible, preserve
-  its target, placement, approximate size, thickness, color, shape, and
-  visibility. Do not add or remove annotations that are not in the reference.
-- Preserve all other important subjects and the visible type of location, but
-  describe them only from the pixels. Do not force a particular story or place.
+The result must be a new thumbnail variation that is at least as strong,
+dramatic, readable, realistic, and clickable as the supplied competitor
+thumbnail. Preserve the competitor's visual logic and dominant click hooks,
+but do not copy the image pixel-for-pixel or reproduce it one-to-one.
 
-Make the result as visually strong and clickable as the reference, without
-making it dramatically more extreme. It must remain a believable photograph or
-video still, with natural geometry, lighting, shadows, reflections, haze,
-texture, and restrained overall saturation. Use full-frame 1920x1080, 16:9,
-with no borders or letterboxing and no readable text anywhere.
+NON-NEGOTIABLE REFERENCE LOCKS:
+- Preserve the exact visible type of location and environment. Do not replace
+  an industrial waterfront with a steppe, or a road convoy with a city, unless
+  that is what the image visibly shows.
+- Preserve the camera viewpoint, height, angle, perspective, crop, horizon,
+  information density, and direction of the scene.
+- Describe the left, center, right, foreground, middle ground, and background
+  explicitly, including the relative size and position of every dominant
+  subject.
+- Preserve the main click hook's position, footprint, scale, shape, colors,
+  brightness, and relationship to nearby objects.
+- Treat the location's visual fingerprint as locked: preserve the same
+  distribution of major tanks, roads, pipe corridors, quay or shoreline,
+  water boundary, vessels, buildings, and large empty areas. Describe these
+  landmarks individually instead of summarizing them as a generic facility.
+- Preserve the same destruction footprint: which tanks, roofs, platforms,
+  vehicles, decks, roads, and structures are burning, damaged, collapsed,
+  blackened, or still intact. Do not replace visible structural damage with a
+  clean intact facility around a fireball.
+- Do not make the main event smaller, weaker, farther away, cleaner, or less
+  colorful than in the supplied image.
+- Do not move the drone, aircraft, ship, vehicle, building, explosion, smoke,
+  circle, oval, arrow, or other annotation unless the change is genuinely tiny
+  and affects only a secondary detail.
+- Do not invent a different country, military platform, landscape, weather,
+  architecture, or story. If a detail is unclear, describe only what is visibly
+  supported by the pixels.
 
-Create only small controlled differences in secondary details: smoke curls,
-minor debris, reflections, tiny lighting changes, cloud texture, or other
-non-essential background details. Do not move, resize, hide, or redesign the
-locked click hooks. The result must be a variation, not a pixel-for-pixel copy
-and not a new composition.
+IF A LARGE EXPLOSION OR FIRE IS VISIBLE, describe it in concrete detail:
+- exact position in the frame and relation to the horizon and nearby objects;
+- its apparent size and footprint compared with the frame and nearby vehicles;
+- the broad fireball silhouette and number of visible flame lobes;
+- bright yellow-white core, orange and red-orange flames, darker cavities,
+  sparks, fragments, heat distortion, and ground or structure connection;
+- the full black/charcoal smoke volume, density, rolling shape, direction, and
+  how it overlaps the background;
+- the visible damage below and around the fire: destroyed or burning tanks,
+  collapsed platforms, blackened ground, damaged roofs, broken pipework,
+  secondary fires, debris, or intact structures that provide scale. Preserve
+  the same amount and severity of destruction shown in the reference;
+- the bright fireball must remain a dominant visual hook, not a small fire,
+  distant flash, firecracker, or thin flame.
 
-VISUAL AUDIT TO INCLUDE BEFORE THE PROMPT:
-Briefly record the dominant hook, important subject positions and relative
-sizes, visible aircraft/drone type if any, visible annotation if any, camera
-and crop, and the safe micro-variations selected. Do not invent missing facts.
+IF A DRONE OR AIRCRAFT IS VISIBLE, describe its visible category, approximate
+size, exact frame position, silhouette, and relationship to the main event.
+Keep it visibly pitched and tilted downward toward the explosion or impact
+area, as if it is descending in an attack run: its nose/front and flight axis
+must point toward the blast, with a natural slight bank and clear downward
+attitude. It must not look level, stationary, flying away, or unrelated to the
+strike. Preserve the aircraft category, proportions, position, scale, and
+recognizable silhouette while making this attack trajectory unmistakable. If a
+yellow circle or oval is visible, preserve exactly one similar highlight around
+the same target, in the same general position, with similar thickness, color,
+and visibility. Do not add labels, arrows, captions, logos, or text that are
+absent from the image.
+
+Write the final prompt with the following detailed sections:
+1. Overall visual concept and breaking-news impact.
+2. Camera, perspective, crop, horizon, and spatial layout.
+3. Exact location and environment-defining elements.
+4. Main subject and dominant click hook.
+5. Explosion/fire/smoke details, if present.
+6. Vehicles, structures, aircraft, drone, water, roads, or other visible
+   secondary subjects.
+7. Lighting, color palette, atmosphere, and contrast.
+8. Realistic compressed news-photograph quality.
+9. Minimal controlled variation.
+10. Negative prompt.
+
+The final image must be full-frame 1920x1080, 16:9, without borders or black
+bars. It must look like a real compressed breaking-news photograph or video
+still, not CGI, digital art, a poster, a game screenshot, or a fantasy scene.
+Keep the dominant event and main subjects clear at thumbnail size.
+
+The variation section may change only minor smoke curls, tiny debris positions,
+small reflections, subtle haze, or other non-essential details. It must not
+change the location, camera composition, dominant event, explosion footprint,
+drone position, annotation target, object scale, destruction footprint, or
+visual hierarchy. The generated scene must remain recognizably the same type
+of industrial site with the same water/land relationship and the same major
+landmarks, only slightly reinterpreted.
+
+The negative prompt must explicitly prevent weak/small explosions, wrong
+locations, changed camera angles, distant panoramas, altered object positions,
+missing annotations, reduced destruction, intact replacement structures,
+incorrect aircraft types, level or unrelated aircraft attitude, aircraft
+flying away from the explosion, CGI, cartoon rendering, random text, logos,
+watermarks, and obvious AI artifacts.
 
 VIDEO TITLE (context only):
 {source_title}
 
 TARGET LANGUAGE (no text should appear in the image): {language}
-VARIANT CUE: {variant_cue}
+VARIANT CUE (secondary details only): {variant_cue}
 
-Return exactly these three sections and no wrapper or commentary:
+Return exactly these three sections and nothing else:
 
 ### VISUAL AUDIT
-A concise but concrete audit grounded only in visible pixels.
+Write a concrete factual audit of the actual image: location type, camera and
+crop, all dominant subjects, their positions and relative sizes, main hook,
+explosion/fire/smoke details if present, exact fireball structure, visible
+damage footprint, destroyed versus intact structures, aircraft/drone position
+and descending attack trajectory toward the blast, annotation details,
+location-defining landmarks, colors, lighting, and safe micro-variations. Do
+not invent facts or summarize the scene too generally.
 
 ### VARIANT PROMPT
-A complete standalone English image-generation prompt. It must include all
-important reference-specific subjects and their relative placement, but must
-not name a specific location or object that is absent from the image.
+Write one long, complete, standalone English production prompt for Google Flow.
+It must describe the actual reference-specific scene in enough detail to
+reconstruct its composition without seeing the image. Do not write “use the
+reference image” or refer to an unavailable image.
 
 ### NEGATIVE PROMPT
-A compact negative prompt that protects the reference geometry, subject types,
-annotations, realism, and locked click hooks.
+Write a strong compact negative prompt protecting the exact location type,
+composition, dominant event, scale, colors, aircraft/drone, annotations,
+photorealism, destruction footprint, and thumbnail readability.
 """.strip()
 
 

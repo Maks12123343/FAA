@@ -577,20 +577,15 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
     # ---- thumbnail analysis (library pipeline only) ----
     _thumb_out = os.path.join(proj_dir, "thumbnail_prompt.txt")
     _settings = config.load_settings()
+    _double_preview = bool(_settings.get("gemini_image_double_preview", False))
+    _thumb_out_2 = os.path.join(proj_dir, "thumbnail_prompt_2.txt")
+    _thumb_prompt_2 = ""
     _skip_thumbnail = manual_mode or not bool(_settings.get("rewrite_thumbnail_enabled", True))
     if _skip_thumbnail:
         if manual_mode:
             log("thumbnail", "Manual mode: skipping thumbnail analysis/rewrite")
         else:
             log("thumbnail", "thumbnail rewrite disabled: skipping thumbnail analysis/rewrite")
-    elif os.path.exists(_thumb_out):
-        try:
-            with open(_thumb_out, encoding="utf-8") as _f:
-                _thumb_prompt = _f.read()
-            log("thumbnail", f"Prompt cached ({len(_thumb_prompt)} chars)")
-        except Exception as _e:
-            print(f"[war_pipeline] thumbnail prompt cache read failed: {_e!r}", flush=True)
-            _thumb_prompt = ""
     else:
         try:
             from backend import thumbnail as _thumb_mod
@@ -605,25 +600,47 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
                 if os.path.exists(meta_path):
                     with open(meta_path, encoding="utf-8") as _mf:
                         _meta_for_thumb = json.load(_mf)
-                _thumb_result = _thumb_mod.analyze_and_rewrite(
-                    _thumb_path,
-                    language,
-                    title=_meta_for_thumb.get("title", source_title),
-                    emit=emit,
-                )
-                _thumb_prompt = (_thumb_result.get("prompt") or "").strip()
-                if _thumb_prompt:
-                    with open(_thumb_out, "w", encoding="utf-8") as _f:
-                        _f.write(_thumb_prompt)
-                    if emit:
-                        emit("thumbnail_prompt", _thumb_prompt)
-                    print(f"[war_pipeline] thumbnail prompt saved: {_thumb_out}", flush=True)
+
+                _prompt_targets = [(_thumb_out, 1)]
+                if _double_preview:
+                    _prompt_targets.append((_thumb_out_2, 2))
+                for _prompt_path, _preview_number in _prompt_targets:
+                    _cached_prompt = ""
+                    if os.path.exists(_prompt_path):
+                        try:
+                            with open(_prompt_path, encoding="utf-8") as _f:
+                                _cached_prompt = _f.read().strip()
+                        except OSError as _e:
+                            print(f"[war_pipeline] thumbnail prompt cache read failed: {_e!r}", flush=True)
+                    if _cached_prompt:
+                        _prompt_value = _cached_prompt
+                        log("thumbnail", f"Prompt {_preview_number} cached ({len(_prompt_value)} chars)")
+                    else:
+                        log("thumbnail", f"Creating independent analysis/prompt for preview {_preview_number}...")
+                        _thumb_result = _thumb_mod.analyze_and_rewrite(
+                            _thumb_path,
+                            language,
+                            title=_meta_for_thumb.get("title", source_title),
+                            emit=emit,
+                        )
+                        _prompt_value = (_thumb_result.get("prompt") or "").strip()
+                        if _prompt_value:
+                            with open(_prompt_path, "w", encoding="utf-8") as _f:
+                                _f.write(_prompt_value)
+                            if emit:
+                                emit("thumbnail_prompt", _prompt_value)
+                            print(f"[war_pipeline] thumbnail prompt {_preview_number} saved: {_prompt_path}", flush=True)
+                    if _preview_number == 1:
+                        _thumb_prompt = _prompt_value
+                    else:
+                        _thumb_prompt_2 = _prompt_value
             else:
                 print(f"[war_pipeline] no thumbnail.jpg found under {prepare_dir}", flush=True)
         except Exception as _e:
             print(f"[war_pipeline] thumbnail step failed: {_e!r}", flush=True)
     # ---- end thumbnail ----
     _thumb_image_path = os.path.join(proj_dir, "thumbnail_generated.png")
+    _thumb_image_path_2 = os.path.join(proj_dir, "thumbnail_generated_2.png")
     _thumbnail_enabled = bool(_settings.get("gemini_image_enabled", False))
     if _thumbnail_enabled and not manual_mode and not bool(
         _settings.get("rewrite_thumbnail_enabled", True)
@@ -636,19 +653,29 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
             raise RuntimeError(
                 "Thumbnail generation is enabled, but the thumbnail prompt could not be created."
             )
-        if os.path.exists(_thumb_image_path) and gemini_image.is_valid_thumbnail(_thumb_image_path):
-            log("thumbnail_image", "Google Flow thumbnail cached.")
-        else:
-            if os.path.exists(_thumb_image_path):
-                os.remove(_thumb_image_path)
-                log("thumbnail_image", "Invalid cached thumbnail removed.")
+        _image_targets = [(_thumb_prompt, _thumb_image_path, 1)]
+        if _double_preview:
+            if not _thumb_prompt_2:
+                raise RuntimeError(
+                    "Two-thumbnail mode is enabled, but the second thumbnail prompt could not be created."
+                )
+            _image_targets.append((_thumb_prompt_2, _thumb_image_path_2, 2))
+        for _image_prompt, _image_path, _preview_number in _image_targets:
+            if os.path.exists(_image_path) and gemini_image.is_valid_thumbnail(_image_path):
+                log("thumbnail_image", f"Google Flow thumbnail {_preview_number} cached.")
+                continue
+            if os.path.exists(_image_path):
+                os.remove(_image_path)
+                log("thumbnail_image", f"Invalid cached thumbnail {_preview_number} removed.")
             try:
-                gemini_image.generate_thumbnail(_thumb_prompt, _thumb_image_path, emit=emit)
+                log("thumbnail_image", f"Generating independent thumbnail {_preview_number} with Google Flow...")
+                gemini_image.generate_thumbnail(_image_prompt, _image_path, emit=emit)
             except Exception as _e:
                 # A checked Flow option means the finished project must contain
-                # the image. Raising here lets the language-level retry reuse the
-                # cached script/metadata/prompt and retry only the missing image.
-                raise RuntimeError(f"Google Flow thumbnail generation failed: {_e}") from _e
+                # every requested image. Retry reuses all completed caches.
+                raise RuntimeError(
+                    f"Google Flow thumbnail {_preview_number} generation failed: {_e}"
+                ) from _e
     mark_timing("thumbnail")
 
     # ── TTS ────────────────────────────────────────────────────────────────────
@@ -843,6 +870,12 @@ def produce(prepare_id: str, niche: str, language: str, emit=None,
             f"/api/projects/{proj_id}/thumbnail"
             if os.path.exists(_thumb_image_path) else ""
         ),
+        "thumbnail_image_urls": [
+            url for url, path in [
+                (f"/api/projects/{proj_id}/thumbnail", _thumb_image_path),
+                (f"/api/projects/{proj_id}/thumbnail/2", _thumb_image_path_2),
+            ] if os.path.exists(path)
+        ],
         "output_path": output_path,
         "audio_dur": round(audio_dur, 1),
         "clips_used": len(prepared),
