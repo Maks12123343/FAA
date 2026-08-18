@@ -351,12 +351,13 @@ def _call_openai_compatible(
     step_label: str = "api",
     reasoning_effort: str = "",
     max_tokens_raw: str = "12000",
+    use_responses_for_images: bool = False,
 ) -> tuple[str, str]:
     import requests
 
     # OmniRoute's ChatGPT/Codex bridge expects image parts through the
     # Responses API as input_image, not Chat Completions image_url blocks.
-    if _has_image_content(messages):
+    if use_responses_for_images and _has_image_content(messages):
         last_err = None
         for attempt in range(max_retries):
             try:

@@ -306,11 +306,15 @@ def _call_provider(
     name, url, key, model, effort, max_tokens = api_client._provider_settings(
         settings, provider_id, allow_legacy=False
     )
+    selected_model = model_override or model
+    use_responses_for_images = (
+        provider_id == "custom" and selected_model.startswith("chatgpt-web/")
+    )
     text, _ = api_client._call_openai_compatible(
         provider_name=name,
         api_url=url,
         api_key=key,
-        model=model_override or model,
+        model=selected_model,
         system=system,
         messages=messages,
         timeout=180,
@@ -318,6 +322,7 @@ def _call_provider(
         step_label=label,
         reasoning_effort=effort,
         max_tokens_raw=max_tokens,
+        use_responses_for_images=use_responses_for_images,
     )
     return _clean_model_text(text)
 
