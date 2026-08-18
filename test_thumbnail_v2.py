@@ -115,41 +115,49 @@ REWRITE_SYSTEM = (
 
 
 REWRITE_PROMPT = r"""
-Create one complete standalone English text-to-image prompt for a NEW variation
-of the supplied reference thumbnail.
+Write one complete standalone English image-generation prompt for a controlled
+variation of the supplied reference thumbnail. The reference image is the
+visual source of truth. Do not redesign it, do not make a generic war image,
+and do not copy it pixel-for-pixel.
 
-REFERENCE IMAGE RULES:
-- The reference image is the source of truth. Ignore any title implication that
-  conflicts with visible pixels.
-- This is a controlled variation of a proven thumbnail, not a redesign.
-- Preserve the same story, camera side, crop density, visual hierarchy, subject
-  relationships, dominant event scale, and immediately readable click hooks.
-- Preserve EVERY item in locked_click_hooks. Do not replace, remove, shrink,
-  hide, or move a locked hook into a less noticeable region.
-- Preserve the exact visible aircraft/drone category. Never replace fixed-wing
-  with FPV/multirotor, or the reverse.
-- If the reference contains a circle, oval, arrow, outline, or other annotation,
-  preserve its color, target, approximate position, and visual purpose.
-- Do not increase empty sky, water, or low-information space beyond the reference.
+The new image must preserve these three locked click hooks with approximately
+the same position, relative size, and visual weight as the reference:
 
-CLICKABILITY RULES:
-- At 10 percent display size the dominant event must remain instantly obvious.
-- Keep strong local contrast and separation between the main hooks: detailed
-  bright fire or impact where present, deep textured smoke where present, clear
-  subject silhouettes, and a clean vivid annotation where present.
-- Realistic overall color does not mean dull. Preserve the reference's strongest
-  local orange, black, red, and yellow contrasts when those colors are visible.
-- Keep the image dense, legible, dramatic, and credible as a news photograph.
-  Avoid generic distant aftermath scenes, tiny subjects, washed-out fire, large
-  empty areas, glossy CGI, fantasy destruction, and movie-poster lighting.
+1. A HUGE, unmistakable, photorealistic industrial explosion in the same
+   left/left-center area. It must be the dominant hook: several connected
+   bright yellow-white and orange fireballs, dense black textured smoke, real
+   heat distortion, burning structures and believable debris. It must look
+   epic and immediately readable at small thumbnail size, but still like a
+   real aerial news photograph: no nuclear mushroom cloud, fantasy blast, or
+   over-saturated movie-poster effect. Do not weaken it into a small flame.
 
-VARIATION RULES:
-- Make only 2 to 4 safe micro-variations selected from the analysis, such as a
-  subtle smoke drift, minor debris placement, small lighting/reflection changes,
-  or a very slight camera adjustment that does not weaken the composition.
-- Use the VARIANT CUE only for subtle diversity. It must not change locked hooks.
-- No readable text, logos, flags, watermarks, timestamps, HUD, borders, or bars.
-- Require a full-frame 1920x1080 16:9 image with natural geometry.
+2. One fixed-wing drone in the same upper-right area, at approximately the same
+   scale and angle as the reference, with the same general nose direction and
+   wing spread. Preserve the large hand-drawn-style yellow oval/circle around
+   it: same target, same side of the frame, approximately the same dimensions,
+   thickness, color, and visibility. The oval must clearly point to the drone
+   without touching or covering the main explosion. Never turn it into a
+   multirotor, helicopter, fighter jet, or extra aircraft.
+
+3. The same type of dense waterside industrial fuel-terminal/port location:
+   white storage tanks, pipelines, docks and service structures, a red-orange
+   tanker in the lower center or lower-right, blue-gray water, and a narrow
+   strip of distant land/sky in the background. Keep the same camera side,
+   crop density, horizon, information density, and relationship between the
+   terminal, water, tanker, explosion, drone, and oval. Small natural changes
+   in smoke curl, debris, reflections, and lighting are allowed, but the scene
+   must remain clearly the same kind of location and event.
+
+COMPOSITION AND QUALITY:
+- Full-frame 1920x1080, 16:9, natural aerial-news-photo geometry.
+- Keep the explosion, drone-plus-oval, and tanker visible in one coherent frame.
+- Preserve the reference's dense composition; do not add empty sky or water.
+- Strong local orange/black/yellow/red contrast, realistic shadows, haze,
+  smoke volume, imperfect camera detail, and restrained overall saturation.
+- The result should be as clickable and dramatic as the reference, neither
+  weaker nor dramatically more apocalyptic.
+- Make only subtle controlled variations; never move or resize a locked hook.
+- No readable text anywhere in the image.
 
 REFERENCE ANALYSIS JSON:
 {analysis_json}
@@ -166,7 +174,7 @@ Return exactly these two sections and no wrapper or commentary:
 A complete standalone English generation prompt.
 
 ### NEGATIVE PROMPT
-A compact negative prompt adapted to the reference and analysis.
+A compact negative prompt adapted to the reference and the locked hooks.
 """.strip()
 
 
@@ -398,7 +406,7 @@ def _generate_flow(prompt: str, output_path: Path) -> None:
 
     png = gemini_image._normalize_png(gemini_image._decode_image(encoded))
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix="thumbnail_2.", suffix=".part", dir=output_path.parent)
+    fd, temp_name = tempfile.mkstemp(prefix=f"{args.output_stem}.", suffix=".part", dir=output_path.parent)
     os.close(fd)
     temp_path = Path(temp_name)
     try:
@@ -407,7 +415,7 @@ def _generate_flow(prompt: str, output_path: Path) -> None:
     finally:
         temp_path.unlink(missing_ok=True)
     if not gemini_image.is_valid_thumbnail(str(output_path)):
-        raise RuntimeError("thumbnail_2.png failed 1920x1080 PNG validation")
+        raise RuntimeError(f"{output_path.name} failed 1920x1080 PNG validation")
 
 
 def _project_id(prepare_id: str, language: str) -> str:
@@ -420,9 +428,10 @@ def _project_id(prepare_id: str, language: str) -> str:
 def generate_one(args: argparse.Namespace, state: dict[str, Any], image_path: Path, language: str) -> Path:
     project_id = _project_id(args.prepare_id, language)
     output_dir = _find_output_dir(args.downloads_root, project_id, language)
-    output_path = output_dir / "thumbnail_2.png"
-    analysis_path = output_dir / "thumbnail_2_analysis.json"
-    prompt_path = output_dir / "thumbnail_2_prompt.txt"
+    stem = args.output_stem
+    output_path = output_dir / f"{stem}.png"
+    analysis_path = output_dir / f"{stem}_analysis.json"
+    prompt_path = output_dir / f"{stem}_prompt.txt"
     if output_path.exists() and not args.force:
         raise RuntimeError(f"Output already exists (use --force to replace it): {output_path}")
 
@@ -436,7 +445,7 @@ def generate_one(args: argparse.Namespace, state: dict[str, Any], image_path: Pa
                 analysis = cached_analysis
                 final_prompt = cached_prompt
                 print(
-                    "[thumbnail-v2] Analysis and prompt cached; skipping Byesu requests.",
+                    f"[thumbnail-v2] {stem} analysis and prompt cached; skipping provider requests.",
                     flush=True,
                 )
         except (OSError, ValueError):
@@ -519,7 +528,7 @@ def generate_one(args: argparse.Namespace, state: dict[str, Any], image_path: Pa
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate thumbnail_2.png with isolated test prompts; FAA production prompts are not modified."
+        description="Generate an isolated thumbnail candidate; FAA production prompts are not modified."
     )
     parser.add_argument("--prepare-id", required=True, help="For example: war_1786969946")
     parser.add_argument("--languages", default="tr", help="Comma-separated language codes; default: tr")
@@ -546,7 +555,18 @@ def parse_args() -> argparse.Namespace:
         default=ROOT.parent / "FAA_downloads",
         help="FAA_downloads root; defaults beside the FAA repository",
     )
-    parser.add_argument("--force", action="store_true", help="Replace an existing thumbnail_2.png")
+    parser.add_argument(
+        "--reference-image",
+        type=Path,
+        default=None,
+        help="Optional image used as the visual reference instead of the prepare thumbnail",
+    )
+    parser.add_argument(
+        "--output-stem",
+        default="thumbnail_3",
+        help="Output filename stem; default: thumbnail_3",
+    )
+    parser.add_argument("--force", action="store_true", help="Replace an existing candidate with the same stem")
     parser.add_argument(
         "--refresh-analysis",
         action="store_true",
@@ -563,7 +583,7 @@ def main() -> int:
         args.rewrite_provider_id = args.provider_id
     prepare_dir = Path(config.PROJECTS_DIR) / f"_prepare_{args.prepare_id}"
     state_path = prepare_dir / "state.json"
-    image_path = prepare_dir / "thumbnail.jpg"
+    image_path = args.reference_image or (prepare_dir / "thumbnail.jpg")
     if not state_path.is_file():
         raise RuntimeError(f"Prepare state not found: {state_path}")
     if not image_path.is_file():
