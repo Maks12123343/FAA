@@ -205,14 +205,12 @@ def _parse_json_response(value: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Thumbnail analysis returned invalid JSON: {exc}") from exc
     hooks = result.get("locked_click_hooks")
-    if not isinstance(hooks, list) or not hooks:
-        raise RuntimeError("Thumbnail analysis returned no locked click hooks")
+    if not isinstance(hooks, list):
+        hooks = []
     result["locked_click_hooks"] = [
         hook for hook in hooks
         if isinstance(hook, dict) and str(hook.get("description") or "").strip()
     ]
-    if not result["locked_click_hooks"]:
-        raise RuntimeError("Thumbnail analysis returned no usable locked click hooks")
     return result
 
 
@@ -256,6 +254,18 @@ def _complete_locked_hooks(analysis: dict[str, Any]) -> dict[str, Any]:
             "position": "full-frame composition",
             "must_preserve": True,
         })
+    if analysis.get("information_density"):
+        candidates.append({
+            "description": f"Reference information density: {analysis['information_density']}",
+            "position": "throughout the frame",
+            "must_preserve": True,
+        })
+    if analysis.get("scene_summary"):
+        candidates.append({
+            "description": f"Reference scene: {analysis['scene_summary']}",
+            "position": "as shown in the reference",
+            "must_preserve": True,
+        })
 
     for candidate in candidates:
         key = candidate["description"].strip().lower()
@@ -265,6 +275,8 @@ def _complete_locked_hooks(analysis: dict[str, Any]) -> dict[str, Any]:
         if len(hooks) >= 3:
             break
     analysis["locked_click_hooks"] = hooks[:5]
+    if not analysis["locked_click_hooks"]:
+        raise RuntimeError("Thumbnail analysis returned no usable visual facts")
     return analysis
 
 
