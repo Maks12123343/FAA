@@ -44,123 +44,59 @@ ANALYSIS_SYSTEM = (
 )
 
 
-ANALYSIS_PROMPT = r"""
-Analyze the PROVIDED REFERENCE IMAGE itself. The image is the only source of
-truth. The video title is context only and must never override visible evidence.
-
-Your purpose is to identify why this exact thumbnail is immediately clickable
-at small size and which visual elements a new variation is forbidden to lose.
-
-Inspect and record:
-1. Exact camera viewpoint, crop, horizon, foreground/background relationship,
-   and where land, water, sky, roads, docks, ships, buildings, and vehicles sit.
-2. The dominant click hook: what it is, where it is, how large and bright it is,
-   and why the eye notices it first.
-3. The second and third click hooks and their visual weight.
-4. Every aircraft or drone: use only the type visible in the image. Distinguish
-   fixed-wing UAV, multirotor/FPV drone, helicopter, fighter, and airliner.
-5. Every editor-added annotation such as a yellow circle, oval, arrow, outline,
-   or glow. Record its color, target, position, thickness, and importance.
-6. The color and contrast pattern that remains readable when the image is shown
-   at 10 percent size.
-7. Empty or low-information regions. State whether a new version may enlarge
-   them. Preserve the reference's information density.
-8. Three to five LOCKED CLICK HOOKS that every successful variation must retain.
-
-Do not suggest improvements. Do not invent objects. Do not identify a precise
-weapon or vehicle model unless visually certain. If uncertain, describe the
-visible category accurately and state the uncertainty.
-
-Return ONLY valid JSON with this schema:
-{
-  "scene_summary": "...",
-  "camera_and_crop": "...",
-  "dominant_event": {
-    "description": "...",
-    "position": "...",
-    "prominence": "...",
-    "color_contrast": "..."
-  },
-  "secondary_subjects": [
-    {"description": "...", "position": "...", "visual_weight": "..."}
-  ],
-  "aircraft_or_drone": {
-    "present": true,
-    "visible_type": "...",
-    "position": "...",
-    "orientation": "...",
-    "relative_size": "..."
-  },
-  "annotation": {
-    "present": true,
-    "type": "...",
-    "color": "...",
-    "target": "...",
-    "position": "...",
-    "importance": "..."
-  },
-  "information_density": "...",
-  "locked_click_hooks": [
-    {"description": "...", "position": "...", "must_preserve": true}
-  ],
-  "safe_micro_variations": ["...", "...", "..."]
-}
-""".strip()
-
-
 REWRITE_SYSTEM = (
     "You are an expert prompt engineer for realistic, highly clickable YouTube "
-    "news thumbnails. The supplied reference image and locked hooks are binding."
+    "news thumbnails. Inspect the supplied reference image carefully before "
+    "writing the final prompt. The reference geometry is binding."
 )
 
 
-REWRITE_PROMPT = r"""
-Write one complete standalone English image-generation prompt for a controlled
-variation of the supplied reference thumbnail. The reference image is the
-visual source of truth. Do not redesign it, do not make a generic war image,
-and do not copy it pixel-for-pixel.
+ONE_SHOT_PROMPT = r"""
+Inspect the PROVIDED REFERENCE IMAGE at maximum visual care. The image itself
+is the only source of truth; the title is context only. First reason internally
+about the composition, then write a new standalone image-generation prompt for
+a controlled variation. Do not output your hidden reasoning.
 
-The new image must preserve these three locked click hooks with approximately
-the same position, relative size, and visual weight as the reference:
+This must be a universal instruction that works for any reference image. Never
+assume or invent a port, terminal, explosion, drone, aircraft, ship, weapon,
+building, landscape, or annotation unless it is visibly present in the image.
 
-1. A HUGE, unmistakable, photorealistic industrial explosion in the same
-   left/left-center area. It must be the dominant hook: several connected
-   bright yellow-white and orange fireballs, dense black textured smoke, real
-   heat distortion, burning structures and believable debris. It must look
-   epic and immediately readable at small thumbnail size, but still like a
-   real aerial news photograph: no nuclear mushroom cloud, fantasy blast, or
-   over-saturated movie-poster effect. Do not weaken it into a small flame.
+The generated variation must preserve the reference as a spatial blueprint:
+- Keep the same camera viewpoint, crop, horizon, perspective, information
+  density, visual hierarchy, and relationships between all important subjects.
+- Preserve every dominant click hook as closely as possible to the reference,
+  including its original position, footprint, size, scale, orientation,
+  proportions, spacing, and visual prominence.
+- If an explosion or other dominant event is visible, keep its original
+  position, size, shape scale, origin, and relationship to nearby objects.
+  Never move it to a different part of the frame or weaken it into a minor
+  detail. Keep it realistic rather than turning it into a fantasy or nuclear
+  blast.
+- If a drone or aircraft is visible, preserve its exact visible category,
+  approximate position, size, orientation, wing/body proportions, and relation
+  to the scene. Do not replace it with another aircraft type.
+- If a circle, oval, arrow, outline, or other annotation is visible, preserve
+  its target, placement, approximate size, thickness, color, shape, and
+  visibility. Do not add or remove annotations that are not in the reference.
+- Preserve all other important subjects and the visible type of location, but
+  describe them only from the pixels. Do not force a particular story or place.
 
-2. One fixed-wing drone in the same upper-right area, at approximately the same
-   scale and angle as the reference, with the same general nose direction and
-   wing spread. Preserve the large hand-drawn-style yellow oval/circle around
-   it: same target, same side of the frame, approximately the same dimensions,
-   thickness, color, and visibility. The oval must clearly point to the drone
-   without touching or covering the main explosion. Never turn it into a
-   multirotor, helicopter, fighter jet, or extra aircraft.
+Make the result as visually strong and clickable as the reference, without
+making it dramatically more extreme. It must remain a believable photograph or
+video still, with natural geometry, lighting, shadows, reflections, haze,
+texture, and restrained overall saturation. Use full-frame 1920x1080, 16:9,
+with no borders or letterboxing and no readable text anywhere.
 
-3. The same type of dense waterside industrial fuel-terminal/port location:
-   white storage tanks, pipelines, docks and service structures, a red-orange
-   tanker in the lower center or lower-right, blue-gray water, and a narrow
-   strip of distant land/sky in the background. Keep the same camera side,
-   crop density, horizon, information density, and relationship between the
-   terminal, water, tanker, explosion, drone, and oval. Small natural changes
-   in smoke curl, debris, reflections, and lighting are allowed, but the scene
-   must remain clearly the same kind of location and event.
+Create only small controlled differences in secondary details: smoke curls,
+minor debris, reflections, tiny lighting changes, cloud texture, or other
+non-essential background details. Do not move, resize, hide, or redesign the
+locked click hooks. The result must be a variation, not a pixel-for-pixel copy
+and not a new composition.
 
-COMPOSITION AND QUALITY:
-- Full-frame 1920x1080, 16:9, natural aerial-news-photo geometry.
-- Keep the explosion, drone-plus-oval, and tanker visible in one coherent frame.
-- Preserve the reference's dense composition; do not add empty sky or water.
-- Strong local orange/black/yellow/red contrast, realistic shadows, haze,
-  smoke volume, imperfect camera detail, and restrained overall saturation.
-- The result should be as clickable and dramatic as the reference, neither
-  weaker nor dramatically more apocalyptic.
-- Make only subtle controlled variations; never move or resize a locked hook.
-- No readable text anywhere in the image.
-
-REFERENCE ANALYSIS JSON:
-{analysis_json}
+VISUAL AUDIT TO INCLUDE BEFORE THE PROMPT:
+Briefly record the dominant hook, important subject positions and relative
+sizes, visible aircraft/drone type if any, visible annotation if any, camera
+and crop, and the safe micro-variations selected. Do not invent missing facts.
 
 VIDEO TITLE (context only):
 {source_title}
@@ -168,13 +104,19 @@ VIDEO TITLE (context only):
 TARGET LANGUAGE (no text should appear in the image): {language}
 VARIANT CUE: {variant_cue}
 
-Return exactly these two sections and no wrapper or commentary:
+Return exactly these three sections and no wrapper or commentary:
+
+### VISUAL AUDIT
+A concise but concrete audit grounded only in visible pixels.
 
 ### VARIANT PROMPT
-A complete standalone English generation prompt.
+A complete standalone English image-generation prompt. It must include all
+important reference-specific subjects and their relative placement, but must
+not name a specific location or object that is absent from the image.
 
 ### NEGATIVE PROMPT
-A compact negative prompt adapted to the reference and the locked hooks.
+A compact negative prompt that protects the reference geometry, subject types,
+annotations, realism, and locked click hooks.
 """.strip()
 
 
@@ -406,7 +348,7 @@ def _generate_flow(prompt: str, output_path: Path) -> None:
 
     png = gemini_image._normalize_png(gemini_image._decode_image(encoded))
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=f"{args.output_stem}.", suffix=".part", dir=output_path.parent)
+    fd, temp_name = tempfile.mkstemp(prefix=f"{output_path.stem}.", suffix=".part", dir=output_path.parent)
     os.close(fd)
     temp_path = Path(temp_name)
     try:
@@ -423,6 +365,31 @@ def _project_id(prepare_id: str, language: str) -> str:
     if not digits:
         raise RuntimeError(f"Prepare ID has no numeric suffix: {prepare_id}")
     return f"russia_ukraine_war_{language}_{digits}"
+
+
+def _extract_section(text: str, heading: str, next_heading: str | None = None) -> str:
+    cleaned = _clean_model_text(text)
+    start = cleaned.find(heading)
+    if start < 0:
+        raise RuntimeError(f"One-shot response is missing {heading}")
+    start += len(heading)
+    end = len(cleaned)
+    if next_heading:
+        next_pos = cleaned.find(next_heading, start)
+        if next_pos >= 0:
+            end = next_pos
+    value = cleaned[start:end].strip()
+    if not value:
+        raise RuntimeError(f"One-shot response has an empty {heading} section")
+    return value
+
+
+def _extract_one_shot_response(text: str) -> tuple[str, str]:
+    audit = _extract_section(text, "### VISUAL AUDIT", "### VARIANT PROMPT")
+    variant = _extract_section(text, "### VARIANT PROMPT", "### NEGATIVE PROMPT")
+    negative = _extract_section(text, "### NEGATIVE PROMPT")
+    prompt = f"### VARIANT PROMPT\n{variant}\n\n### NEGATIVE PROMPT\n{negative}"
+    return audit, prompt
 
 
 def generate_one(args: argparse.Namespace, state: dict[str, Any], image_path: Path, language: str) -> Path:
@@ -453,68 +420,62 @@ def generate_one(args: argparse.Namespace, state: dict[str, Any], image_path: Pa
 
     if analysis is None:
         data_url = _image_data_url(image_path)
-        analysis_messages = [{
+        one_shot_text = ONE_SHOT_PROMPT.format(
+            source_title=state.get("source_title") or "(unknown)",
+            language=language,
+            variant_cue=VARIANT_CUES.get(
+                language,
+                "Keep the reference geometry fixed and vary only minor natural secondary details.",
+            ),
+        )
+        one_shot_messages = [{
             "role": "user",
             "content": [
                 {"type": "image_url", "image_url": {"url": data_url}},
-                {"type": "text", "text": ANALYSIS_PROMPT},
+                {"type": "text", "text": one_shot_text},
             ],
         }]
-        analysis_error = None
+        response_error = None
+        audit = ""
+        raw_response = ""
         for format_attempt in range(2):
-            messages = analysis_messages
             if format_attempt:
-                messages = analysis_messages + [{
+                one_shot_messages = one_shot_messages + [{
                     "role": "user",
                     "content": (
-                        "Your previous answer did not satisfy the required schema. "
-                        "Analyze the same supplied image again and return ONLY one valid "
-                        "JSON object matching the exact schema."
+                        "Your previous response did not follow the required three-section format. "
+                        "Inspect the same image again and return only VISUAL AUDIT, VARIANT PROMPT, "
+                        "and NEGATIVE PROMPT sections. Do not omit any section."
                     ),
                 }]
                 print(
-                    "[thumbnail-v2] Analysis response did not satisfy the JSON schema; retrying once...",
+                    "[thumbnail-v2] One-shot response format invalid; retrying once...",
                     flush=True,
                 )
-            analysis_text = _call_provider(
-                ANALYSIS_SYSTEM,
-                messages,
+            raw_response = _call_provider(
+                REWRITE_SYSTEM,
+                one_shot_messages,
                 args.analysis_provider_id,
-                args.analysis_model,
-                "thumbnail_v2_analysis",
+                args.analysis_model or args.rewrite_model,
+                "thumbnail_v2_one_shot_prompt",
             )
             try:
-                analysis = _complete_locked_hooks(_parse_json_response(analysis_text))
+                audit, final_prompt = _extract_one_shot_response(raw_response)
+                analysis = {
+                    "mode": "one_shot_visual_audit_and_prompt",
+                    "provider_id": args.analysis_provider_id,
+                    "model": args.analysis_model or args.rewrite_model,
+                    "reference_image": str(image_path),
+                    "visual_audit": audit,
+                }
                 break
             except RuntimeError as exc:
-                analysis_error = exc
+                response_error = exc
         if analysis is None:
             raise RuntimeError(
-                f"{args.analysis_provider_id or 'primary'} thumbnail analysis failed JSON validation: "
-                f"{analysis_error}"
+                f"{args.analysis_provider_id or 'primary'} one-shot thumbnail prompt failed validation: "
+                f"{response_error}"
             )
-
-        rewrite_text = REWRITE_PROMPT.format(
-            analysis_json=json.dumps(analysis, ensure_ascii=False, indent=2),
-            source_title=state.get("source_title") or "(unknown)",
-            language=language,
-            variant_cue=VARIANT_CUES.get(language, "Keep the reference crop and vary only minor natural details."),
-        )
-        final_prompt = _call_provider(
-            REWRITE_SYSTEM,
-            [{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                    {"type": "text", "text": rewrite_text},
-                ],
-            }],
-            args.rewrite_provider_id,
-            args.rewrite_model,
-            "thumbnail_v2_rewrite",
-        )
-        if "### VARIANT PROMPT" not in final_prompt:
-            raise RuntimeError("Thumbnail rewrite did not return a VARIANT PROMPT section")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     analysis_path.write_text(
@@ -535,20 +496,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--analysis-provider-id",
         default="byesu",
-        help="Saved provider used only for reference-image analysis; default: byesu",
+        help="Saved provider used for the one-shot visual audit and prompt; default: byesu",
     )
     parser.add_argument(
         "--rewrite-provider-id",
         default="",
-        help="Saved provider used only to rewrite the final image prompt; blank uses primary/fallback routing",
+        help="Legacy alias; one-shot mode uses --analysis-provider-id",
     )
     parser.add_argument(
         "--provider-id",
         default="",
         help="Deprecated alias for --rewrite-provider-id (kept for existing commands)",
     )
-    parser.add_argument("--analysis-model", default="", help="Optional Byesu model override for visual analysis")
-    parser.add_argument("--rewrite-model", default="", help="Optional model override for prompt rewriting")
+    parser.add_argument("--analysis-model", default="", help="Optional model override for the one-shot provider")
+    parser.add_argument("--rewrite-model", default="", help="Legacy model alias used if --analysis-model is blank")
     parser.add_argument(
         "--downloads-root",
         type=Path,
@@ -596,18 +557,15 @@ def main() -> int:
     print(f"[thumbnail-v2] Reference: {image_path}", flush=True)
     print(f"[thumbnail-v2] Source: {state.get('source_url', '')}", flush=True)
     print(f"[thumbnail-v2] Languages: {', '.join(languages)}", flush=True)
-    analysis_name, analysis_model = _provider_description(
-        args.analysis_provider_id, args.analysis_model
-    )
-    rewrite_name, rewrite_model = _provider_description(
-        args.rewrite_provider_id, args.rewrite_model
+    prompt_name, prompt_model = _provider_description(
+        args.analysis_provider_id, args.analysis_model or args.rewrite_model
     )
     print(
-        f"[thumbnail-v2] Analysis route: {analysis_name} ({analysis_model})",
+        f"[thumbnail-v2] One-shot analysis + prompt route: {prompt_name} ({prompt_model})",
         flush=True,
     )
     print(
-        f"[thumbnail-v2] Prompt rewrite route: {rewrite_name} ({rewrite_model})",
+        "[thumbnail-v2] Image generation route: Google Flow bridge",
         flush=True,
     )
     for language in languages:
