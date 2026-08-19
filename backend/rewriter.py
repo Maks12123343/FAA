@@ -196,6 +196,76 @@ def _word_count(text: str) -> int:
     return len(re.findall(r"\S+", text or ""))
 
 
+def _is_compact_translation_language(language: str) -> bool:
+    """Japanese/Korean need a translation-first length baseline.
+
+    Their natural character count is much smaller than an English source, so
+    comparing the final script directly with the source transcript makes a
+    valid rewrite look falsely too short.
+    """
+    value = re.sub(r"\s+", " ", str(language or "").strip().lower())
+    return value in {"ja", "japanese", "ko", "korean"}
+
+
+def _two_stage_compact_enabled(language: str) -> bool:
+    if not _is_compact_translation_language(language):
+        return False
+    raw = os.environ.get("FAA_TWO_STAGE_COMPACT_REWRITE", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _translate_source_first(transcript: str, language: str, cache_dir: str | None = None) -> str:
+    """Translate the source first so rewrite length checks use target text."""
+    cache_path = os.path.join(cache_dir, "translated_source.txt") if cache_dir else None
+    if cache_path and os.path.exists(cache_path):
+        with open(cache_path, encoding="utf-8") as handle:
+            cached = handle.read().strip()
+        if cached:
+            print(f"[rewriter] Translation-first source cached ({len(cached)} chars)", flush=True)
+            return cached
+
+    system = (
+        "You are a precise professional translator preparing a voiceover script. "
+        "Translate the complete source into the requested target language. "
+        "Do not summarize, rewrite, shorten, expand, or add facts. Preserve every "
+        "event, name, number, causal relationship, and narrative order. Keep the "
+        "paragraph structure natural for later voiceover editing. Return only the translation."
+    )
+    user = (
+        f"TARGET LANGUAGE: {language}\n\n"
+        "Translate the following complete source narration. This is the translation "
+        "stage only; do not perform the later rewrite or compression.\n\n"
+        f"SOURCE NARRATION:\n{transcript}"
+    )
+    print(
+        f"[rewriter] Translation-first stage for {language} ({len(transcript)} source chars)...",
+        flush=True,
+    )
+    translated_raw, finish = _call_claude(
+        system,
+        [{"role": "user", "content": user}],
+        timeout=360,
+    )
+    if finish == "max_tokens":
+        raise RuntimeError(f"Translation-first response for {language} was truncated")
+    translated = _extract_code_block(translated_raw).strip()
+    if len(translated) < 1000:
+        raise RuntimeError(
+            f"Translation-first response for {language} is suspiciously short: {len(translated)} chars"
+        )
+    if cache_path:
+        directory = os.path.dirname(cache_path)
+        os.makedirs(directory, exist_ok=True)
+        temp_path = cache_path + ".part"
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            handle.write(translated + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, cache_path)
+        print(f"[rewriter] Translation-first source cached: {cache_path}", flush=True)
+    return translated
+
+
 def _word_bounds(source_words: int) -> tuple:
     return int(source_words * MIN_LENGTH_RATIO), int(source_words * MAX_LENGTH_RATIO)
 
@@ -1158,11 +1228,22 @@ def rewrite_all(
     language_name = lang_utils.configured_language_name(language)
     script   = ""
     feedback = ""
+    settings = config.load_settings()
+    skip_rewrite = not bool(settings.get("rewrite_script_enabled", True))
+    if not skip_rewrite and _two_stage_compact_enabled(language_name):
+        transcript = _translate_source_first(
+            transcript=transcript,
+            language=language_name,
+            cache_dir=cache_dir,
+        )
+        print(
+            f"[rewriter] Rewrite stage now uses translated {language_name} source "
+            f"({len(transcript)} chars)",
+            flush=True,
+        )
     orig_len = len(transcript)
     min_chars, max_chars = _length_bounds(orig_len)
     soft_max_chars = _soft_max_chars(orig_len)
-    settings = config.load_settings()
-    skip_rewrite = not bool(settings.get("rewrite_script_enabled", True))
     rewrite_blueprint = None
     rewrite_cache_state = None
     rewrite_cache_file = None

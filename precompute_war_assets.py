@@ -35,6 +35,11 @@ def _parse_args() -> argparse.Namespace:
         help="Optional shared projects directory; otherwise the repo configuration is used.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Only show missing work; do not call APIs.")
+    parser.add_argument(
+        "--two-stage-compact",
+        action="store_true",
+        help="For Japanese/Korean, translate first and rewrite against the translated text.",
+    )
     return parser.parse_args()
 
 
@@ -195,6 +200,8 @@ def _prepare_language(
 
 def main() -> int:
     args = _parse_args()
+    if args.two_stage_compact:
+        os.environ["FAA_TWO_STAGE_COMPACT_REWRITE"] = "1"
     numeric_id = _numeric_id(args.prepare_id)
     projects_dir = os.path.abspath(args.projects_dir or config.PROJECTS_DIR)
     prepare_dir = Path(projects_dir) / f"_prepare_war_{numeric_id}"
