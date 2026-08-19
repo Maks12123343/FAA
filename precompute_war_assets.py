@@ -202,6 +202,7 @@ def main() -> int:
     args = _parse_args()
     if args.two_stage_compact:
         os.environ["FAA_TWO_STAGE_COMPACT_REWRITE"] = "1"
+        os.environ["FAA_REWRITE_CHUNKS"] = "3"
     numeric_id = _numeric_id(args.prepare_id)
     projects_dir = os.path.abspath(args.projects_dir or config.PROJECTS_DIR)
     prepare_dir = Path(projects_dir) / f"_prepare_war_{numeric_id}"

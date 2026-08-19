@@ -43,7 +43,7 @@ def _call_claude(system: str, messages: list, timeout: int = 300, max_retries: i
 def _rewrite_chunk_count() -> int:
     try:
         settings = config.load_settings()
-        raw = settings.get("rewrite_chunks") or os.environ.get("FAA_REWRITE_CHUNKS") or 6
+        raw = os.environ.get("FAA_REWRITE_CHUNKS") or settings.get("rewrite_chunks") or 6
         return max(1, min(10, int(raw)))
     except (TypeError, ValueError):
         return 6
@@ -215,54 +215,105 @@ def _two_stage_compact_enabled(language: str) -> bool:
 
 
 def _translate_source_first(transcript: str, language: str, cache_dir: str | None = None) -> str:
-    """Translate the source first so rewrite length checks use target text."""
-    cache_path = os.path.join(cache_dir, "translated_source.txt") if cache_dir else None
-    if cache_path and os.path.exists(cache_path):
-        with open(cache_path, encoding="utf-8") as handle:
+    """Translate in three cached chunks so the full target text becomes the baseline."""
+    final_path = os.path.join(cache_dir, "translated_source.txt") if cache_dir else None
+    if final_path and os.path.exists(final_path):
+        with open(final_path, encoding="utf-8") as handle:
             cached = handle.read().strip()
         if cached:
             print(f"[rewriter] Translation-first source cached ({len(cached)} chars)", flush=True)
             return cached
 
+    chunks = _split_into_chunks(transcript, 3)
+    chunks_path = os.path.join(cache_dir, "translation_chunks.json") if cache_dir else None
+    signature = _sha256_text(json.dumps({
+        "language": language,
+        "source_sha256": _sha256_text(transcript),
+        "chunks": [_sha256_text(chunk) for chunk in chunks],
+    }, sort_keys=True))
+    cache = {"signature": signature, "entries": []}
+    if chunks_path and os.path.exists(chunks_path):
+        try:
+            with open(chunks_path, encoding="utf-8") as handle:
+                candidate = json.load(handle)
+            if candidate.get("signature") == signature and isinstance(candidate.get("entries"), list):
+                cache["entries"] = candidate["entries"][:len(chunks)]
+        except Exception as exc:
+            print(f"[rewriter] Translation chunk cache ignored: {exc}", flush=True)
+
     system = (
         "You are a precise professional translator preparing a voiceover script. "
-        "Translate the complete source into the requested target language. "
+        "Translate only the supplied source chunk into the requested target language. "
         "Do not summarize, rewrite, shorten, expand, or add facts. Preserve every "
-        "event, name, number, causal relationship, and narrative order. Keep the "
-        "paragraph structure natural for later voiceover editing. Return only the translation."
+        "event, name, number, causal relationship, and narrative order. Return only "
+        "the translation in a code block."
     )
-    user = (
-        f"TARGET LANGUAGE: {language}\n\n"
-        "Translate the following complete source narration. This is the translation "
-        "stage only; do not perform the later rewrite or compression.\n\n"
-        f"SOURCE NARRATION:\n{transcript}"
-    )
-    print(
-        f"[rewriter] Translation-first stage for {language} ({len(transcript)} source chars)...",
-        flush=True,
-    )
-    translated_raw, finish = _call_claude(
-        system,
-        [{"role": "user", "content": user}],
-        timeout=360,
-    )
-    if finish == "max_tokens":
-        raise RuntimeError(f"Translation-first response for {language} was truncated")
-    translated = _extract_code_block(translated_raw).strip()
+    translated_parts = []
+    for index, chunk in enumerate(chunks):
+        entry = cache["entries"][index] if index < len(cache["entries"]) else None
+        if (
+            isinstance(entry, dict)
+            and entry.get("source_sha256") == _sha256_text(chunk)
+            and isinstance(entry.get("part"), str)
+            and entry["part"].strip()
+        ):
+            part = entry["part"].strip()
+            print(
+                f"[rewriter] Translation chunk {index + 1}/3 cached ({len(part)} chars)",
+                flush=True,
+            )
+        else:
+            print(
+                f"[rewriter] Translating chunk {index + 1}/3 ({len(chunk)} source chars) to {language}...",
+                flush=True,
+            )
+            user = (
+                f"TARGET LANGUAGE: {language}\n"
+                f"CHUNK: {index + 1}/3\n\n"
+                "This is translation only. Do not perform the later rewrite or compression.\n\n"
+                f"SOURCE CHUNK:\n{chunk}"
+            )
+            translated_raw, finish = _call_claude(
+                system,
+                [{"role": "user", "content": user}],
+                timeout=360,
+            )
+            if finish == "max_tokens":
+                raise RuntimeError(f"Translation chunk {index + 1}/3 for {language} was truncated")
+            part = _extract_code_block(translated_raw).strip()
+            if len(part) < 250:
+                raise RuntimeError(
+                    f"Translation chunk {index + 1}/3 for {language} is suspiciously short: {len(part)} chars"
+                )
+            entry = {"source_sha256": _sha256_text(chunk), "part": part}
+            cache["entries"] = cache["entries"][:index]
+            cache["entries"].append(entry)
+            if chunks_path:
+                directory = os.path.dirname(chunks_path)
+                os.makedirs(directory, exist_ok=True)
+                temp_path = chunks_path + ".part"
+                with open(temp_path, "w", encoding="utf-8") as handle:
+                    json.dump(cache, handle, ensure_ascii=False, indent=2)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_path, chunks_path)
+        translated_parts.append(part)
+
+    translated = "\n\n".join(translated_parts).strip()
     if len(translated) < 1000:
         raise RuntimeError(
-            f"Translation-first response for {language} is suspiciously short: {len(translated)} chars"
+            f"Translation-first result for {language} is suspiciously short: {len(translated)} chars"
         )
-    if cache_path:
-        directory = os.path.dirname(cache_path)
+    if final_path:
+        directory = os.path.dirname(final_path)
         os.makedirs(directory, exist_ok=True)
-        temp_path = cache_path + ".part"
+        temp_path = final_path + ".part"
         with open(temp_path, "w", encoding="utf-8") as handle:
             handle.write(translated + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_path, cache_path)
-        print(f"[rewriter] Translation-first source cached: {cache_path}", flush=True)
+        os.replace(temp_path, final_path)
+        print(f"[rewriter] Translation-first source cached: {final_path}", flush=True)
     return translated
 
 
