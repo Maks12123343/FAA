@@ -106,6 +106,16 @@ def generate_image():
     if not isinstance(prompt, str) or not prompt.strip():
         return jsonify({"error": "prompt is required"}), 400
     try:
+        # Check the saved browser session before spending a Flow generation.
+        session_ok, session_detail = client.auth_status()
+        if not session_ok:
+            return jsonify({
+                "error": {
+                    "message": "Google Flow session is signed out. Run gemini_bridge/setup_browser_profile.ps1 to sign in again.",
+                    "type": "google_flow_auth_required",
+                    "detail": session_detail,
+                }
+            }), 401
         image, mime = client.generate(prompt, str(body.get("model", "")))
         return jsonify({
             "created": int(time.time()),

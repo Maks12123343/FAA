@@ -60,6 +60,25 @@ _job_last_msg = ""
 _job_started_at = 0.0
 MAX_LANGUAGE_ATTEMPTS = 3
 
+
+class FatalFlowProductionError(RuntimeError):
+    """Stop the whole production when the thumbnail provider is unavailable."""
+
+
+def _is_flow_failure(message: str) -> bool:
+    """Flow failures are not useful to retry for every selected language."""
+    value = str(message or "").lower()
+    markers = (
+        "google flow",
+        "flow bridge",
+        "gemini image bridge",
+        "google_flow_error",
+        "signed out",
+        "session is signed out",
+        "setup_browser_profile.ps1",
+    )
+    return any(marker in value for marker in markers)
+
 _auto_download_manager = auto_download_worker.AutoDownloadManager()
 _auto_download_manager.apply_settings(config.load_settings())
 
@@ -387,6 +406,15 @@ def api_produce():
                             f"attempt {attempt}/{MAX_LANGUAGE_ATTEMPTS}: {e}\n{tb}",
                             flush=True,
                         )
+                        if _is_flow_failure(str(e)):
+                            message = (
+                                f"Production stopped: Google Flow failed while processing "
+                                f"{lang}. Fix or re-authorize Flow, then restart production. "
+                                f"Details: {e}"
+                            )
+                            _emit("fatal", message)
+                            socketio.emit("error", {"message": message, "fatal": True})
+                            raise FatalFlowProductionError(message) from e
                         if attempt < MAX_LANGUAGE_ATTEMPTS:
                             next_pending.append(lang)
                             _emit(
@@ -436,6 +464,14 @@ def api_produce():
             else:
                 # Standard pipeline
                 _produce_languages_with_retry()
+        except FatalFlowProductionError as e:
+            print(f"[app] FATAL production stop: {e}", flush=True)
+            socketio.emit("all_done", {
+                "failed_languages": [],
+                "max_attempts": MAX_LANGUAGE_ATTEMPTS,
+                "stopped": True,
+                "reason": "flow_failure",
+            })
         finally:
             with _job_lock:
                 _job_active = False
