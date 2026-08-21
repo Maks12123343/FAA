@@ -38,7 +38,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--two-stage-compact",
         action="store_true",
-        help="For Japanese/Korean, translate first and rewrite against the translated text.",
+        help="Deprecated no-op: Japanese/Korean always translate first before the rewrite.",
     )
     return parser.parse_args()
 
@@ -201,8 +201,14 @@ def _prepare_language(
 def main() -> int:
     args = _parse_args()
     if args.two_stage_compact:
-        os.environ["FAA_TWO_STAGE_COMPACT_REWRITE"] = "1"
-        os.environ["FAA_REWRITE_CHUNKS"] = "3"
+        # Japanese/Korean already translate first by default, and the chunk count
+        # must stay the one configured in Settings. Kept so existing commands and
+        # scripts do not break.
+        print(
+            "[precompute] --two-stage-compact is now the default for Japanese/Korean; "
+            "the chunk count comes from Settings.",
+            flush=True,
+        )
     numeric_id = _numeric_id(args.prepare_id)
     projects_dir = os.path.abspath(args.projects_dir or config.PROJECTS_DIR)
     prepare_dir = Path(projects_dir) / f"_prepare_war_{numeric_id}"

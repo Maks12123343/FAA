@@ -101,6 +101,12 @@
       <p style="color:#f87171">No voice profiles configured. Add voice IDs in Settings.</p>
       {% endif %}
     </div>
+    {% if languages %}
+    <label id="selectAllWrap" style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:12px;font-size:13px;color:#d1d5db;width:max-content">
+      <input type="checkbox" id="selectAllLangs" onchange="toggleAllLanguages(this.checked)" style="width:16px;height:16px">
+      Select all ({{ languages|length }})
+    </label>
+    {% endif %}
     <div id="manualModeWrap" style="margin-top:16px;padding-top:14px;border-top:1px solid #222">
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#d1d5db">
         <input type="checkbox" id="manualMode" onchange="updateManualEditor()" style="width:16px;height:16px">
@@ -180,6 +186,21 @@ function log(msg, cls='') {
 
 function selectedLanguages() {
   return [...document.querySelectorAll('#langCheckboxes input:checked')].map(el => el.value);
+}
+
+function toggleAllLanguages(checked) {
+  document.querySelectorAll('#langCheckboxes input').forEach(el => { el.checked = checked; });
+  updateManualEditor();
+}
+
+// Keep the master box in sync when languages are ticked one by one.
+function syncSelectAllLanguages() {
+  const master = document.getElementById('selectAllLangs');
+  if (!master) return;
+  const boxes = [...document.querySelectorAll('#langCheckboxes input')];
+  const checked = boxes.filter(el => el.checked).length;
+  master.checked = boxes.length > 0 && checked === boxes.length;
+  master.indeterminate = checked > 0 && checked < boxes.length;
 }
 
 function languageLabel(code) {
@@ -641,7 +662,9 @@ socket.on('error', data => {
 onNicheChange();
 document.querySelectorAll('#langCheckboxes input').forEach(el => {
   el.addEventListener('change', updateManualEditor);
+  el.addEventListener('change', syncSelectAllLanguages);
 });
+syncSelectAllLanguages();
 
 // Check if a job is stuck on page load
 fetch('/api/status').then(r=>r.json()).then(d=>{

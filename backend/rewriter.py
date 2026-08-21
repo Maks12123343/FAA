@@ -110,11 +110,22 @@ def _rewrite_cache_blueprint(
     video_title: str,
     feedback: str,
     test_mode: bool,
+    chunks: list | None = None,
 ) -> dict:
+    """Build the rewrite plan. ``chunks`` overrides splitting.
+
+    Two-stage languages pass the already translated chunks so the rewrite works
+    on the same boundaries instead of re-splitting the joined translation.
+    """
     prompt_file = REWRITE_PROMPT_TEST_FILE if test_mode else REWRITE_PROMPT_FILE
     system_prompt = _load_prompt(prompt_file, language)
     chunk_count = _rewrite_chunk_count()
-    chunks = _split_into_chunks(transcript, chunk_count)
+    if chunks:
+        chunks = [chunk for chunk in chunks if str(chunk).strip()]
+    if chunks:
+        chunk_count = len(chunks)
+    else:
+        chunks = _split_into_chunks(transcript, chunk_count)
     signature_payload = {
         "version": REWRITE_CACHE_VERSION,
         "transcript_sha256": _sha256_text(transcript),
@@ -208,23 +219,52 @@ def _is_compact_translation_language(language: str) -> bool:
 
 
 def _two_stage_compact_enabled(language: str) -> bool:
+    """Japanese/Korean always translate first; the env var can only disable it.
+
+    The site (run.py / app.py) never sets FAA_TWO_STAGE_COMPACT_REWRITE, so an
+    opt-in default meant production silently skipped the translation stage while
+    precompute_war_assets.py used it. Keep one behaviour for both entry points.
+    """
     if not _is_compact_translation_language(language):
         return False
-    raw = os.environ.get("FAA_TWO_STAGE_COMPACT_REWRITE", "")
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    raw = os.environ.get("FAA_TWO_STAGE_COMPACT_REWRITE", "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return True
 
 
-def _translate_source_first(transcript: str, language: str, cache_dir: str | None = None) -> str:
-    """Translate in three cached chunks so the full target text becomes the baseline."""
-    final_path = os.path.join(cache_dir, "translated_source.txt") if cache_dir else None
-    if final_path and os.path.exists(final_path):
-        with open(final_path, encoding="utf-8") as handle:
-            cached = handle.read().strip()
-        if cached:
-            print(f"[rewriter] Translation-first source cached ({len(cached)} chars)", flush=True)
-            return cached
+def _translation_final_path(cache_dir: str | None) -> str | None:
+    return os.path.join(cache_dir, "translated_source.txt") if cache_dir else None
 
-    chunks = _split_into_chunks(transcript, 3)
+
+def _write_translated_source(final_path: str | None, translated: str) -> None:
+    if not final_path:
+        return
+    directory = os.path.dirname(final_path)
+    os.makedirs(directory, exist_ok=True)
+    temp_path = final_path + ".part"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        handle.write(translated + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_path, final_path)
+    print(f"[rewriter] Translation-first source cached: {final_path}", flush=True)
+
+
+def _translate_source_first(
+    transcript: str,
+    language: str,
+    cache_dir: str | None = None,
+    num_chunks: int | None = None,
+) -> tuple[str, list]:
+    """Translate in cached chunks and return (joined_text, translated_chunks).
+
+    The returned chunks are the exact units the rewrite stage then works on, so
+    translation and rewrite share one set of boundaries and one chunk count.
+    """
+    total_chunks = max(1, int(num_chunks or _rewrite_chunk_count()))
+    final_path = _translation_final_path(cache_dir)
+    chunks = _split_into_chunks(transcript, total_chunks)
     chunks_path = os.path.join(cache_dir, "translation_chunks.json") if cache_dir else None
     signature = _sha256_text(json.dumps({
         "language": language,
@@ -240,6 +280,41 @@ def _translate_source_first(transcript: str, language: str, cache_dir: str | Non
                 cache["entries"] = candidate["entries"][:len(chunks)]
         except Exception as exc:
             print(f"[rewriter] Translation chunk cache ignored: {exc}", flush=True)
+
+    # A complete per-chunk cache is the preferred source: it carries the exact
+    # boundaries the rewrite stage needs, which translated_source.txt alone does not.
+    if len(cache["entries"]) == len(chunks) and all(
+        isinstance(entry, dict)
+        and entry.get("source_sha256") == _sha256_text(chunks[index])
+        and isinstance(entry.get("part"), str)
+        and entry["part"].strip()
+        for index, entry in enumerate(cache["entries"])
+    ):
+        cached_parts = [entry["part"].strip() for entry in cache["entries"]]
+        joined = "\n\n".join(cached_parts).strip()
+        print(
+            f"[rewriter] Translation-first source cached "
+            f"({len(joined)} chars, {len(cached_parts)} chunks)",
+            flush=True,
+        )
+        if final_path and not os.path.exists(final_path):
+            _write_translated_source(final_path, joined)
+        return joined, cached_parts
+
+    # Legacy cache from before chunk-aligned rewriting: only the joined text was
+    # kept. Reuse it instead of paying for the translation again, and re-split it
+    # into the requested number of chunks.
+    if final_path and os.path.exists(final_path):
+        with open(final_path, encoding="utf-8") as handle:
+            cached = handle.read().strip()
+        if cached:
+            legacy_parts = _split_into_chunks(cached, total_chunks)
+            print(
+                f"[rewriter] Translation-first source cached ({len(cached)} chars); "
+                f"re-split into {len(legacy_parts)} chunks for rewrite",
+                flush=True,
+            )
+            return cached, legacy_parts
 
     system = (
         "You are a precise professional translator preparing a voiceover script. "
@@ -259,17 +334,18 @@ def _translate_source_first(transcript: str, language: str, cache_dir: str | Non
         ):
             part = entry["part"].strip()
             print(
-                f"[rewriter] Translation chunk {index + 1}/3 cached ({len(part)} chars)",
+                f"[rewriter] Translation chunk {index + 1}/{total_chunks} cached ({len(part)} chars)",
                 flush=True,
             )
         else:
             print(
-                f"[rewriter] Translating chunk {index + 1}/3 ({len(chunk)} source chars) to {language}...",
+                f"[rewriter] Translating chunk {index + 1}/{total_chunks} "
+                f"({len(chunk)} source chars) to {language}...",
                 flush=True,
             )
             user = (
                 f"TARGET LANGUAGE: {language}\n"
-                f"CHUNK: {index + 1}/3\n\n"
+                f"CHUNK: {index + 1}/{total_chunks}\n\n"
                 "This is translation only. Do not perform the later rewrite or compression.\n\n"
                 f"SOURCE CHUNK:\n{chunk}"
             )
@@ -279,11 +355,17 @@ def _translate_source_first(transcript: str, language: str, cache_dir: str | Non
                 timeout=360,
             )
             if finish == "max_tokens":
-                raise RuntimeError(f"Translation chunk {index + 1}/3 for {language} was truncated")
-            part = _extract_code_block(translated_raw).strip()
-            if len(part) < 250:
                 raise RuntimeError(
-                    f"Translation chunk {index + 1}/3 for {language} is suspiciously short: {len(part)} chars"
+                    f"Translation chunk {index + 1}/{total_chunks} for {language} was truncated"
+                )
+            part = _extract_code_block(translated_raw).strip()
+            # Scale with chunk size: a fixed 250-char floor would reject valid
+            # short chunks once the configured chunk count goes up.
+            min_part_chars = max(100, int(len(chunk) * 0.03))
+            if len(part) < min_part_chars:
+                raise RuntimeError(
+                    f"Translation chunk {index + 1}/{total_chunks} for {language} is "
+                    f"suspiciously short: {len(part)} chars (minimum {min_part_chars})"
                 )
             entry = {"source_sha256": _sha256_text(chunk), "part": part}
             cache["entries"] = cache["entries"][:index]
@@ -304,17 +386,8 @@ def _translate_source_first(transcript: str, language: str, cache_dir: str | Non
         raise RuntimeError(
             f"Translation-first result for {language} is suspiciously short: {len(translated)} chars"
         )
-    if final_path:
-        directory = os.path.dirname(final_path)
-        os.makedirs(directory, exist_ok=True)
-        temp_path = final_path + ".part"
-        with open(temp_path, "w", encoding="utf-8") as handle:
-            handle.write(translated + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, final_path)
-        print(f"[rewriter] Translation-first source cached: {final_path}", flush=True)
-    return translated
+    _write_translated_source(final_path, translated)
+    return translated, translated_parts
 
 
 def _word_bounds(source_words: int) -> tuple:
@@ -481,11 +554,13 @@ def _rewrite_chunk(chunk: str, position: str, language: str, video_title: str,
 
 def _rewrite_script(transcript: str, language: str, video_title: str,
                     feedback: str = "", test_mode: bool = False,
-                    cache_dir: str | None = None) -> str:
+                    cache_dir: str | None = None,
+                    chunks: list | None = None) -> str:
     """
     Rewrite transcript у NUM_CHUNKS частин.
     Кожна частина шле окремий запит з коротким контекстом попередніх.
     Після кожного chunk беремо summary + tail для наступного.
+    ``chunks``: ready units (translated chunks for ja/ko) instead of splitting.
     """
     global _LAST_REWRITTEN_PARTS
     _LAST_REWRITTEN_PARTS = []
@@ -498,16 +573,19 @@ def _rewrite_script(transcript: str, language: str, video_title: str,
         video_title=video_title,
         feedback=feedback,
         test_mode=test_mode,
+        chunks=chunks,
     )
     system = blueprint["system_prompt"]
+    chunks_supplied = bool(chunks)
     chunks = blueprint["chunks"]
     chunk_count = len(chunks)
     cache_path = _rewrite_cache_path(cache_dir)
     cache_state = _load_rewrite_cache(cache_path, blueprint)
     cached_entries = cache_state["entries"]
     print(
-        f"[rewriter] Split transcript into {len(chunks)} chunks "
-        f"(requested {chunk_count}): {[len(c) for c in chunks]} chars",
+        f"[rewriter] Rewriting {chunk_count} chunk(s)"
+        f"{' (pre-translated)' if chunks_supplied else ''}: "
+        f"{[len(c) for c in chunks]} chars",
         flush=True,
     )
     if cached_entries:
@@ -1281,15 +1359,17 @@ def rewrite_all(
     feedback = ""
     settings = config.load_settings()
     skip_rewrite = not bool(settings.get("rewrite_script_enabled", True))
+    pre_chunks = None
     if not skip_rewrite and _two_stage_compact_enabled(language_name):
-        transcript = _translate_source_first(
+        transcript, pre_chunks = _translate_source_first(
             transcript=transcript,
             language=language_name,
             cache_dir=cache_dir,
+            num_chunks=_rewrite_chunk_count(),
         )
         print(
             f"[rewriter] Rewrite stage now uses translated {language_name} source "
-            f"({len(transcript)} chars)",
+            f"({len(transcript)} chars, {len(pre_chunks)} chunks reused as rewrite units)",
             flush=True,
         )
     orig_len = len(transcript)
@@ -1306,6 +1386,7 @@ def rewrite_all(
             video_title=source_title,
             feedback="",
             test_mode=test_mode,
+            chunks=pre_chunks,
         )
         rewrite_cache_file = _rewrite_cache_path(cache_dir)
         rewrite_cache_state = _load_rewrite_cache(rewrite_cache_file, rewrite_blueprint)
@@ -1327,6 +1408,7 @@ def rewrite_all(
             source_title,
             test_mode=True,
             cache_dir=cache_dir,
+            chunks=pre_chunks,
         )
         print(f"[rewriter] TEST MODE: script done ({len(script)} chars)", flush=True)
     else:
@@ -1357,6 +1439,7 @@ def rewrite_all(
                 feedback=feedback,
                 test_mode=False,
                 cache_dir=cache_dir,
+                chunks=pre_chunks,
             )
 
             # If the model overshot the max length, compress the whole script with an LLM
