@@ -70,6 +70,44 @@ def _index_path_for(niche: str) -> str:
     return os.path.join(config.PROJECTS_DIR, "..", "movies", niche, "index.json")
 
 
+def _read_json_streamed(path: str, retries: int = 4) -> dict:
+    """Read a large JSON file in blocks.
+
+    Google Drive File Stream fails a single huge read of a file it has not
+    materialised yet with ``OSError: [Errno 22] Invalid argument``. Reading in
+    1 MB blocks makes Drive stream the file instead, and a short retry covers
+    the case where the mount is still coming back up.
+    """
+    block = 1024 * 1024
+    last_error = None
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            parts = []
+            with open(path, "rb") as fh:
+                while True:
+                    chunk = fh.read(block)
+                    if not chunk:
+                        break
+                    parts.append(chunk)
+            return json.loads(b"".join(parts).decode("utf-8"))
+        except OSError as exc:
+            last_error = exc
+            if attempt >= retries:
+                break
+            wait = 3 * attempt
+            print(
+                f"[war_pipeline] read failed ({exc.__class__.__name__}: {exc}); "
+                f"retry {attempt}/{retries - 1} in {wait}s. If this is Google Drive, "
+                f"make sure the mount is online.",
+                flush=True,
+            )
+            time.sleep(wait)
+    raise OSError(
+        f"Could not read {path} after {retries} attempts. "
+        f"Last error: {last_error!r}"
+    )
+
+
 def _load_library_index(niche: str) -> list:
     """
     Читає index.json для ніші, повертає список clips з ембеддингами.
@@ -111,8 +149,7 @@ def _load_library_index(niche: str) -> list:
 
     print(f"[war_pipeline] Loading index from {index_path}...", flush=True)
     t0 = time.time()
-    with open(index_path, encoding="utf-8") as f:
-        data = json.load(f)
+    data = _read_json_streamed(index_path)
     clips = data.get("clips", [])
     print(f"[war_pipeline] Loaded {len(clips)} clips in {time.time()-t0:.1f}s", flush=True)
 
