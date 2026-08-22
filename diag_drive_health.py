@@ -37,29 +37,44 @@ def main():
     print("GOOGLE DRIVE HEALTH CHECK")
     print("=" * 70)
 
-    # 1. Drive cache location and size cap
-    base = os.path.expandvars(r"%LOCALAPPDATA%\Google\DriveFS")
-    print(f"DriveFS folder      : {base}")
-    print(f"  exists            : {os.path.isdir(base)}")
-    if os.path.isdir(base):
-        total = 0
-        for root, _dirs, files in os.walk(base):
-            for f in files:
-                try:
-                    total += os.path.getsize(os.path.join(root, f))
-                except OSError:
-                    pass
-        print(f"  cache size on disk: {_human(total)}")
+    # 1. Where the Drive cache actually lives, and how big it is
+    default_base = os.path.expandvars(r"%LOCALAPPDATA%\Google\DriveFS")
+    found = []
+    for cand in [default_base] + [
+        os.path.join(f"{chr(c)}:", os.sep, "DriveFS") for c in range(ord("A"), ord("Z") + 1)
+    ]:
+        if os.path.isdir(cand):
+            total = 0
+            for root, _dirs, files in os.walk(cand):
+                for f in files:
+                    try:
+                        total += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+            found.append((cand, total))
+    print(f"Drive cache (default): {default_base}")
+    print(f"  exists            : {os.path.isdir(default_base)}")
+    for path, size in found:
+        where = "system disk" if path.upper().startswith("C:") else "moved off C:"
+        print(f"  {path}  {_human(size)}  ({where})")
+    if found and all(p.upper().startswith("C:") for p, _ in found):
+        print("  NOTE: cache is on the system disk. Move it in Drive settings if C: is tight.")
 
-    # 2. Free space on every relevant volume
+    # 2. Free space on every fixed volume
     print("\nDisk space:")
-    for drive in ["C:" + os.sep] + [m + os.sep for m in CANDIDATE_MOUNTS]:
+    for c in range(ord("A"), ord("Z") + 1):
+        drive = f"{chr(c)}:" + os.sep
         try:
             t, u, f = shutil.disk_usage(drive)
-            flag = "  <-- LOW" if f < 5e9 else ""
-            print(f"  {drive:6s} total={_human(t):>10s} free={_human(f):>10s}{flag}")
         except OSError:
-            print(f"  {drive:6s} not available")
+            continue
+        flags = []
+        if f < 10e9:
+            flags.append("LOW")
+        if f > 60e9:
+            flags.append("roomy - good cache target")
+        tail = ("  <-- " + ", ".join(flags)) if flags else ""
+        print(f"  {drive:5s} total={_human(t):>10s} free={_human(f):>10s}{tail}")
 
     # 3. The index file itself
     index_path = find_index()

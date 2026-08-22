@@ -127,7 +127,12 @@ def _local_index_mirror(index_path: str, niche: str) -> str:
     if drive_size < 32 * 1024 * 1024:
         return index_path
 
-    mirror_dir = os.path.join(os.path.expanduser("~"), ".faa_index_cache", niche)
+    # FAA_INDEX_CACHE_DIR lets the mirror live on a roomier disk than the
+    # system one, e.g. H:\faa_index_cache.
+    cache_root = os.environ.get("FAA_INDEX_CACHE_DIR", "").strip() or os.path.join(
+        os.path.expanduser("~"), ".faa_index_cache"
+    )
+    mirror_dir = os.path.join(cache_root, niche)
     mirror = os.path.join(mirror_dir, "index.json")
     try:
         if os.path.exists(mirror) and os.path.getsize(mirror) == drive_size:
