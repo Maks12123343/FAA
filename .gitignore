@@ -44,3 +44,5 @@ gemini_bridge/last_response.txt
 
 # Local deploy secrets (never push)
 deploy_secrets.sh
+
+drive_crash_report.txt
