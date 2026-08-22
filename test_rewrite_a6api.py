@@ -10,14 +10,21 @@ EDIT ONE LINE: put your A6API key into API_KEY below, then run:
     cd C:\\Users\\Ukraine\\FAA
     python test_rewrite_a6api.py
 
+Or pass the key without touching the file at all:
+
+    $env:A6API_KEY='sk-...'; python test_rewrite_a6api.py
+
 Optional overrides:
     python test_rewrite_a6api.py --language pl --chunks 3
+    python test_rewrite_a6api.py --model gpt-5.6-terra
     python test_rewrite_a6api.py --url https://www.youtube.com/watch?v=...
+
+On a 403 model_not_allowed the script prints the models the token may call.
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
 API_KEY = ""          # <-- paste the A6API key here (sk-...)
-MODEL = "gpt-5.5"
+MODEL = "gpt-5.6-luna"
 API_URL = "https://a6api.com/v1/chat/completions"
 REASONING_EFFORT = "high"
 MAX_TOKENS = "12000"
@@ -43,6 +50,7 @@ def _parse_args() -> argparse.Namespace:
                    help="Any language except ja/ko (they use the two-stage path). Default: pl")
     p.add_argument("--chunks", type=int, default=3, help="Chunk count for the rewrite. Default: 3")
     p.add_argument("--url", default="", help="YouTube URL. Default: reuse a cached transcript.")
+    p.add_argument("--model", default="", help=f"Override the model. Default: {MODEL}")
     p.add_argument("--keep", action="store_true", help="Keep the output folder instead of a temp dir.")
     p.add_argument("--timeout", type=int, default=600, help="Per-request timeout in seconds.")
     return p.parse_args()
@@ -65,6 +73,22 @@ def _resolve_key() -> str:
     except UnicodeEncodeError:
         _fail("the key contains non-ASCII characters - it is not a real API key")
     return key
+
+
+def _list_allowed_models(key: str) -> list[str]:
+    """Ask the provider which models this token may call. Best effort only."""
+    try:
+        import requests
+        url = API_URL.split("/chat/completions")[0].rstrip("/") + "/models"
+        resp = requests.get(url, headers={"Authorization": f"Bearer {key}"}, timeout=30)
+        resp.raise_for_status()
+        return sorted(
+            str(item.get("id", "")).strip()
+            for item in (resp.json().get("data") or [])
+            if str(item.get("id", "")).strip()
+        )
+    except Exception:
+        return []
 
 
 def _newest_cached_transcript() -> tuple[str, dict]:
@@ -111,6 +135,7 @@ def main() -> int:
 
     # Force A6API for this process only. The real settings file is untouched.
     base = config.load_settings()
+    model = args.model.strip() or MODEL
 
     def patched_settings() -> dict:
         s = dict(base)
@@ -120,7 +145,7 @@ def main() -> int:
             "a6api": {
                 "name": "A6API",
                 "api_key": key,
-                "model": MODEL,
+                "model": model,
                 "api_url": API_URL,
                 "reasoning_effort": REASONING_EFFORT,
                 "max_tokens": MAX_TOKENS,
@@ -128,7 +153,7 @@ def main() -> int:
         }
         s["rewrite_api_key"] = key
         s["rewrite_api_url"] = API_URL
-        s["rewrite_model"] = MODEL
+        s["rewrite_model"] = model
         s["rewrite_chunks"] = max(1, min(10, args.chunks))
         s["rewrite_script_enabled"] = True
         s["rewrite_metadata_enabled"] = True
@@ -150,7 +175,7 @@ def main() -> int:
     print("=" * 72)
     print(f"Provider          : A6API (forced; Settings not modified)")
     print(f"URL               : {API_URL}")
-    print(f"Model             : {MODEL}   reasoning_effort={REASONING_EFFORT or '(none)'}")
+    print(f"Model             : {model}   reasoning_effort={REASONING_EFFORT or '(none)'}")
     print(f"Key               : {key[:6]}...{key[-4:]}  ({len(key)} chars)")
     print(f"Language          : {language} -> {language_name}")
     print(f"Chunks            : {_rewrite_chunk_count()}")
@@ -169,7 +194,20 @@ def main() -> int:
             step_label="ping",
         )
     except Exception as exc:
-        _fail(f"the API did not answer: {exc}")
+        detail = str(exc)
+        if "model_not_allowed" in detail or "无权访问该模型" in detail:
+            print(f"\n      The token has no access to model {model!r}.")
+            allowed = _list_allowed_models(key)
+            if allowed:
+                print(f"      Models this token may call ({len(allowed)}):")
+                for name in allowed:
+                    print(f"        {name}")
+                print(f"\n      Rerun with one of them, e.g.:")
+                print(f"        python test_rewrite_a6api.py --model {allowed[0]}")
+            else:
+                print("      Could not list allowed models; check the token permissions on a6api.com.")
+            _fail(f"model {model!r} is not enabled for this token")
+        _fail(f"the API did not answer: {detail}")
     reply = (text or "").strip()
     print(f"      answered in {time.time()-t0:.1f}s, finish={finish}, reply={reply[:60]!r}")
     if not reply:
