@@ -70,6 +70,35 @@ def _index_path_for(niche: str) -> str:
     return os.path.join(config.PROJECTS_DIR, "..", "movies", niche, "index.json")
 
 
+def _wait_for_path(path: str, timeout: float = 900.0) -> int:
+    """Block until ``path`` is reachable again, returning its size.
+
+    When Drive self-aborts it does not restart itself, so the drive letter can
+    be missing for as long as it takes a watchdog or a person to bring it back.
+    Waiting beats failing the language and burning a retry attempt.
+    """
+    deadline = time.time() + timeout
+    warned = False
+    while True:
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            if time.time() >= deadline:
+                raise OSError(
+                    f"{path} did not come back within {timeout / 60:.0f} min. "
+                    f"Google Drive is probably down: restart it and rerun."
+                )
+            if not warned:
+                print(
+                    f"[war_pipeline] {path} is unreachable - Google Drive may have "
+                    f"crashed. Waiting for the mount to return "
+                    f"(up to {timeout / 60:.0f} min)...",
+                    flush=True,
+                )
+                warned = True
+            time.sleep(5.0)
+
+
 def _read_file_resumable(
     path: str,
     block: int = 256 * 1024,
@@ -82,8 +111,12 @@ def _read_file_resumable(
     bytes already read are fine, so reopen, seek back to where it stopped and
     carry on instead of restarting. Each failure also nudges Drive into
     fetching the next part, so a stubborn file completes over several passes.
+
+    Drive can also die outright: its own log says "not restarting and exiting",
+    the mount is torn down and the path stops existing. Wait for the letter to
+    come back (watchdog or a human restarting Drive) rather than failing.
     """
-    size = os.path.getsize(path)
+    size = _wait_for_path(path)
     buf = bytearray()
     stalls = 0
     last_error = None
@@ -109,6 +142,8 @@ def _read_file_resumable(
                 f"(pass {attempt}/{attempts})",
                 flush=True,
             )
+            # The mount may be gone entirely, not just refusing this read.
+            _wait_for_path(path)
 
         # A pass that moved nothing means Drive is not feeding us at all.
         # Give it a few chances, then stop rather than spin for minutes.
@@ -116,7 +151,7 @@ def _read_file_resumable(
             stalls = 0
         else:
             stalls += 1
-            if stalls >= 4:
+            if stalls >= 8:
                 raise OSError(
                     f"Could not read {path}: stuck at {len(buf):,} of {size:,} bytes, "
                     f"no progress in {stalls} passes. Last error: {last_error!r}"
