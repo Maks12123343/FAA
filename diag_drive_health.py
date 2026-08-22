@@ -86,20 +86,19 @@ def main():
     print(f"  size              : {_human(size)}")
 
     # 4. Is it materialised locally, or will Drive have to download it?
-    print("\nReading it in 1 MB blocks (this is what the pipeline does now)...")
+    print("\nReading it the way the pipeline does (resumable, 256 KB blocks)...")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from backend.war_pipeline import _read_file_resumable
+
     t0 = time.time()
-    read = 0
     try:
-        with open(index_path, "rb") as fh:
-            while True:
-                chunk = fh.read(1024 * 1024)
-                if not chunk:
-                    break
-                read += len(chunk)
+        data = _read_file_resumable(index_path)
+        read = len(data)
     except OSError as exc:
-        print(f"  FAILED at {_human(read)}: {exc!r}")
-        print("\n  The mount dropped mid-read. This is the bug you keep hitting.")
-        print("  Fix: keep a local copy of the index (see the command below).")
+        print(f"  FAILED: {exc}")
+        print("\n  Drive would not hand over the whole file even with resuming.")
+        print("  Restart Google Drive, then rerun. If it keeps failing, copy the")
+        print("  index over from the other PC instead.")
         return 1
     elapsed = time.time() - t0
     speed = read / max(elapsed, 0.01) / 1e6

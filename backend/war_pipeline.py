@@ -70,42 +70,68 @@ def _index_path_for(niche: str) -> str:
     return os.path.join(config.PROJECTS_DIR, "..", "movies", niche, "index.json")
 
 
-def _read_json_streamed(path: str, retries: int = 4) -> dict:
-    """Read a large JSON file in blocks.
+def _read_file_resumable(
+    path: str,
+    block: int = 256 * 1024,
+    attempts: int = 40,
+) -> bytes:
+    """Read a file whole, resuming from the last good offset after an I/O error.
 
-    Google Drive File Stream fails a single huge read of a file it has not
-    materialised yet with ``OSError: [Errno 22] Invalid argument``. Reading in
-    1 MB blocks makes Drive stream the file instead, and a short retry covers
-    the case where the mount is still coming back up.
+    Google Drive File Stream aborts reads of a file it has not materialised with
+    ``OSError: [Errno 22] Invalid argument``, often only a couple of MB in. The
+    bytes already read are fine, so reopen, seek back to where it stopped and
+    carry on instead of restarting. Each failure also nudges Drive into
+    fetching the next part, so a stubborn file completes over several passes.
     """
-    block = 1024 * 1024
+    size = os.path.getsize(path)
+    buf = bytearray()
+    stalls = 0
     last_error = None
-    for attempt in range(1, max(1, retries) + 1):
+    for attempt in range(1, max(1, attempts) + 1):
+        before = len(buf)
         try:
-            parts = []
             with open(path, "rb") as fh:
+                if buf:
+                    fh.seek(before)
                 while True:
                     chunk = fh.read(block)
                     if not chunk:
                         break
-                    parts.append(chunk)
-            return json.loads(b"".join(parts).decode("utf-8"))
+                    buf.extend(chunk)
+            if len(buf) >= size:
+                return bytes(buf)
         except OSError as exc:
             last_error = exc
-            if attempt >= retries:
-                break
-            wait = 3 * attempt
+            done_pct = len(buf) / size * 100 if size else 0
             print(
-                f"[war_pipeline] read failed ({exc.__class__.__name__}: {exc}); "
-                f"retry {attempt}/{retries - 1} in {wait}s. If this is Google Drive, "
-                f"make sure the mount is online.",
+                f"[war_pipeline] read interrupted at {len(buf):,}/{size:,} bytes "
+                f"({done_pct:.0f}%): {exc.__class__.__name__}: {exc}; resuming "
+                f"(pass {attempt}/{attempts})",
                 flush=True,
             )
-            time.sleep(wait)
+
+        # A pass that moved nothing means Drive is not feeding us at all.
+        # Give it a few chances, then stop rather than spin for minutes.
+        if len(buf) > before:
+            stalls = 0
+        else:
+            stalls += 1
+            if stalls >= 4:
+                raise OSError(
+                    f"Could not read {path}: stuck at {len(buf):,} of {size:,} bytes, "
+                    f"no progress in {stalls} passes. Last error: {last_error!r}"
+                )
+        time.sleep(min(1.0 + 0.5 * attempt, 8.0))
+
     raise OSError(
-        f"Could not read {path} after {retries} attempts. "
-        f"Last error: {last_error!r}"
+        f"Could not read {path}: gave up at {len(buf):,} of {size:,} bytes "
+        f"after {attempts} passes. Last error: {last_error!r}"
     )
+
+
+def _read_json_streamed(path: str, retries: int = 4) -> dict:
+    """Read a large JSON file, tolerating Google Drive dropping mid-read."""
+    return json.loads(_read_file_resumable(path).decode("utf-8"))
 
 
 def _local_index_mirror(index_path: str, niche: str) -> str:
@@ -149,12 +175,8 @@ def _local_index_mirror(index_path: str, niche: str) -> str:
             flush=True,
         )
         t0 = time.time()
-        with open(index_path, "rb") as src, open(tmp, "wb") as dst:
-            while True:
-                chunk = src.read(1024 * 1024)
-                if not chunk:
-                    break
-                dst.write(chunk)
+        with open(tmp, "wb") as dst:
+            dst.write(_read_file_resumable(index_path))
         if os.path.getsize(tmp) != drive_size:
             os.remove(tmp)
             print("[war_pipeline] Mirror size mismatch, using Drive directly.", flush=True)
