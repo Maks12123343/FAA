@@ -108,6 +108,60 @@ def _read_json_streamed(path: str, retries: int = 4) -> dict:
     )
 
 
+def _local_index_mirror(index_path: str, niche: str) -> str:
+    """Return a path to the index on local disk, copying it off Drive once.
+
+    Reading the ~156 MB index straight from Google Drive File Stream makes the
+    mount crash and disappear mid-read, which takes the whole batch down. A
+    local mirror means Drive is touched once (sequential copy, which it handles)
+    and every later run reads from a normal disk. Falls back to the original
+    path if the copy cannot be made.
+    """
+    if os.environ.get("FAA_INDEX_MIRROR", "").strip().lower() in {"0", "false", "no", "off"}:
+        return index_path
+    try:
+        drive_size = os.path.getsize(index_path)
+    except OSError:
+        return index_path
+    # A local index does not need mirroring.
+    if drive_size < 32 * 1024 * 1024:
+        return index_path
+
+    mirror_dir = os.path.join(os.path.expanduser("~"), ".faa_index_cache", niche)
+    mirror = os.path.join(mirror_dir, "index.json")
+    try:
+        if os.path.exists(mirror) and os.path.getsize(mirror) == drive_size:
+            return mirror
+    except OSError:
+        pass
+
+    try:
+        os.makedirs(mirror_dir, exist_ok=True)
+        tmp = mirror + f".part{os.getpid()}"
+        print(
+            f"[war_pipeline] Mirroring index locally ({drive_size / 1e6:.0f} MB) "
+            f"-> {mirror}",
+            flush=True,
+        )
+        t0 = time.time()
+        with open(index_path, "rb") as src, open(tmp, "wb") as dst:
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+        if os.path.getsize(tmp) != drive_size:
+            os.remove(tmp)
+            print("[war_pipeline] Mirror size mismatch, using Drive directly.", flush=True)
+            return index_path
+        os.replace(tmp, mirror)
+        print(f"[war_pipeline] Mirrored in {time.time() - t0:.1f}s", flush=True)
+        return mirror
+    except OSError as exc:
+        print(f"[war_pipeline] Could not mirror index ({exc}); using Drive directly.", flush=True)
+        return index_path
+
+
 def _load_library_index(niche: str) -> list:
     """
     Читає index.json для ніші, повертає список clips з ембеддингами.
@@ -147,13 +201,16 @@ def _load_library_index(niche: str) -> list:
     if not index_path:
         raise RuntimeError(f"Index not found for niche '{niche}'. Tried: {candidates}")
 
-    print(f"[war_pipeline] Loading index from {index_path}...", flush=True)
+    # Resolve clip paths against the Drive layout even when the JSON itself is
+    # read from the local mirror below.
+    movie_root = os.path.dirname(os.path.dirname(index_path))
+
+    read_path = _local_index_mirror(index_path, niche)
+    print(f"[war_pipeline] Loading index from {read_path}...", flush=True)
     t0 = time.time()
-    data = _read_json_streamed(index_path)
+    data = _read_json_streamed(read_path)
     clips = data.get("clips", [])
     print(f"[war_pipeline] Loaded {len(clips)} clips in {time.time()-t0:.1f}s", flush=True)
-
-    movie_root = os.path.dirname(os.path.dirname(index_path))
     # The war index stores Linux paths such as
     # /workspace/gdrive/library/russia_ukraine_war/....  On the shared drive
     # the index is under .../gdrive/movies, while the actual clips are under
